@@ -18,23 +18,35 @@ Singleton {
     property real swapTotal: 1
 	property real swapFree: 0
 	property real swapUsed: swapTotal - swapFree
-    property real swapUsedPercentage: swapTotal > 0 ? (swapUsed / swapTotal) : 0
-    property real cpuUsage: 0
-    property var previousCpuStats
+	property real swapUsedPercentage: swapTotal > 0 ? (swapUsed / swapTotal) : 0
+	property real vramTotal: 1
+	property real vramUsed: 0
+	property real vramUsedPercentage: vramUsed / vramTotal
+	property real gttTotal: 1
+	property real gttUsed: 0
+	property real gttUsedPercentage: gttUsed / gttTotal
+	property real cpuUsage: 0
+	property var previousCpuStats
 
-    property string maxAvailableMemoryString: kbToGbString(ResourceUsage.memoryTotal)
-    property string maxAvailableSwapString: kbToGbString(ResourceUsage.swapTotal)
-    property string maxAvailableCpuString: "--"
+	property string maxAvailableMemoryString: kbToGbString(memoryTotal)
+	property string maxAvailableSwapString: kbToGbString(swapTotal)
+	property string maxAvailableVramString: bytesToGbString(vramTotal)
+	property string maxAvailableGttString: bytesToGbString(gttTotal)
+	property string maxAvailableCpuString: "--"
 
-    readonly property int historyLength: Config?.options.resources.historyLength ?? 60
-    property list<real> cpuUsageHistory: []
-    property list<real> memoryUsageHistory: []
-    property list<real> swapUsageHistory: []
 
-    function kbToGbString(kb) {
-        return (kb / (1024 * 1024)).toFixed(1) + " GB";
-    }
+	readonly property int historyLength: Config?.options.resources.historyLength ?? 60
+	property list<real> cpuUsageHistory: []
+	property list<real> memoryUsageHistory: []
+	property list<real> swapUsageHistory: []
 
+	function kbToGbString(kb) {
+	    return (kb / (1024 * 1024)).toFixed(1) + " GB";
+	}
+
+	function bytesToGbString(bytes) {
+	    return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+	}
     function updateMemoryUsageHistory() {
         memoryUsageHistory = [...memoryUsageHistory, memoryUsedPercentage]
         if (memoryUsageHistory.length > historyLength) {
@@ -67,6 +79,7 @@ Singleton {
             // Reload files
             fileMeminfo.reload()
             fileStat.reload()
+            gpuStatsProc.running = true
 
             // Parse memory and swap usage
             const textMeminfo = fileMeminfo.text()
@@ -75,7 +88,6 @@ Singleton {
             swapTotal = Number(textMeminfo.match(/SwapTotal: *(\d+)/)?.[1] ?? 1)
             swapFree = Number(textMeminfo.match(/SwapFree: *(\d+)/)?.[1] ?? 0)
 
-            // Parse CPU usage
             const textStat = fileStat.text()
             const cpuLine = textStat.match(/^cpu\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/)
             if (cpuLine) {
@@ -99,6 +111,22 @@ Singleton {
 
 	FileView { id: fileMeminfo; path: "/proc/meminfo" }
     FileView { id: fileStat; path: "/proc/stat" }
+
+    Process {
+        id: gpuStatsProc
+        command: ["bash", "-c", "cat /sys/class/drm/card1/device/mem_info_{vram_total,vram_used,gtt_total,gtt_used}"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const lines = text.split("\n").filter(l => l.length > 0)
+                if (lines.length >= 4) {
+                    root.vramTotal = Number(lines[0])
+                    root.vramUsed = Number(lines[1])
+                    root.gttTotal = Number(lines[2])
+                    root.gttUsed = Number(lines[3])
+                }
+            }
+        }
+    }
 
     Process {
         id: findCpuMaxFreqProc
