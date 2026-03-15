@@ -5,9 +5,9 @@ import qs.services
 
 QuickToggleModel {
     id: root
-    name: Translation.tr("Game mode")
+    name: Translation.tr("Performance mode")
     toggled: !confOpt.value
-    icon: "gamepad"
+    icon: "speed"
 
     mainAction: () => {
         root.toggled = !root.toggled;
@@ -41,5 +41,5 @@ QuickToggleModel {
         key: "animations:enabled"
     }
 
-    tooltipText: Translation.tr("Game mode")
+    tooltipText: Translation.tr("Performance mode")
 }
