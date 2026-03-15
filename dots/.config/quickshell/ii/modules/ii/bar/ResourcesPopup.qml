@@ -12,6 +12,11 @@ StyledPopup {
         return (kb / (1024 * 1024)).toFixed(1) + " GB";
     }
 
+    // Helper function to format Bytes to GB
+    function formatBytes(bytes) {
+        return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
+    }
+
     Row {
         anchors.centerIn: parent
         spacing: 12
@@ -69,6 +74,34 @@ StyledPopup {
                     icon: "empty_dashboard"
                     label: Translation.tr("Total:")
                     value: root.formatKB(ResourceUsage.swapTotal)
+                }
+            }
+        }
+
+        Column {
+            anchors.top: parent.top
+            spacing: 8
+
+            StyledPopupHeaderRow {
+                icon: "monitoring"
+                label: "GPU"
+            }
+            Column {
+                spacing: 4
+                StyledPopupValueRow {
+                    icon: "video_settings"
+                    label: Translation.tr("VRAM:")
+                    value: root.formatBytes(ResourceUsage.vramUsed)
+                }
+                StyledPopupValueRow {
+                    icon: "cloud_upload"
+                    label: Translation.tr("GTT:")
+                    value: root.formatBytes(ResourceUsage.gttUsed)
+                }
+                StyledPopupValueRow {
+                    icon: "empty_dashboard"
+                    label: Translation.tr("Total:")
+                    value: root.formatBytes(ResourceUsage.vramTotal)
                 }
             }
         }

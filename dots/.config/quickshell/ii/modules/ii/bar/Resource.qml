@@ -17,7 +17,7 @@ Item {
 
     RowLayout {
         id: resourceRowLayout
-        spacing: 2
+        spacing: 1
         x: shown ? 0 : -resourceRowLayout.width
         anchors {
             verticalCenter: parent.verticalCenter
@@ -28,7 +28,7 @@ Item {
             Layout.alignment: Qt.AlignVCenter
             lineWidth: Appearance.rounding.unsharpen
             value: percentage
-            implicitSize: 20
+            implicitSize: 18
             colPrimary: root.warning ? Appearance.colors.colError : Appearance.colors.colOnSecondaryContainer
             accountForLightBleeding: !root.warning
             enableAnimation: false

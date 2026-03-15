@@ -20,8 +20,16 @@ MouseArea {
         anchors.rightMargin: 4
 
         Resource {
+            iconName: "leaderboard"
+            percentage: ResourceUsage.vramUsedPercentage
+            shown: true
+            warningThreshold: 90
+        }
+
+        Resource {
             iconName: "memory"
             percentage: ResourceUsage.memoryUsedPercentage
+            Layout.leftMargin: 6
             warningThreshold: Config.options.bar.resources.memoryWarningThreshold
         }
 
