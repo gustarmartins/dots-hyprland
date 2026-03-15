@@ -1,10 +1,25 @@
+[ContentDisplay]
+DirectorySizeMode=ContentSize
+RecursiveDirectorySizeLimit=15
+
+[Desktop Entry]
+DefaultProfile=zsh.profile
+
 [DetailsMode]
+IconSize=22
+LeftPadding=0
 PreviewSize=32
+RightPadding=0
+
+[ExtractDialog]
+2 screens: Window-Maximized=true
+DirHistory[$e]=$HOME/Downloads/
 
 [General]
-GlobalViewProps=false
 ShowFullPath=true
+ShowFullPathInTitlebar=true
 ShowStatusBar=FullWidth
+ShowZoomSlider=true
 Version=202
 
 [KFileDialog Settings]
@@ -14,5 +29,8 @@ Places Icons Static Size=22
 [MainWindow]
 MenuBar=Disabled
 
+[Notification Messages]
+ConfirmRenameFileType=false
+
 [PreviewSettings]
-Plugins=ffmpegthumbnailer,appimagethumbnail,audiothumbnail,avif,blenderthumbnail,comicbookthumbnail,cursorthumbnail,djvuthumbnail,ebookthumbnail,exrthumbnail,directorythumbnail,fontthumbnail,heif,imagethumbnail,jpegthumbnail,jxl,kraorathumbnail,windowsexethumbnail,windowsimagethumbnail,mobithumbnail,opendocumentthumbnail,gsthumbnail,rawthumbnail,librsvg,svgthumbnail,ffmpegthumbs,gdk-pixbuf-thumbnailer,gsf-office
+Plugins=appimagethumbnail,audiothumbnail,blenderthumbnail,comicbookthumbnail,cursorthumbnail,djvuthumbnail,ebookthumbnail,exrthumbnail,directorythumbnail,fontthumbnail,imagethumbnail,jpegthumbnail,kraorathumbnail,windowsexethumbnail,windowsimagethumbnail,mobithumbnail,opendocumentthumbnail,gsthumbnail,rawthumbnail,svgthumbnail,ffmpegthumbs
