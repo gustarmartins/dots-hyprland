@@ -72,7 +72,28 @@ DelegateChooser {
         roleValue: "gameMode"
         ActionCenterToggleButton {
             toggleModel: GameModeToggle {}
-            icon: "games"
+            icon: "fire"
+        }
+    }
+    DelegateChoice {
+        roleValue: "tearing"
+        ActionCenterToggleButton {
+            toggleModel: TearingToggle {}
+            icon: "flash-on"
+        }
+    }
+    DelegateChoice {
+        roleValue: "directScanout"
+        ActionCenterToggleButton {
+            toggleModel: DirectScanoutToggle {}
+            icon: "desktop"
+        }
+    }
+    DelegateChoice {
+        roleValue: "tripleBuffer"
+        ActionCenterToggleButton {
+            toggleModel: TripleBufferToggle {}
+            icon: "settings-cog-multiple"
         }
     }
     DelegateChoice {
