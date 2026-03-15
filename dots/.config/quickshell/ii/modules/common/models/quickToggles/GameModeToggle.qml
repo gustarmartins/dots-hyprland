@@ -9,16 +9,16 @@ import qs.modules.common.widgets
 
 QuickToggleModel {
     id: root
-    name: Translation.tr("Game mode")
+    name: Translation.tr("Performance mode")
     toggled: toggled
-    icon: "gamepad"
+    icon: "speed"
 
     mainAction: () => {
         root.toggled = !root.toggled
         if (root.toggled) {
-            Quickshell.execDetached(["bash", "-c", `hyprctl --batch "keyword animations:enabled 0; keyword decoration:shadow:enabled 0; keyword decoration:blur:enabled 0; keyword general:gaps_in 0; keyword general:gaps_out 0; keyword general:border_size 1; keyword decoration:rounding 0; keyword general:allow_tearing 1"`])
+            Quickshell.execDetached(["bash", "-c", `hyprctl --batch "keyword animations:enabled 0; keyword decoration:shadow:enabled 0; keyword decoration:blur:enabled 0; keyword general:gaps_in 0; keyword general:gaps_out 0; keyword general:border_size 1; keyword decoration:rounding 0"`])
         } else {
-            Quickshell.execDetached(["hyprctl", "reload"])
+            Quickshell.execDetached(["bash", "-c", `hyprctl --batch "keyword animations:enabled 1; keyword decoration:shadow:enabled 1; keyword decoration:blur:enabled 1; keyword general:gaps_in 4; keyword general:gaps_out 5; keyword general:border_size 1; keyword decoration:rounding 18"`])
         }
     }
     Process {
@@ -26,8 +26,8 @@ QuickToggleModel {
         running: true
         command: ["bash", "-c", `test "$(hyprctl getoption animations:enabled -j | jq ".int")" -ne 0`]
         onExited: (exitCode, exitStatus) => {
-            root.toggled = exitCode !== 0 // Inverted because enabled = nonzero exit
+            root.toggled = exitCode !== 0
         }
     }
-    tooltipText: Translation.tr("Game mode")
+    tooltipText: Translation.tr("Performance mode")
 }
