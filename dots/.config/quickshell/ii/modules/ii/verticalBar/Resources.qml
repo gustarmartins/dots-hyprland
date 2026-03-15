@@ -13,8 +13,16 @@ MouseArea {
 
     ColumnLayout {
         id: columnLayout
-        spacing: 10
+        spacing: 12
         anchors.fill: parent
+        Layout.fillHeight: true
+
+        Resource {
+            Layout.alignment: Qt.AlignHCenter
+            iconName: "leaderboard"
+            percentage: ResourceUsage.vramUsedPercentage
+            warningThreshold: 90
+        }
 
         Resource {
             Layout.alignment: Qt.AlignHCenter
