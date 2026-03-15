@@ -2,6 +2,8 @@ import QtQuick
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Bluetooth
+import Quickshell.Wayland
+import Quickshell.Hyprland
 import Quickshell.Services.UPower
 import qs
 import qs.services
@@ -15,6 +17,18 @@ Item { // Bar content region
 
     property var screen: root.QsWindow.window?.screen
     property var brightnessMonitor: Brightness.getMonitorForScreen(screen)
+
+    // Active window tracking
+    readonly property HyprlandMonitor monitor: Hyprland.monitorFor(root.QsWindow.window?.screen)
+    readonly property Toplevel activeWindow: ToplevelManager.activeToplevel
+    property bool focusingThisMonitor: HyprlandData.activeWorkspace?.monitor == monitor?.name
+    property var biggestWindow: HyprlandData.biggestWindowForWorkspace(HyprlandData.monitors[root.monitor?.id]?.activeWorkspace.id)
+    property string activeWindowTitle: root.focusingThisMonitor && root.activeWindow?.activated && root.biggestWindow ?
+        root.activeWindow?.title :
+        (root.biggestWindow?.title) ?? `${Translation.tr("Workspace")} ${monitor?.activeWorkspace?.id ?? 1}`
+    property string activeWindowApp: root.focusingThisMonitor && root.activeWindow?.activated && root.biggestWindow ?
+        root.activeWindow?.appId :
+        (root.biggestWindow?.class) ?? Translation.tr("Desktop")
 
     component HorizontalBarSeparator: Rectangle {
         Layout.leftMargin: Appearance.sizes.baseBarHeight / 3
@@ -51,7 +65,6 @@ Item { // Bar content region
         anchors.top: parent.top
         implicitHeight: topSectionColumnLayout.implicitHeight
         implicitWidth: Appearance.sizes.baseVerticalBarWidth
-        height: (root.height - middleSection.height) / 2
         width: Appearance.sizes.verticalBarWidth
 
         onScrollDown: root.brightnessMonitor.setBrightness(root.brightnessMonitor.brightness - 0.05)
@@ -65,7 +78,7 @@ Item { // Bar content region
         ColumnLayout { // Content
             id: topSectionColumnLayout
             anchors.fill: parent
-            spacing: 10
+            spacing: 4
 
             Bar.LeftSidebarButton { // Left sidebar button
                 Layout.alignment: Qt.AlignHCenter
@@ -73,16 +86,62 @@ Item { // Bar content region
                 colBackground: barTopSectionMouseArea.hovered ? Appearance.colors.colLayer1Hover : ColorUtils.transparentize(Appearance.colors.colLayer1Hover, 1)
             }
 
+            // Active window indicator
             Item {
-                Layout.fillHeight: true
+                id: activeWindowIndicator
+                Layout.alignment: Qt.AlignHCenter
+                implicitWidth: 26
+                implicitHeight: 26
+                property bool hovered: activeWindowMouseArea.containsMouse
+
+                Rectangle {
+                    anchors.fill: parent
+                    radius: Appearance.rounding.full
+                    color: activeWindowIndicator.hovered ? Appearance.colors.colLayer1Hover : "transparent"
+
+                    Behavior on color {
+                        animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
+                    }
+
+                    MaterialSymbol {
+                        anchors.centerIn: parent
+                        text: "web_asset"
+                        iconSize: Appearance.font.pixelSize.normal
+                        color: Appearance.colors.colOnLayer0
+                    }
+                }
+
+                MouseArea {
+                    id: activeWindowMouseArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.NoButton
+                }
+
+                PopupToolTip {
+                    text: `${root.activeWindowApp}\n${root.activeWindowTitle}`
+                    extraVisibleCondition: activeWindowIndicator.hovered
+                    anchorEdges: Edges.Right
+                    anchorGravity: Edges.Right
+                }
             }
-            
         }
     }
 
+    Item { // Middle section container - constrain between top and bottom
+        id: middleSectionContainer
+        anchors {
+            horizontalCenter: parent.horizontalCenter
+            top: barTopSectionMouseArea.bottom
+            bottom: barBottomSectionMouseArea.top
+        }
+        width: parent.width
+        clip: true
+
     Column { // Middle section
         id: middleSection
-        anchors.centerIn: parent
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: Math.max(0, (parent.height - height) / 2)
         spacing: 4
 
         Bar.BarGroup {
@@ -90,7 +149,7 @@ Item { // Bar content region
             padding: 8
             Resources {
                 Layout.fillWidth: true
-                Layout.fillHeight: false
+                Layout.fillHeight: true
             }
             
             HorizontalBarSeparator {}
@@ -158,7 +217,8 @@ Item { // Bar content region
             }
             
         }
-    }
+    } // end Column middleSection
+    } // end Item middleSectionContainer
 
     FocusedScrollMouseArea { // Bottom section | scroll to change volume
         id: barBottomSectionMouseArea
