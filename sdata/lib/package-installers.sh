@@ -74,9 +74,9 @@ install-python-packages(){
   try uv venv --prompt .venv $(eval echo $ILLOGICAL_IMPULSE_VIRTUAL_ENV) -p 3.12
   x source $(eval echo $ILLOGICAL_IMPULSE_VIRTUAL_ENV)/bin/activate
   if [[ "$INSTALL_VIA_NIX" = true ]]; then
-    x nix-shell ${REPO_ROOT}/sdata/uv/shell.nix --run "uv pip install -r ${REPO_ROOT}/sdata/uv/requirements.txt"
+    x nix-shell "${REPO_ROOT}/sdata/uv/shell.nix" --run "uv pip install -r '${REPO_ROOT}/sdata/uv/requirements.txt'"
   else
-    x uv pip install -r ${REPO_ROOT}/sdata/uv/requirements.txt
+    x uv pip install -r "${REPO_ROOT}/sdata/uv/requirements.txt"
   fi
   x deactivate
 }

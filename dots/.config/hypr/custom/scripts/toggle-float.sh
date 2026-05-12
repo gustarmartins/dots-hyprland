@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
+#
+# Master Float Toggle
+# Super+F11: Toggle floating ALL new windows automatically
+#
+# Works independently of Geometry Restore (Super+F10).
+# Starts the IPC daemon when needed, stops it when no features are active.
+#
+# When ON:  all new windows float at 1200×800 centered (unless exempt)
+# When OFF: unfloats all windows on current workspace
 
 STATE_FILE="/tmp/hypr_master_float_state"
+GEO_RESTORE_FILE="$HOME/.config/hypr/custom/.geo_restore_enabled"
+GEO_DAEMON_SCRIPT="$HOME/.config/hypr/custom/scripts/geo-daemon.sh"
 
 if [ -f "$STATE_FILE" ]; then
-    rm "$STATE_FILE"
-    # Disable both master float rules
-    hyprctl --batch "keyword windowrule[master_float]:enable false ; keyword windowrule[master_float_size]:enable false"
+    # --- TURN OFF ---
+    rm -f "$STATE_FILE"
 
-    # Unfloat all windows that were forced to float on the active workspace
+    # Unfloat all windows on the active workspace
     ACTIVE_WS=$(hyprctl activeworkspace -j | jq -r '.id')
     hyprctl clients -j | jq -r \
         --argjson ws "$ACTIVE_WS" \
@@ -16,11 +26,20 @@ if [ -f "$STATE_FILE" ]; then
         hyprctl dispatch settiled "address:$addr"
     done
 
-    notify-send "Hyprland" "Master Float: OFF (Normal Mode)"
+    # Stop the daemon if geometry restore is also off
+    bash "$GEO_DAEMON_SCRIPT" --stop
+    # Re-start only if geometry restore still needs it
+    if [ -f "$GEO_RESTORE_FILE" ]; then
+        bash "$GEO_DAEMON_SCRIPT" --ensure
+    fi
+
+    notify-send "Hyprland" "Master Float: OFF"
 else
+    # --- TURN ON ---
     touch "$STATE_FILE"
-    # Enable both master float rules
-    hyprctl --batch "keyword windowrule[master_float]:enable true ; keyword windowrule[master_float_size]:enable true"
+
+    # Ensure the IPC daemon is running
+    bash "$GEO_DAEMON_SCRIPT" --ensure
 
     # Float all existing windows on the active workspace
     ACTIVE_WS=$(hyprctl activeworkspace -j | jq -r '.id')
@@ -31,5 +50,5 @@ else
         hyprctl dispatch setfloating "address:$addr"
     done
 
-    notify-send "Hyprland" "Master Float: ON (All new windows float)"
+    notify-send "Hyprland" "Master Float: ON"
 fi

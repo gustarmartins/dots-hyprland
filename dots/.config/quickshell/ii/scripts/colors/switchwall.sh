@@ -240,7 +240,7 @@ switch() {
             set_thumbnail_path "$thumbnail"
 
             if [ -f "$thumbnail" ]; then
-                matugen_args=(image "$thumbnail")
+                matugen_args=(image "$thumbnail" "--source-color-index" "0")
                 generate_colors_material_args=(--path "$thumbnail")
                 create_restore_script "$video_path"
             else
@@ -249,7 +249,7 @@ switch() {
                 exit 1
             fi
         else
-            matugen_args=(image "$imgpath")
+            matugen_args=(image "$imgpath" "--source-color-index" "0")
             generate_colors_material_args=(--path "$imgpath")
             # Update wallpaper path in config
             set_wallpaper_path "$imgpath"

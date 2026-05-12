@@ -101,18 +101,23 @@ Singleton {
         }
     }
 
+    readonly property string stateFile: "/tmp/hyprsunset_active"
+
     function enableTemperature() {
         root.temperatureActive = true;
-
         // console.log("[Hyprsunset] Enabling");
         root.startHyprsunset();
         Quickshell.execDetached(["bash", "-c", `hyprctl hyprsunset temperature ${root.colorTemperature}`]);
+        // Persist state so we know the filter is active on next QS restart
+        Quickshell.execDetached(["bash", "-c", `echo 1 > ${root.stateFile}`]);
     }
 
     function disableTemperature() {
         root.temperatureActive = false;
         // console.log("[Hyprsunset] Disabling");
         Quickshell.execDetached(["hyprctl", "hyprsunset", "identity"]);
+        // Persist state so we know the filter is inactive on next QS restart
+        Quickshell.execDetached(["bash", "-c", `echo 0 > ${root.stateFile}`]);
     }
 
     function setGamma(gamma) {
@@ -131,16 +136,13 @@ Singleton {
     Process {
         id: fetchProc
         running: true
-        command: ["bash", "-c", "hyprctl hyprsunset temperature"]
+        command: ["bash", "-c", `cat ${root.stateFile} 2>/dev/null || echo 0`]
         stdout: StdioCollector {
             id: stateCollector
             onStreamFinished: {
                 const output = stateCollector.text.trim();
-                if (output.length == 0 || output.startsWith("Couldn't"))
-                    root.temperatureActive = false;
-                else
-                    root.temperatureActive = (output != "6500"); // 6500 is the default when off
-                // console.log("[Hyprsunset] Fetched state:", output, "->", root.temperatureActive);
+                root.temperatureActive = (output === "1");
+                // console.log("[Hyprsunset] Fetched persisted state:", output, "->", root.temperatureActive);
             }
         }
     }
