@@ -21,6 +21,7 @@ Singleton {
     property string to: Config.options?.light?.night?.to ?? "06:30"
     property bool automatic: Config.options?.light?.night?.automatic && (Config?.ready ?? true)
     property int colorTemperature: Config.options?.light?.night?.colorTemperature ?? 5000
+    property int defaultColorTemperature: 6000
     property int gamma: 100
     property bool shouldBeOn
     property bool firstEvaluation: true
@@ -115,9 +116,7 @@ Singleton {
     function disableTemperature() {
         root.temperatureActive = false;
         // console.log("[Hyprsunset] Disabling");
-        Quickshell.execDetached(["hyprctl", "hyprsunset", "identity"]);
-        // Persist state so we know the filter is inactive on next QS restart
-        Quickshell.execDetached(["bash", "-c", `echo 0 > ${root.stateFile}`]);
+        Quickshell.execDetached(["bash", "-c", `hyprctl hyprsunset temperature ${root.defaultColorTemperature}`]);
     }
 
     function setGamma(gamma) {
@@ -141,8 +140,11 @@ Singleton {
             id: stateCollector
             onStreamFinished: {
                 const output = stateCollector.text.trim();
-                root.temperatureActive = (output === "1");
-                // console.log("[Hyprsunset] Fetched persisted state:", output, "->", root.temperatureActive);
+                if (output.length == 0 || output.startsWith("Couldn't"))
+                    root.temperatureActive = false;
+                else
+                    root.temperatureActive = (output != root.defaultColorTemperature); // 6000 is the default when off
+                // console.log("[Hyprsunset] Fetched state:", output, "->", root.temperatureActive);
             }
         }
     }
