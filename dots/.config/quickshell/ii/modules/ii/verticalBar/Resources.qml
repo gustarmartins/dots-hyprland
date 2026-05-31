@@ -45,6 +45,14 @@ MouseArea {
             warningThreshold: Config.options.bar.resources.cpuWarningThreshold
         }
 
+        Resource {
+            // PSI memory pressure (some avg10) — system-stall headline.
+            Layout.alignment: Qt.AlignHCenter
+            iconName: "monitor_heart"
+            percentage: ResourceUsage.memoryPressure
+            warningThreshold: 30
+        }
+
     }
 
     Bar.ResourcesPopup {

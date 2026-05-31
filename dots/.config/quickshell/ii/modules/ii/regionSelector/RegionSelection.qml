@@ -336,6 +336,11 @@ PanelWindow {
             root.mouseButton = mouse.button;
         }
         onReleased: (mouse) => {
+            // [gus patch] Ignore a release with no matching press (a focus grab can swallow
+            // the press but let the release through -> phantom zero-area snip -> instant
+            // dismiss). A real click/drag always sets dragging=true in onPressed.
+            if (!root.dragging) return;
+            root.dragging = false;
             // Detect if it was a click -> Try to select targeted region
             if (root.draggingX === root.dragStartX && root.draggingY === root.dragStartY) {
                 if (root.targetedRegionValid()) {

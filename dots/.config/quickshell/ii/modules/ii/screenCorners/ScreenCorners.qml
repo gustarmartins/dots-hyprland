@@ -21,7 +21,11 @@ Scope {
 
     component CornerPanelWindow: PanelWindow {
         id: cornerPanelWindow
-        property var screen: QsWindow.window?.screen
+        // NOTE: do NOT redeclare `property var screen` here. PanelWindow.screen is a
+        // built-in (C++) property that drives which monitor the layer surface binds
+        // to. Shadowing it with a plain var made `screen: modelData` (set below in the
+        // Variants) write to the shadow only — the real surface stayed on the focused
+        // output, so ALL corners piled onto one monitor and the second got none.
         property var brightnessMonitor: Brightness.getMonitorForScreen(screen)
         property bool fullscreen
         visible: (Config.options.appearance.fakeScreenRounding === 1 || (Config.options.appearance.fakeScreenRounding === 2 && !fullscreen))
@@ -145,10 +149,15 @@ Scope {
             required property var modelData
             property HyprlandMonitor monitor: Hyprland.monitorFor(modelData)
 
-            // Hide when fullscreen
-            property list<HyprlandWorkspace> workspacesForMonitor: Hyprland.workspaces.values.filter(workspace => workspace.monitor && workspace.monitor.name == monitor.name)
-            property var activeWorkspaceWithFullscreen: workspacesForMonitor.filter(workspace => ((workspace.toplevels.values.filter(window => window.wayland?.fullscreen)[0] != undefined) && workspace.active))[0]
-            property bool fullscreen: activeWorkspaceWithFullscreen != undefined
+            // Hide when fullscreen — MONITOR-LOCAL detection.
+            // Do NOT gate on workspace.active: that is GLOBAL focus (only one
+            // workspace is .active across all monitors). A fullscreen app on an
+            // unfocused monitor (e.g. osu!lazer on the AOC while you click on DP-1)
+            // would then be missed, leaving these Overlay-layer corner surfaces up —
+            // which both draws rounded corners over the game AND blocks Hyprland's
+            // direct scanout on that output. Check THIS monitor's own activeWorkspace.
+            property HyprlandWorkspace monitorActiveWorkspace: Hyprland.workspaces.values.find(ws => ws.monitor?.name == monitor?.name && ws.id == monitor?.activeWorkspace?.id) ?? null
+            property bool fullscreen: monitorActiveWorkspace?.toplevels?.values.some(window => window.wayland?.fullscreen) ?? false
 
             CornerPanelWindow {
                 screen: modelData

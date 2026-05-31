@@ -26,6 +26,34 @@ StyledPopup {
             spacing: 8
 
             StyledPopupHeaderRow {
+                icon: "monitoring"
+                label: "GPU"
+            }
+            Column {
+                spacing: 4
+                StyledPopupValueRow {
+                    icon: "video_settings"
+                    label: Translation.tr("VRAM:")
+                    value: root.formatBytes(ResourceUsage.vramUsed)
+                }
+                StyledPopupValueRow {
+                    icon: "cloud_upload"
+                    label: Translation.tr("GTT:")
+                    value: root.formatBytes(ResourceUsage.gttUsed)
+                }
+                StyledPopupValueRow {
+                    icon: "empty_dashboard"
+                    label: Translation.tr("Total:")
+                    value: root.formatBytes(ResourceUsage.vramTotal)
+                }
+            }
+        }
+
+        Column {
+            anchors.top: parent.top
+            spacing: 8
+
+            StyledPopupHeaderRow {
                 icon: "memory"
                 label: "RAM"
             }
@@ -83,34 +111,6 @@ StyledPopup {
             spacing: 8
 
             StyledPopupHeaderRow {
-                icon: "monitoring"
-                label: "GPU"
-            }
-            Column {
-                spacing: 4
-                StyledPopupValueRow {
-                    icon: "video_settings"
-                    label: Translation.tr("VRAM:")
-                    value: root.formatBytes(ResourceUsage.vramUsed)
-                }
-                StyledPopupValueRow {
-                    icon: "cloud_upload"
-                    label: Translation.tr("GTT:")
-                    value: root.formatBytes(ResourceUsage.gttUsed)
-                }
-                StyledPopupValueRow {
-                    icon: "empty_dashboard"
-                    label: Translation.tr("Total:")
-                    value: root.formatBytes(ResourceUsage.vramTotal)
-                }
-            }
-        }
-
-        Column {
-            anchors.top: parent.top
-            spacing: 8
-
-            StyledPopupHeaderRow {
                 icon: "planner_review"
                 label: "CPU"
             }
@@ -120,6 +120,46 @@ StyledPopup {
                     icon: "bolt"
                     label: Translation.tr("Load:")
                     value: `${Math.round(ResourceUsage.cpuUsage * 100)}%`
+                }
+                StyledPopupValueRow {
+                    icon: "speed"
+                    label: Translation.tr("Peak clock:")
+                    value: ResourceUsage.cpuMaxClock >= 1000
+                        ? `${(ResourceUsage.cpuMaxClock / 1000).toFixed(2)} GHz`
+                        : `${Math.round(ResourceUsage.cpuMaxClock)} MHz`
+                }
+            }
+        }
+
+        Column {
+            anchors.top: parent.top
+            spacing: 8
+
+            StyledPopupHeaderRow {
+                icon: "monitor_heart"
+                label: "Pressure"
+            }
+            Column {
+                spacing: 4
+                StyledPopupValueRow {
+                    icon: "memory"
+                    label: Translation.tr("RAM (10s):")
+                    value: `${(ResourceUsage.memoryPressure * 100).toFixed(1)}%`
+                }
+                StyledPopupValueRow {
+                    icon: "history"
+                    label: Translation.tr("RAM (5m):")
+                    value: `${(ResourceUsage.memoryPressure300 * 100).toFixed(1)}%`
+                }
+                StyledPopupValueRow {
+                    icon: "planner_review"
+                    label: Translation.tr("CPU:")
+                    value: `${(ResourceUsage.cpuPressure * 100).toFixed(1)}%`
+                }
+                StyledPopupValueRow {
+                    icon: "storage"
+                    label: Translation.tr("I/O:")
+                    value: `${(ResourceUsage.ioPressure * 100).toFixed(1)}%`
                 }
             }
         }

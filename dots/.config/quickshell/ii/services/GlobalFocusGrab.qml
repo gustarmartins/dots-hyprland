@@ -1,5 +1,6 @@
 pragma Singleton
 pragma ComponentBehavior: Bound
+import qs
 import QtQuick
 import Quickshell
 import Quickshell.Hyprland
@@ -63,7 +64,10 @@ Singleton {
     HyprlandFocusGrab {
         id: grab
         windows: root.dismissable.every(w => !w?.focusable) || root.dismissable.some(w => hasActive(w?.contentItem)) ? [...root.dismissable, ...root.persistent] : [...root.dismissable]
-        active: root.dismissable.length > 0
+        // [gus patch] Suspend the grab while the region selector is open so its first
+        // click isn't swallowed by the grab (which produced a phantom zero-area snip
+        // -> instant dismiss). Sidebars stay visible (captured in the freeze) meanwhile.
+        active: root.dismissable.length > 0 && !GlobalStates.regionSelectorOpen
         onCleared: () => {
             root.dismiss();
         }

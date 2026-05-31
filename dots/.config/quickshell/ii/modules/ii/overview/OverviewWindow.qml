@@ -94,7 +94,12 @@ Item { // Window
         id: windowPreview
         anchors.fill: parent
         captureSource: GlobalStates.overviewOpen ? root.toplevel : null
-        live: true
+        // [gus patch] Don't *live*-capture truly-fullscreen windows (fullscreen >= 2).
+        // A continuous toplevel copy forces composition on that output and kills its
+        // direct scanout (e.g. osu! on the AOC when the overview/search opens on Super).
+        // A one-shot snapshot still shows the workspace and lets scanout resume; other
+        // windows stay live.
+        live: !(root.windowData?.fullscreen >= 2)
 
         // Color overlay for interactions
         Rectangle {

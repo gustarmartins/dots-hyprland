@@ -80,7 +80,7 @@ Item { // Bar content region
         RowLayout {
             id: leftSectionRowLayout
             anchors.fill: parent
-            spacing: 0
+            spacing: 4
 
             LeftSidebarButton { // Left sidebar button
                 id: leftSidebarButton
@@ -90,11 +90,27 @@ Item { // Bar content region
             }
 
             ActiveWindow {
-                Layout.leftMargin: 10 + (leftSidebarButton.visible ? 0 : Appearance.rounding.screenRounding)
-                Layout.rightMargin: Appearance.rounding.screenRounding
+                Layout.leftMargin: 6 + (leftSidebarButton.visible ? 0 : Appearance.rounding.screenRounding)
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 visible: root.useShortenedForm === 0
+            }
+
+            BarGroup {
+                id: leftCenterGroup
+                Layout.alignment: Qt.AlignVCenter
+                Layout.rightMargin: Appearance.rounding.screenRounding
+
+                Resources {
+                    alwaysShowAllResources: root.useShortenedForm === 2
+                    Layout.fillWidth: root.useShortenedForm === 2
+                }
+
+                Media {
+                    visible: root.useShortenedForm < 2
+                    Layout.fillWidth: false
+                    Layout.maximumWidth: 220
+                }
             }
         }
     }
@@ -107,26 +123,6 @@ Item { // Bar content region
             horizontalCenter: parent.horizontalCenter
         }
         spacing: 4
-
-        BarGroup {
-            id: leftCenterGroup
-            anchors.verticalCenter: parent.verticalCenter
-            implicitWidth: root.centerSideModuleWidth
-
-            Resources {
-                alwaysShowAllResources: root.useShortenedForm === 2
-                Layout.fillWidth: root.useShortenedForm === 2
-            }
-
-            Media {
-                visible: root.useShortenedForm < 2
-                Layout.fillWidth: true
-            }
-        }
-
-        VerticalBarSeparator {
-            visible: Config.options?.bar.borderless
-        }
 
         BarGroup {
             id: middleCenterGroup
@@ -146,42 +142,6 @@ Item { // Bar content region
                             GlobalStates.overviewOpen = !GlobalStates.overviewOpen;
                         }
                     }
-                }
-            }
-        }
-
-        VerticalBarSeparator {
-            visible: Config.options?.bar.borderless
-        }
-
-        MouseArea {
-            id: rightCenterGroup
-            anchors.verticalCenter: parent.verticalCenter
-            implicitWidth: root.centerSideModuleWidth
-            implicitHeight: rightCenterGroupContent.implicitHeight
-
-            onPressed: {
-                GlobalStates.sidebarRightOpen = !GlobalStates.sidebarRightOpen;
-            }
-
-            BarGroup {
-                id: rightCenterGroupContent
-                anchors.fill: parent
-
-                ClockWidget {
-                    showDate: (Config.options.bar.verbose && root.useShortenedForm < 2)
-                    Layout.alignment: Qt.AlignVCenter
-                    Layout.fillWidth: true
-                }
-
-                UtilButtons {
-                    visible: (Config.options.bar.verbose && root.useShortenedForm === 0)
-                    Layout.alignment: Qt.AlignVCenter
-                }
-
-                BatteryIndicator {
-                    visible: (root.useShortenedForm < 2 && Battery.available)
-                    Layout.alignment: Qt.AlignVCenter
                 }
             }
         }
@@ -324,11 +284,6 @@ Item { // Bar content region
                 invertSide: Config?.options.bar.bottom
             }
 
-            Item {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-            }
-
             // Weather
             Loader {
                 Layout.leftMargin: 4
@@ -337,6 +292,44 @@ Item { // Bar content region
                 sourceComponent: BarGroup {
                     WeatherBar {}
                 }
+            }
+
+            MouseArea {
+                id: rightCenterGroup
+                Layout.alignment: Qt.AlignVCenter
+                Layout.leftMargin: 4
+                implicitWidth: rightCenterGroupContent.implicitWidth
+                implicitHeight: rightCenterGroupContent.implicitHeight
+
+                onPressed: {
+                    GlobalStates.sidebarRightOpen = !GlobalStates.sidebarRightOpen;
+                }
+
+                BarGroup {
+                    id: rightCenterGroupContent
+                    anchors.fill: parent
+
+                    ClockWidget {
+                        showDate: (Config.options.bar.verbose && root.useShortenedForm < 2)
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.fillWidth: true
+                    }
+
+                    UtilButtons {
+                        visible: (Config.options.bar.verbose && root.useShortenedForm === 0)
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+
+                    BatteryIndicator {
+                        visible: (root.useShortenedForm < 2 && Battery.available)
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+                }
+            }
+
+            Item { // Spacer — absorbs slack on the left of the right section
+                Layout.fillWidth: true
+                Layout.fillHeight: true
             }
         }
     }

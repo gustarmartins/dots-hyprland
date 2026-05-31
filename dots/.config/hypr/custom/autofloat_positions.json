@@ -1,0 +1,74 @@
+{
+  "org.kde.dolphin::Moving — Dolphin": {
+    "w": 1200,
+    "h": 800,
+    "x": 360,
+    "y": 140
+  },
+  "VirtualBox": {
+    "w": 1391,
+    "h": 815,
+    "x": 287,
+    "y": 133
+  },
+  "VirtualBox Manager": {
+    "w": 1150,
+    "h": 808,
+    "x": 332,
+    "y": 45
+  },
+  "VirtualBox Manager::Oracle VirtualBox Manager": {
+    "w": 1150,
+    "h": 808,
+    "x": 332,
+    "y": 45
+  },
+  "kitty": {
+    "w": 1444,
+    "h": 1024,
+    "x": 264,
+    "y": 50
+  },
+  "Waydroid::Waydroid": {
+    "w": 600,
+    "h": 1060,
+    "x": 655,
+    "y": 6
+  },
+  "Waydroid": {
+    "w": 600,
+    "h": 1060,
+    "x": 683,
+    "y": 10
+  },
+  "waydroid.com.android.vending": {
+    "w": 600,
+    "h": 1063,
+    "x": 698,
+    "y": 11
+  },
+  "org.kde.plasma-systemmonitor": {
+    "w": 1900,
+    "h": 900,
+    "x": 62,
+    "y": 92
+  },
+  "firefox": {
+    "w": 1908,
+    "h": 1023,
+    "x": 6,
+    "y": 51
+  },
+  "org.kde.dolphin": {
+    "w": 1798,
+    "h": 1023,
+    "x": 46,
+    "y": 51
+  },
+  "vesktop": {
+    "w": 1499,
+    "h": 1023,
+    "x": 408,
+    "y": 51
+  }
+}

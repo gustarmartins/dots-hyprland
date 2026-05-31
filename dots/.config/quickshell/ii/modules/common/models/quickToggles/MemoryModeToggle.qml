@@ -10,31 +10,61 @@ import qs.modules.common.widgets
 QuickToggleModel {
     id: root
     name: Translation.tr("Memory Mode")
-    toggled: false
-    icon: toggled ? "memory" : "developer_board"
-    statusText: toggled ? "Aggressive" : "Optimized"
+
+    // Live profile name, read from actual system state (desync-proof, never a
+    // stored counter). One of: blazing | optimized | heavy | anti-freeze | custom
+    property string profile: "optimized"
+
+    icon: switch(profile) {
+        case "blazing":     return "rocket_launch"   // zram-only, max speed
+        case "optimized":   return "developer_board" // proven daily
+        case "heavy":       return "stacks"           // VM / Waydroid footprint
+        case "anti-freeze": return "ac_unit"          // widest reclaim buffer
+        default:            return "help"             // custom / manual tinkering
+    }
+    statusText: switch(profile) {
+        case "blazing":     return "Blazing"
+        case "optimized":   return "Optimized"
+        case "heavy":       return "Heavy / VM"
+        case "anti-freeze": return "Anti-freeze"
+        default:            return "Custom"
+    }
+    // Light the button up for any non-default mode (incl. custom) so the daily
+    // "optimized" baseline reads as the neutral resting state.
+    toggled: profile !== "optimized"
 
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "/home/gus/.local/bin/memory-mode.sh toggle"])
+        Quickshell.execDetached(["bash", "-c", "/home/gus/.local/bin/memory-mode.sh next"])
+        refreshDelay.restart() // re-read state shortly after the apply lands
     }
 
     Process {
         id: fetchActiveState
         running: true
         command: ["bash", "-c", "/home/gus/.local/bin/memory-mode.sh get_state"]
-        onExited: (exitCode, exitStatus) => {
-            root.toggled = exitCode === 0
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const s = text.trim()
+                if (s.length > 0) root.profile = s
+            }
         }
     }
 
+    // One-shot quick re-read after a tap (swapoff/swapon can take a beat).
+    Timer {
+        id: refreshDelay
+        interval: 700
+        repeat: false
+        onTriggered: fetchActiveState.running = true
+    }
+
+    // Steady-state poll keeps the widget honest if state changes out-of-band.
     Timer {
         interval: 3000
         running: true
         repeat: true
-        onTriggered: {
-            fetchActiveState.running = true
-        }
+        onTriggered: fetchActiveState.running = true
     }
 
-    tooltipText: Translation.tr("Toggle between Optimized and Aggressive memory management")
+    tooltipText: Translation.tr("Cycle: Blazing → Optimized → Heavy → Anti-freeze")
 }

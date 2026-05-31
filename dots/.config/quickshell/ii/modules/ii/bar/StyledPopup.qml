@@ -35,10 +35,17 @@ LazyLoader {
         exclusiveZone: 0
         margins {
             left: {
-                if (!Config.options.bar.vertical) return root.QsWindow?.mapFromItem(
-                    root.hoverTarget, 
-                    (root.hoverTarget.width - popupBackground.implicitWidth) / 2, 0
-                ).x;
+                if (!Config.options.bar.vertical) {
+                    // Center popup under the hover target, but clamp to the
+                    // screen so a wide popup near an edge isn't clipped.
+                    const centered = (root.QsWindow?.mapFromItem(
+                        root.hoverTarget,
+                        (root.hoverTarget.width - popupBackground.implicitWidth) / 2, 0
+                    ).x) ?? 0;
+                    const screenW = popupWindow.screen?.width ?? Infinity;
+                    const maxLeft = screenW - popupWindow.implicitWidth;
+                    return Math.max(0, Math.min(centered, maxLeft));
+                }
                 return Appearance.sizes.verticalBarWidth
             }
             top: {

@@ -25,12 +25,24 @@ Singleton {
 
     function disable() {
         root.active = false
-        Quickshell.execDetached(["bash", "-c", "pkill easyeffects || flatpak pkill com.github.wwmm.easyeffects"])
+        Quickshell.execDetached(["bash", "-c", "pkill -x easyeffects || flatpak kill com.github.wwmm.easyeffects"])
+        reconcileTimer.restart()
     }
 
     function enable() {
         root.active = true
         Quickshell.execDetached(["bash", "-c", "easyeffects --hide-window --service-mode || flatpak run com.github.wwmm.easyeffects --hide-window --service-mode"])
+        reconcileTimer.restart()
+    }
+
+    // Re-verify the real process state shortly after a toggle so the UI can't
+    // get stuck showing the wrong value if the process failed to spawn/die
+    // (e.g. during a PipeWire restart).
+    Timer {
+        id: reconcileTimer
+        interval: 600
+        repeat: false
+        onTriggered: root.fetchActiveState()
     }
 
     function toggle() {

@@ -1,19 +1,17 @@
 [ContentDisplay]
 DirectorySizeMode=ContentSize
-RecursiveDirectorySizeLimit=15
+RecursiveDirectorySizeLimit=20
 
 [Desktop Entry]
 DefaultProfile=zsh.profile
 
 [DetailsMode]
 IconSize=22
-LeftPadding=0
 PreviewSize=32
-RightPadding=0
 
 [ExtractDialog]
 2 screens: Window-Maximized=true
-DirHistory[$e]=$HOME/Downloads/
+DirHistory[$e]=/usr/share/fonts/gnu-free,$HOME/Downloads/
 
 [General]
 ShowFullPath=true
@@ -25,9 +23,6 @@ Version=202
 [KFileDialog Settings]
 Places Icons Auto-resize=false
 Places Icons Static Size=22
-
-[MainWindow]
-MenuBar=Disabled
 
 [Notification Messages]
 ConfirmRenameFileType=false

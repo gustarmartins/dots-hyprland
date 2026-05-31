@@ -46,11 +46,23 @@ MouseArea {
         Resource {
             iconName: "planner_review"
             percentage: ResourceUsage.cpuUsage
-            shown: Config.options.bar.resources.alwaysShowCpu || 
+            shown: Config.options.bar.resources.alwaysShowCpu ||
                 !(MprisController.activePlayer?.trackTitle?.length > 0) ||
                 root.alwaysShowAllResources
             Layout.leftMargin: shown ? 6 : 0
             warningThreshold: Config.options.bar.resources.cpuWarningThreshold
+        }
+
+        Resource {
+            // PSI memory pressure (some avg10) — system-stall headline.
+            // Hides during music playback like CPU/Swap to keep the bar from crowding.
+            iconName: "monitor_heart"
+            percentage: ResourceUsage.memoryPressure
+            shown: Config.options.bar.resources.alwaysShowCpu ||
+                !(MprisController.activePlayer?.trackTitle?.length > 0) ||
+                root.alwaysShowAllResources
+            Layout.leftMargin: shown ? 6 : 0
+            warningThreshold: 30
         }
 
     }

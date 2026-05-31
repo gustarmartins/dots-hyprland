@@ -1,0 +1,22 @@
+# Exempt list for master float forced size.
+# Apps listed here will NOT get the forced size when master float is ON.
+# They will float at whatever size the app requests or your custom rules specify.
+#
+# Format: one class regex per line (Python regex, case-sensitive)
+# Lines starting with # are comments.
+# Lines starting with title: match window titles instead of classes.
+title:Settings
+title:Logcat Format
+title:^Properties for .*
+title:File Already Exists — Dolphin
+title:Copying — Dolphin
+VirtualBox
+title:Oracle VirtualBox Manager
+VirtualBox Manager
+Waydroid
+org\.kde\.plasma-systemmonitor
+eden
+title:Eden Configuration
+title:Eden \| v0\.2\.0-rc2 \| Clang 22\.1\.1
+org\.kde\.dolphin
+vesktop

@@ -109,14 +109,16 @@ Singleton {
         // console.log("[Hyprsunset] Enabling");
         root.startHyprsunset();
         Quickshell.execDetached(["bash", "-c", `hyprctl hyprsunset temperature ${root.colorTemperature}`]);
-        // Persist state so we know the filter is active on next QS restart
-        Quickshell.execDetached(["bash", "-c", `echo 1 > ${root.stateFile}`]);
+        Quickshell.execDetached(["bash", "-c", `echo ${root.colorTemperature} > ${root.stateFile}`]);
+        reconcileTimer.restart();
     }
 
     function disableTemperature() {
         root.temperatureActive = false;
         // console.log("[Hyprsunset] Disabling");
         Quickshell.execDetached(["bash", "-c", `hyprctl hyprsunset temperature ${root.defaultColorTemperature}`]);
+        Quickshell.execDetached(["bash", "-c", `echo ${root.defaultColorTemperature} > ${root.stateFile}`]);
+        reconcileTimer.restart();
     }
 
     function setGamma(gamma) {
@@ -132,18 +134,33 @@ Singleton {
         fetchProc.running = true;
     }
 
+    // After any enable/disable, re-query the real hyprsunset state so the UI
+    // toggle can never get stuck showing the wrong value if the command
+    // raced, failed, or hyprsunset wasn't up yet.
+    Timer {
+        id: reconcileTimer
+        interval: 300
+        repeat: false
+        onTriggered: root.fetchState()
+    }
+
     Process {
         id: fetchProc
         running: true
-        command: ["bash", "-c", `cat ${root.stateFile} 2>/dev/null || echo 0`]
+        // Query hyprsunset directly instead of reading the tmpfs state file:
+        // /tmp is RAM-backed here and is wiped on every reboot, which produced
+        // a phantom "on" state. hyprsunset reports the default temperature
+        // (defaultColorTemperature, 6000) when no warming filter is applied.
+        command: ["bash", "-c", `hyprctl hyprsunset temperature 2>/dev/null || echo ${root.defaultColorTemperature}`]
         stdout: StdioCollector {
             id: stateCollector
             onStreamFinished: {
                 const output = stateCollector.text.trim();
-                if (output.length == 0 || output.startsWith("Couldn't"))
+                const temp = parseInt(output);
+                if (isNaN(temp) || temp <= 0 || output.startsWith("Couldn't"))
                     root.temperatureActive = false;
                 else
-                    root.temperatureActive = (output != root.defaultColorTemperature); // 6000 is the default when off
+                    root.temperatureActive = (temp != root.defaultColorTemperature); // 6000 == off
                 // console.log("[Hyprsunset] Fetched state:", output, "->", root.temperatureActive);
             }
         }
