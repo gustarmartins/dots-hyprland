@@ -13,10 +13,13 @@ Item { // Notification item area
     id: root
     property var notificationObject
     property bool expanded: false
+    property bool popup: false
     property bool onlyNotification: false
     property real fontSize: Appearance.font.pixelSize.small
     property real padding: onlyNotification ? 0 : 8
     property real summaryElideRatio: 0.85
+    property int compactBodyLineCount: popup ? 3 : 2
+    property int expandedBodyLineCount: popup ? 16 : 24
 
     property real dragConfirmThreshold: 70 // Drag further to discard notification
     property real dismissOvershoot: notificationIcon.implicitWidth + 20 // Account for gaps and bouncy animations
@@ -150,7 +153,7 @@ Item { // Notification item area
                 id: summaryRow
                 visible: !root.onlyNotification || !root.expanded
                 Layout.fillWidth: true
-                implicitHeight: summaryText.implicitHeight
+                implicitHeight: Math.max(summaryText.implicitHeight, compactBodyText.implicitHeight)
                 StyledText {
                     id: summaryText
                     Layout.fillWidth: summaryTextMetrics.width >= summaryRow.implicitWidth * root.summaryElideRatio
@@ -161,6 +164,7 @@ Item { // Notification item area
                     text: root.notificationObject.summary || ""
                 }
                 StyledText {
+                    id: compactBodyText
                     opacity: !root.expanded ? 1 : 0
                     visible: opacity > 0
                     Layout.fillWidth: true
@@ -171,7 +175,7 @@ Item { // Notification item area
                     color: Appearance.colors.colSubtext
                     elide: Text.ElideRight
                     wrapMode: Text.Wrap // Needed for proper eliding????
-                    maximumLineCount: 1
+                    maximumLineCount: root.compactBodyLineCount
                     textFormat: Text.StyledText
                     text: {
                         return NotificationUtils.processNotificationBody(notificationObject.body, notificationObject.appName || notificationObject.summary).replace(/\n/g, "<br/>")
@@ -195,6 +199,7 @@ Item { // Notification item area
                     color: Appearance.colors.colSubtext
                     wrapMode: Text.Wrap
                     elide: Text.ElideRight
+                    maximumLineCount: root.expandedBodyLineCount
                     textFormat: Text.RichText
                     text: {
                         return `<style>img{max-width:${expandedContentColumn.width}px;}</style>` + 

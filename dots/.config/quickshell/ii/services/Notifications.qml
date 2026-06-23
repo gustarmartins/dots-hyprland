@@ -216,7 +216,7 @@ Singleton {
 
     function cancelTimeout(id) {
         const index = root.list.findIndex((notif) => notif.notificationId === id);
-        if (root.list[index] != null)
+        if (root.list[index] != null && root.list[index].timer != null)
             root.list[index].timer.stop();
     }
 

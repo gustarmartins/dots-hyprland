@@ -250,11 +250,14 @@ Singleton {
     // - model: Model name of the model
     // - requires_key: Whether the model requires an API key
     // - key_id: The identifier of the API key. Use the same identifier for models that can be accessed with the same key.
-    // - key_get_link: Link to get an API key
-    // - key_get_description: Description of pricing and how to get an API key
-    // - api_format: The API format of the model. Can be "openai" or "gemini". Default is "openai".
-    // - extraParams: Extra parameters to be passed to the model. This is a JSON object.
-    property var models: Config.options.policies.ai === 2 ? {} : {
+	    // - key_get_link: Link to get an API key
+	    // - key_get_description: Description of pricing and how to get an API key
+	    // - api_format: The API format of the model. Can be "openai" or "gemini". Default is "openai".
+	    // - omit_temperature: Whether to let the provider use its default sampling parameters.
+	    // - thinkingLevel: Gemini thinking level. Supported values depend on the selected model.
+	    // - includeReasoningInHistory: Send saved reasoning_content back to OpenAI-compatible APIs that require it.
+	    // - extraParams: Extra parameters to be passed to the model. This is a JSON object.
+	    property var models: Config.options.policies.ai === 2 ? {} : {
         "gemini-2.5-flash": aiModelComponent.createObject(this, {
             "name": "Gemini 2.5 Flash",
             "icon": "google-gemini-symbolic",
@@ -266,22 +269,93 @@ Singleton {
             "key_id": "gemini",
             "key_get_link": "https://aistudio.google.com/app/apikey",
             "key_get_description": Translation.tr("**Pricing**: free. Data used for training.\n\n**Instructions**: Log into Google account, allow AI Studio to create Google Cloud project or whatever it asks, go back and click Get API key"),
-            "api_format": "gemini",
-        }),
-        "gemini-3-flash": aiModelComponent.createObject(this, {
-            "name": "Gemini 3 Flash",
+	            "api_format": "gemini",
+	        }),
+	        "gemini-3.5-flash": aiModelComponent.createObject(this, {
+	            "name": "Gemini 3.5 Flash",
+	            "icon": "google-gemini-symbolic",
+	            "description": Translation.tr("Online | Google's latest stable Flash model\nBest default for fast coding, agentic tasks, long context, Search grounding, URL context, structured outputs, and function calling."),
+	            "homepage": "https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash",
+	            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
+	            "model": "gemini-3.5-flash",
+	            "requires_key": true,
+	            "key_id": "gemini",
+	            "key_get_link": "https://aistudio.google.com/app/apikey",
+	            "key_get_description": Translation.tr("**Pricing**: paid/free-tier availability depends on your Gemini API account.\n\n**Instructions**: Log into Google AI Studio, create an API key, then set it here with `/key`."),
+	            "api_format": "gemini",
+	            "omit_temperature": true,
+	            "thinkingLevel": "medium",
+	        }),
+	        "gemini-3-flash": aiModelComponent.createObject(this, {
+	            "name": "Gemini 3 Flash",
             "icon": "google-gemini-symbolic",
             "description": Translation.tr("Online | Google's model\nPro-level intelligence at the speed and pricing of Flash."),
             "homepage": "https://aistudio.google.com",
             "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:streamGenerateContent",
             "model": "gemini-3-flash-preview",
-            "requires_key": true,
-            "key_id": "gemini",
-            "key_get_link": "https://aistudio.google.com/app/apikey",
-            "key_get_description": Translation.tr("**Pricing**: free. Data used for training.\n\n**Instructions**: Log into Google account, allow AI Studio to create Google Cloud project or whatever it asks, go back and click Get API key"),
-            "api_format": "gemini",
-        }),
-        "mistral-medium-3": aiModelComponent.createObject(this, {
+	            "requires_key": true,
+	            "key_id": "gemini",
+	            "key_get_link": "https://aistudio.google.com/app/apikey",
+	            "key_get_description": Translation.tr("**Pricing**: free. Data used for training.\n\n**Instructions**: Log into Google account, allow AI Studio to create Google Cloud project or whatever it asks, go back and click Get API key"),
+	            "api_format": "gemini",
+	            "omit_temperature": true,
+	            "thinkingLevel": "medium",
+	        }),
+	        "deepseek-v4-flash": aiModelComponent.createObject(this, {
+	            "name": "DeepSeek V4 Flash",
+	            "icon": "deepseek-symbolic",
+	            "description": Translation.tr("Online | DeepSeek paid API | Very cheap 1M-context model in non-thinking mode for fast sidebar answers."),
+	            "homepage": "https://api-docs.deepseek.com/quick_start/pricing",
+	            "endpoint": "https://api.deepseek.com/chat/completions",
+	            "model": "deepseek-v4-flash",
+	            "requires_key": true,
+	            "key_id": "deepseek",
+	            "key_get_link": "https://platform.deepseek.com/api_keys",
+	            "key_get_description": Translation.tr("**Pricing**: DeepSeek paid balance. V4 Flash is the cheap option.\n\n**Instructions**: Create a DeepSeek API key, then set it here with `/key`."),
+	            "api_format": "openai",
+	            "extraParams": {
+	                "thinking": { "type": "disabled" },
+	            },
+	        }),
+	        "deepseek-v4-flash-think": aiModelComponent.createObject(this, {
+	            "name": "DeepSeek V4 Flash Think",
+	            "icon": "deepseek-symbolic",
+	            "description": Translation.tr("Online | DeepSeek paid API | Cheap thinking mode with streamed reasoning shown in the chat."),
+	            "homepage": "https://api-docs.deepseek.com/guides/thinking_mode",
+	            "endpoint": "https://api.deepseek.com/chat/completions",
+	            "model": "deepseek-v4-flash",
+	            "requires_key": true,
+	            "key_id": "deepseek",
+	            "key_get_link": "https://platform.deepseek.com/api_keys",
+	            "key_get_description": Translation.tr("**Pricing**: DeepSeek paid balance. Thinking mode can use more output tokens.\n\n**Instructions**: Create a DeepSeek API key, then set it here with `/key`."),
+	            "api_format": "openai",
+	            "omit_temperature": true,
+	            "includeReasoningInHistory": true,
+	            "extraParams": {
+	                "thinking": { "type": "enabled" },
+	                "reasoning_effort": "high",
+	            },
+	        }),
+	        "deepseek-v4-pro-think": aiModelComponent.createObject(this, {
+	            "name": "DeepSeek V4 Pro Think",
+	            "icon": "deepseek-symbolic",
+	            "description": Translation.tr("Online | DeepSeek paid API | Higher quality thinking model when Flash is not enough."),
+	            "homepage": "https://api-docs.deepseek.com/quick_start/pricing",
+	            "endpoint": "https://api.deepseek.com/chat/completions",
+	            "model": "deepseek-v4-pro",
+	            "requires_key": true,
+	            "key_id": "deepseek",
+	            "key_get_link": "https://platform.deepseek.com/api_keys",
+	            "key_get_description": Translation.tr("**Pricing**: DeepSeek paid balance. Pro costs more than Flash.\n\n**Instructions**: Create a DeepSeek API key, then set it here with `/key`."),
+	            "api_format": "openai",
+	            "omit_temperature": true,
+	            "includeReasoningInHistory": true,
+	            "extraParams": {
+	                "thinking": { "type": "enabled" },
+	                "reasoning_effort": "high",
+	            },
+	        }),
+	        "mistral-medium-3": aiModelComponent.createObject(this, {
             "name": "Mistral Medium 3",
             "icon": "mistral-symbolic",
             "description": Translation.tr("Online | %1's model | Delivers fast, responsive and well-formatted answers. Disadvantages: not very eager to do stuff; might make up unknown function calls").arg("Mistral"),
@@ -344,9 +418,10 @@ Singleton {
         return result;
     }
 
-    function addModel(modelName, data) {
-        root.models[modelName] = aiModelComponent.createObject(this, data);
-    }
+	    function addModel(modelName, data) {
+	        root.models[modelName] = aiModelComponent.createObject(this, data);
+	        root.modelList = Object.keys(root.models);
+	    }
 
     Process {
         id: getOllamaModels
@@ -732,37 +807,38 @@ Singleton {
         requester.makeRequest();
     }
 
-    function createFunctionOutputMessage(name, output, includeOutputInChat = true) {
-        return aiMessageComponent.createObject(root, {
-            "role": "user",
-            "content": `[[ Output of ${name} ]]${includeOutputInChat ? ("\n\n<think>\n" + output + "\n</think>") : ""}`,
-            "rawContent": `[[ Output of ${name} ]]${includeOutputInChat ? ("\n\n<think>\n" + output + "\n</think>") : ""}`,
-            "functionName": name,
-            "functionResponse": output,
-            "thinking": false,
-            "done": true,
+	    function createFunctionOutputMessage(name, output, includeOutputInChat = true, functionCall = null) {
+	        return aiMessageComponent.createObject(root, {
+	            "role": "user",
+	            "content": `[[ Output of ${name} ]]${includeOutputInChat ? ("\n\n<think>\n" + output + "\n</think>") : ""}`,
+	            "rawContent": `[[ Output of ${name} ]]${includeOutputInChat ? ("\n\n<think>\n" + output + "\n</think>") : ""}`,
+	            "functionName": name,
+	            "functionCall": functionCall ?? ({ name: name }),
+	            "functionResponse": output,
+	            "thinking": false,
+	            "done": true,
             // "visibleToUser": false,
         });
     }
 
-    function addFunctionOutputMessage(name, output) {
-        const aiMessage = createFunctionOutputMessage(name, output);
-        const id = idForMessage(aiMessage);
-        root.messageIDs = [...root.messageIDs, id];
-        root.messageByID[id] = aiMessage;
+	    function addFunctionOutputMessage(name, output, functionCall = null) {
+	        const aiMessage = createFunctionOutputMessage(name, output, true, functionCall);
+	        const id = idForMessage(aiMessage);
+	        root.messageIDs = [...root.messageIDs, id];
+	        root.messageByID[id] = aiMessage;
     }
 
-    function rejectCommand(message: AiMessageData) {
-        if (!message.functionPending) return;
-        message.functionPending = false; // User decided, no more "thinking"
-        addFunctionOutputMessage(message.functionName, Translation.tr("Command rejected by user"))
-    }
+	    function rejectCommand(message: AiMessageData) {
+	        if (!message.functionPending) return;
+	        message.functionPending = false; // User decided, no more "thinking"
+	        addFunctionOutputMessage(message.functionName, Translation.tr("Command rejected by user"), message.functionCall)
+	    }
 
     function approveCommand(message: AiMessageData) {
         if (!message.functionPending) return;
         message.functionPending = false; // User decided, no more "thinking"
 
-        const responseMessage = createFunctionOutputMessage(message.functionName, "", false);
+	        const responseMessage = createFunctionOutputMessage(message.functionName, "", false, message.functionCall);
         const id = idForMessage(responseMessage);
         root.messageIDs = [...root.messageIDs, id];
         root.messageByID[id] = responseMessage;
@@ -794,29 +870,33 @@ Singleton {
     }
 
     function handleFunctionCall(name, args: var, message: AiMessageData) {
-        if (name === "switch_to_search_mode") {
-            const modelId = root.currentModelId;
-            root.currentTool = "search"
-            root.postResponseHook = () => { root.currentTool = "functions" }
-            addFunctionOutputMessage(name, Translation.tr("Switched to search mode. Continue with the user's request."))
-            requester.makeRequest();
-        } else if (name === "get_shell_config") {
-            const configJson = CF.ObjectUtils.toPlainObject(Config.options)
-            addFunctionOutputMessage(name, JSON.stringify(configJson));
-            requester.makeRequest();
-        } else if (name === "set_shell_config") {
-            if (!args.key || !args.value) {
-                addFunctionOutputMessage(name, Translation.tr("Invalid arguments. Must provide `key` and `value`."));
-                return;
-            }
-            const key = args.key;
-            const value = args.value;
-            Config.setNestedValue(key, value);
-        } else if (name === "run_shell_command") {
-            if (!args.command || args.command.length === 0) {
-                addFunctionOutputMessage(name, Translation.tr("Invalid arguments. Must provide `command`."));
-                return;
-            }
+	        if (name === "switch_to_search_mode") {
+	            const modelId = root.currentModelId;
+	            root.currentTool = "search"
+	            root.postResponseHook = () => { root.currentTool = "functions" }
+	            addFunctionOutputMessage(name, Translation.tr("Switched to search mode. Continue with the user's request."), message.functionCall)
+	            requester.makeRequest();
+	        } else if (name === "get_shell_config") {
+	            const configJson = CF.ObjectUtils.toPlainObject(Config.options)
+	            addFunctionOutputMessage(name, JSON.stringify(configJson), message.functionCall);
+	            requester.makeRequest();
+	        } else if (name === "set_shell_config") {
+	            if (!args.key || !args.value) {
+	                addFunctionOutputMessage(name, Translation.tr("Invalid arguments. Must provide `key` and `value`."), message.functionCall);
+	                requester.makeRequest();
+	                return;
+	            }
+	            const key = args.key;
+	            const value = args.value;
+	            Config.setNestedValue(key, value);
+	            addFunctionOutputMessage(name, Translation.tr("Set `%1` to `%2`.").arg(key).arg(value), message.functionCall);
+	            requester.makeRequest();
+	        } else if (name === "run_shell_command") {
+		            if (!args.command || args.command.length === 0) {
+		                addFunctionOutputMessage(name, Translation.tr("Invalid arguments. Must provide `command`."), message.functionCall);
+		                requester.makeRequest();
+		                return;
+		            }
             const contentToAppend = `\n\n**Command execution request**\n\n\`\`\`command\n${args.command}\n\`\`\``;
             message.rawContent += contentToAppend;
             message.content += contentToAppend;
@@ -837,9 +917,12 @@ Singleton {
                 "model": message.model,
                 "thinking": false,
                 "done": true,
-                "annotations": message.annotations,
-                "annotationSources": message.annotationSources,
-                "functionName": message.functionName,
+	                "annotations": message.annotations,
+	                "annotationSources": message.annotationSources,
+	                "providerParts": message.providerParts,
+	                "reasoningContent": message.reasoningContent,
+	                "responseContent": message.responseContent,
+	                "functionName": message.functionName,
                 "functionCall": message.functionCall,
                 "functionResponse": message.functionResponse,
                 "visibleToUser": message.visibleToUser,
@@ -893,9 +976,12 @@ Singleton {
                     "model": message.model,
                     "thinking": message.thinking,
                     "done": message.done,
-                    "annotations": message.annotations,
-                    "annotationSources": message.annotationSources,
-                    "functionName": message.functionName,
+	                    "annotations": message.annotations,
+	                    "annotationSources": message.annotationSources,
+	                    "providerParts": message.providerParts,
+	                    "reasoningContent": message.reasoningContent,
+	                    "responseContent": message.responseContent,
+	                    "functionName": message.functionName,
                     "functionCall": message.functionCall,
                     "functionResponse": message.functionResponse,
                     "visibleToUser": message.visibleToUser,

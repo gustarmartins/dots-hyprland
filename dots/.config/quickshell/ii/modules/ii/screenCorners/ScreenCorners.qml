@@ -156,8 +156,7 @@ Scope {
             // would then be missed, leaving these Overlay-layer corner surfaces up —
             // which both draws rounded corners over the game AND blocks Hyprland's
             // direct scanout on that output. Check THIS monitor's own activeWorkspace.
-            property HyprlandWorkspace monitorActiveWorkspace: Hyprland.workspaces.values.find(ws => ws.monitor?.name == monitor?.name && ws.id == monitor?.activeWorkspace?.id) ?? null
-            property bool fullscreen: monitorActiveWorkspace?.toplevels?.values.some(window => window.wayland?.fullscreen) ?? false
+            property bool fullscreen: monitor?.activeWorkspace?.hasFullscreen ?? false
 
             CornerPanelWindow {
                 screen: modelData

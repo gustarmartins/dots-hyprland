@@ -10,7 +10,8 @@ ApiStrategy {
     property string buffer: ""
     
     function buildEndpoint(model: AiModel): string {
-        const result = model.endpoint + `?key=\$\{${root.apiKeyEnvVarName}\}`
+        const separator = model.endpoint.includes("?") ? "&" : "?";
+        const result = model.endpoint + `${separator}key=\$\{${root.apiKeyEnvVarName}\}`
         // console.log("[AI] Endpoint: " + result);
         return result;
     }
@@ -20,24 +21,33 @@ ApiStrategy {
             // console.log("[AI] Building request data for message:", JSON.stringify(message, null, 2));
             const geminiApiRoleName = (message.role === "assistant") ? "model" : message.role;
             const usingSearch = tools[0]?.google_search !== undefined
+            if (message.role === "assistant" && message.providerParts && message.providerParts.length > 0) {
+                return {
+                    "role": geminiApiRoleName,
+                    "parts": message.providerParts,
+                }
+            }
             if (!usingSearch && message.functionCall != undefined && message.functionName.length > 0) {
+                const functionCall = (typeof message.functionCall === "object")
+                    ? message.functionCall
+                    : { "name": message.functionName };
                 return {
                     "role": geminiApiRoleName,
                     "parts": [{
-                        functionCall: {
-                            "name": message.functionName,
-                        }
+                        functionCall: functionCall
                     }]
                 }
             }
             if (!usingSearch && message.functionResponse != undefined && message.functionName.length > 0) {
+                const functionResponse = {
+                    "name": message.functionName,
+                    "response": { "content": message.functionResponse }
+                };
+                if (message.functionCall?.id) functionResponse.id = message.functionCall.id;
                 return {
                     "role": geminiApiRoleName,
                     "parts": [{ 
-                        functionResponse: {
-                            "name": message.functionName,
-                            "response": { "content": message.functionResponse }
-                        }
+                        functionResponse: functionResponse
                     }]
                 }
             }
@@ -70,12 +80,33 @@ ApiStrategy {
             "system_instruction": {
                 "parts": [{ text: systemPrompt }]
             },
-            "generationConfig": {
-                "temperature": temperature,
-            },
+            "generationConfig": {},
         };
+        if (!model.omit_temperature) baseData.generationConfig.temperature = temperature;
+        if (model.thinkingLevel && model.thinkingLevel.length > 0) {
+            baseData.generationConfig.thinkingConfig = {
+                "thinkingLevel": model.thinkingLevel.toUpperCase(),
+            };
+            if (model.includeThoughts) baseData.generationConfig.thinkingConfig.includeThoughts = true;
+        } else if (model.includeThoughts) {
+            baseData.generationConfig.thinkingConfig = {
+                "includeThoughts": true,
+            };
+        }
+        if (Object.keys(baseData.generationConfig).length === 0) delete baseData.generationConfig;
         // print("Gemini API call payload:", JSON.stringify(baseData, null, 2));
-        return model.extraParams ? Object.assign({}, baseData, model.extraParams) : baseData;
+        const result = model.extraParams ? Object.assign({}, baseData, model.extraParams) : baseData;
+        if (model.extraParams?.generationConfig && baseData.generationConfig) {
+            result.generationConfig = Object.assign({}, baseData.generationConfig, model.extraParams.generationConfig);
+            if (baseData.generationConfig.thinkingConfig || model.extraParams.generationConfig.thinkingConfig) {
+                result.generationConfig.thinkingConfig = Object.assign(
+                    {},
+                    baseData.generationConfig.thinkingConfig ?? {},
+                    model.extraParams.generationConfig.thinkingConfig ?? {}
+                );
+            }
+        }
+        return result;
     }
 
     function buildAuthorizationHeader(apiKeyEnvVarName: string): string {
@@ -84,6 +115,13 @@ ApiStrategy {
     }
 
     function parseResponseLine(line, message) {
+        const cleanLine = line.trim();
+        if (cleanLine.startsWith("data:")) {
+            const eventData = cleanLine.slice(5).trim();
+            if (eventData.length === 0 || eventData === "[DONE]") return {};
+            buffer = eventData;
+            return parseBuffer(message);
+        }
         if (line.startsWith("[")) {
             buffer += line.slice(1).trim();
         } else if (line === "]") {
@@ -127,21 +165,43 @@ ApiStrategy {
                 finished = true;
             }
             
+            const parts = dataJson.candidates[0]?.content?.parts ?? [];
+            if (parts.length > 0) message.providerParts = [...(message.providerParts ?? []), ...parts];
+
             // Function call handling
-            if (dataJson.candidates[0]?.content?.parts[0]?.functionCall) {
-                const functionCall = dataJson.candidates[0]?.content?.parts[0]?.functionCall;
-                message.functionName = functionCall.name;
-                message.functionCall = functionCall.name;
-                const newContent = `\n\n[[ Function: ${functionCall.name}(${JSON.stringify(functionCall.args, null, 2)}) ]]\n`
+            const functionCallPart = parts.find(part => part.functionCall);
+            if (functionCallPart) {
+                const functionCall = functionCallPart.functionCall;
+                const call = {
+                    name: functionCall.name,
+                    args: functionCall.args ?? {},
+                };
+                if (functionCall.id) call.id = functionCall.id;
+                message.functionName = call.name;
+                message.functionCall = call;
+                const newContent = `\n\n[[ Function: ${call.name}(${JSON.stringify(call.args, null, 2)}) ]]\n`
                 message.rawContent += newContent;
                 message.content += newContent;
-                return { functionCall: { name: functionCall.name, args: functionCall.args }, finished: finished };
+                return { functionCall: call, finished: finished };
             }
 
             // Normal text response
-            const responseContent = dataJson.candidates[0]?.content?.parts[0]?.text
-            message.rawContent += responseContent;
-            message.content += responseContent;
+            let responseContent = "";
+            let thoughtContent = "";
+            parts.forEach(part => {
+                if (!part.text) return;
+                if (part.thought) thoughtContent += part.text;
+                else responseContent += part.text;
+            });
+            if (thoughtContent.length > 0) {
+                const thoughtBlock = `\n\n<think>\n\n${thoughtContent}\n\n</think>\n\n`;
+                message.rawContent += thoughtBlock;
+                message.content += thoughtBlock;
+            }
+            if (responseContent.length > 0) {
+                message.rawContent += responseContent;
+                message.content += responseContent;
+            }
             
             // Handle annotations and metadata
             const annotationSources = dataJson.candidates[0]?.groundingMetadata?.groundingChunks?.map(chunk => {

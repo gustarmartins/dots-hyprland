@@ -6,7 +6,7 @@
 # which is more effective than DPMS for resetting the monitor's internal scaler.
 
 MONITOR="DP-1"
-MONITOR_CONF="1920x1080@144,0x0,1,bitdepth,10"
+MONITOR_CONF="1920x1080@144,0x0,1"
 LOG_TAG="monitor-wake-fix"
 
 log() {

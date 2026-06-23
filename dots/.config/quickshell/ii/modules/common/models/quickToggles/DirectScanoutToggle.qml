@@ -16,7 +16,7 @@ QuickToggleModel {
     mainAction: () => {
         root.toggled = !root.toggled
         if (root.toggled) {
-            Quickshell.execDetached(["bash", "-c", `hyprctl keyword render:direct_scanout 1`])
+            Quickshell.execDetached(["bash", "-c", `hyprctl keyword render:direct_scanout 2`])
         } else {
             Quickshell.execDetached(["bash", "-c", `hyprctl keyword render:direct_scanout 0`])
         }
@@ -24,7 +24,7 @@ QuickToggleModel {
     Process {
         id: fetchActiveState
         running: true
-        command: ["bash", "-c", `test "$(hyprctl getoption render:direct_scanout -j | jq ".int")" -eq 1`]
+        command: ["bash", "-c", `test "$(hyprctl getoption render:direct_scanout -j | jq ".int")" -ne 0`]
         onExited: (exitCode, exitStatus) => {
             root.toggled = exitCode === 0
         }

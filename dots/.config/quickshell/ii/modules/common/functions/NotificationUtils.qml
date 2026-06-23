@@ -104,7 +104,9 @@ Singleton {
             }
         }
 
-        processedBody = processedBody.replace(/<img/gi, '\n\n<img');
+        processedBody = processedBody
+            .replace(/&(?!(?:[a-zA-Z][a-zA-Z0-9]+|#[0-9]+|#x[0-9a-fA-F]+);)/g, '&amp;')
+            .replace(/<img/gi, '\n\n<img');
         
         return processedBody
     }

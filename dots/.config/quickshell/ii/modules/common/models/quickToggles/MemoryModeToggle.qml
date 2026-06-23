@@ -12,17 +12,19 @@ QuickToggleModel {
     name: Translation.tr("Memory Mode")
 
     // Live profile name, read from actual system state (desync-proof, never a
-    // stored counter). One of: blazing | optimized | heavy | anti-freeze | custom
+    // stored counter). One of: ultra | blazing | optimized | heavy | anti-freeze | custom
     property string profile: "optimized"
 
     icon: switch(profile) {
-        case "blazing":     return "rocket_launch"   // zram-only, max speed
+        case "ultra":       return "local_fire_department" // ultra zram-only, max speed
+        case "blazing":     return "rocket_launch"   // zram-only, fast speed
         case "optimized":   return "developer_board" // proven daily
         case "heavy":       return "stacks"           // VM / Waydroid footprint
         case "anti-freeze": return "ac_unit"          // widest reclaim buffer
         default:            return "help"             // custom / manual tinkering
     }
     statusText: switch(profile) {
+        case "ultra":       return "Ultra Max"
         case "blazing":     return "Blazing"
         case "optimized":   return "Optimized"
         case "heavy":       return "Heavy / VM"
@@ -66,5 +68,5 @@ QuickToggleModel {
         onTriggered: fetchActiveState.running = true
     }
 
-    tooltipText: Translation.tr("Cycle: Blazing → Optimized → Heavy → Anti-freeze")
+    tooltipText: Translation.tr("Cycle: Ultra → Blazing → Optimized → Heavy → Anti-freeze")
 }

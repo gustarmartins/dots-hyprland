@@ -16,6 +16,9 @@ QtObject {
     property var annotations: []
     property var annotationSources: []
     property list<string> searchQueries: []
+    property var providerParts: []
+    property string reasoningContent
+    property string responseContent
     property string functionName
     property var functionCall
     property string functionResponse

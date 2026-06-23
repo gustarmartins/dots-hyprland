@@ -27,6 +27,10 @@ QtObject {
     property string key_get_link
     property string key_get_description
     property string api_format: "openai"
+    property bool omit_temperature: false
+    property string thinkingLevel
+    property bool includeThoughts: false
+    property bool includeReasoningInHistory: false
     property var tools
     property var extraParams: ({})
 }

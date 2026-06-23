@@ -59,16 +59,34 @@
     "x": 6,
     "y": 51
   },
-  "org.kde.dolphin": {
-    "w": 1798,
-    "h": 1023,
-    "x": 46,
-    "y": 51
-  },
   "vesktop": {
     "w": 1499,
     "h": 1023,
     "x": 408,
     "y": 51
+  },
+  "org.kde.dolphin::Extracting Files (72%) — Dolphin": {
+    "w": 1053,
+    "h": 208,
+    "x": 217,
+    "y": 387
+  },
+  "org.kde.dolphin::Extracting Files (82%) — Dolphin": {
+    "w": 1053,
+    "h": 208,
+    "x": 217,
+    "y": 387
+  },
+  "org.kde.dolphin::Extracting Files (84%) — Dolphin": {
+    "w": 1053,
+    "h": 208,
+    "x": 217,
+    "y": 387
+  },
+  "org.kde.dolphin": {
+    "w": 1533,
+    "h": 1025,
+    "x": 194,
+    "y": 50
   }
 }

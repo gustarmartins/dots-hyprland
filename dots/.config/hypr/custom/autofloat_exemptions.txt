@@ -18,5 +18,5 @@ org\.kde\.plasma-systemmonitor
 eden
 title:Eden Configuration
 title:Eden \| v0\.2\.0-rc2 \| Clang 22\.1\.1
-org\.kde\.dolphin
 vesktop
+title:Extracting Files \(85%\) — Dolphin

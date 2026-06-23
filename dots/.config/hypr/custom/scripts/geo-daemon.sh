@@ -208,21 +208,25 @@ start_daemon() {
         }
 
         # Apply geometry with deferred resize to prevent transparent rendering.
-        # Phase 1: float immediately (prevents tiling).
+        # Phase 1: suppress animations (no_anim) + float immediately (prevents tiling).
         # Phase 2: 50ms sleep lets Hyprland finish the initial surface commit,
-        #          then resize/move/raise.
+        #          then resize/move/raise instantly, then re-enable animations.
         apply_saved_geometry() {
             local addr="$1" w="$2" h="$3" rel_x="$4" rel_y="$5"
             local mon_x="$6" mon_y="$7"
             local gx=$(( rel_x + mon_x ))
             local gy=$(( rel_y + mon_y ))
-            hyprctl dispatch setfloating "address:$addr" &>/dev/null
+            hyprctl --batch \
+                "dispatch setprop address:$addr no_anim 1 ; \
+                 dispatch setfloating address:$addr" &>/dev/null
             {
                 sleep 0.05
                 hyprctl --batch \
                     "dispatch resizewindowpixel exact $w $h,address:$addr ; \
                      dispatch movewindowpixel exact $gx $gy,address:$addr ; \
                      dispatch alterzorder top,address:$addr" &>/dev/null
+                sleep 0.05
+                hyprctl dispatch setprop "address:$addr" no_anim 0 &>/dev/null
             } &
         }
 

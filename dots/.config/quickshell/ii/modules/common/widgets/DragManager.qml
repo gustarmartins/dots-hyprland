@@ -35,9 +35,7 @@ MouseArea {
 
     onPressed: (mouse) => {
         if (!root.interactive) {
-            if (mouse.button === Qt.LeftButton) {
-                mouse.accepted = false;
-            }
+            mouse.accepted = false;
             return;
         }
         if (mouse.button === Qt.LeftButton) {

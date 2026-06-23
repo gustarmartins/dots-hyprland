@@ -19,6 +19,7 @@ MouseArea { // Notification group area
     property bool expanded: false
     property bool popup: false
     property real padding: 10
+    property real collapsedHeightLimit: popup ? 160 : 130
     implicitHeight: background.implicitHeight
 
     property real dragConfirmThreshold: 70 // Drag further to discard notification
@@ -45,7 +46,7 @@ MouseArea { // Notification group area
         if (root.containsMouse) root.notifications.forEach(notif => {
             Notifications.cancelTimeout(notif.notificationId);
         });
-        else root.notifications.forEach(notif => {
+        else if (!root.expanded) root.notifications.forEach(notif => {
             Notifications.timeoutNotification(notif.notificationId);
         });
     }
@@ -76,6 +77,9 @@ MouseArea { // Notification group area
         if (expanded) implicitHeightAnim.enabled = true;
         else implicitHeightAnim.enabled = false;
         root.expanded = !root.expanded;
+        if (root.popup && root.expanded) root.notifications.forEach(notif => {
+            Notifications.cancelTimeout(notif.notificationId);
+        });
     }
 
     DragManager { // Drag manager
@@ -91,7 +95,9 @@ MouseArea { // Notification group area
         }
 
         onClicked: (mouse) => {
-            if (mouse.button === Qt.MiddleButton) 
+            if (mouse.button === Qt.LeftButton)
+                root.toggleExpanded();
+            else if (mouse.button === Qt.MiddleButton)
                 root.destroyWithAnimation();
         }
 
@@ -137,7 +143,7 @@ MouseArea { // Notification group area
         clip: true
         implicitHeight: root.expanded ? 
             row.implicitHeight + padding * 2 :
-            Math.min(80, row.implicitHeight + padding * 2)
+            Math.min(root.collapsedHeightLimit, row.implicitHeight + padding * 2)
 
         Behavior on implicitHeight {
             id: implicitHeightAnim
@@ -245,6 +251,7 @@ MouseArea { // Notification group area
                         required property var modelData
                         notificationObject: modelData
                         expanded: root.expanded
+                        popup: root.popup
                         onlyNotification: (root.notificationCount === 1)
                         opacity: (!root.expanded && index == 1 && root.notificationCount > 2) ? 0.5 : 1
                         visible: root.expanded || (index < 2)
