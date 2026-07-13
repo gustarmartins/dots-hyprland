@@ -13,8 +13,13 @@ Scope {
 
     PanelWindow {
         id: root
+        readonly property bool forceMonitorEnabled: Config?.options?.notifications?.forceMonitor?.enable === true
+        readonly property string targetScreenName: forceMonitorEnabled
+            ? (Config?.options?.notifications?.forceMonitor?.name ?? "")
+            : HyprlandData.preferredNotificationMonitorName(Hyprland.focusedMonitor?.name ?? "")
+        screen: Quickshell.screens.find(s => s.name === targetScreenName) ?? null
         visible: (Notifications.popupList.length > 0) && !GlobalStates.screenLocked
-        screen: Quickshell.screens.find(s => Config.options.notifications.forceMonitor.enable ? s.name === Config.options.notifications.forceMonitor.name : s.name === Hyprland.focusedMonitor?.name) ?? null
+            && !HyprlandData.monitorHasFullscreen(targetScreenName)
 
         WlrLayershell.namespace: "quickshell:notificationPopup"
         WlrLayershell.layer: WlrLayer.Overlay

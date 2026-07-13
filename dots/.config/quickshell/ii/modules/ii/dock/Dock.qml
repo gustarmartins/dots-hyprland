@@ -24,8 +24,9 @@ Scope { // Scope
             id: dockRoot
             // Window
             required property var modelData
+            property bool fullscreen: HyprlandData.monitorHasFullscreen(modelData?.name ?? "")
             screen: modelData
-            visible: !GlobalStates.screenLocked
+            visible: !GlobalStates.screenLocked && !fullscreen
 
             property bool reveal: root.pinned || (Config.options?.dock.hoverToReveal && dockMouseArea.containsMouse) || dockApps.requestDockShow || (!ToplevelManager.activeToplevel?.activated)
 

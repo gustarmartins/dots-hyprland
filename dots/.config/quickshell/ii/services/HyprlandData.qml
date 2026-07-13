@@ -21,6 +21,8 @@ Singleton {
     property var activeWorkspace: null
     property var monitors: []
     property var layers: ({})
+    property bool monitorsReady: false
+    property bool workspacesReady: false
 
     // Convenient stuff
 
@@ -42,6 +44,42 @@ Singleton {
         }
         const address = `0x${toplevel?.HyprlandToplevel?.address}`;
         return root.windowByAddress[address];
+    }
+
+    function monitorHasFullscreen(screenName) {
+        if (!screenName || !root.monitorsReady || !root.workspacesReady)
+            return true;
+
+        const monitor = root.monitors.find(mon => mon.name === screenName);
+        if (!monitor)
+            return true;
+
+        const workspaceId = monitor.activeWorkspace?.id;
+        const workspace = root.workspaceById[workspaceId];
+        const workspaceFullscreen = workspace?.hasfullscreen === true;
+        const clientFullscreen = root.windowList.some(win => {
+            return win.monitor === monitor.id && win.workspace?.id === workspaceId && (win.fullscreen > 0 || win.fullscreenClient > 0);
+        });
+
+        return workspaceFullscreen || clientFullscreen;
+    }
+
+    function preferredNotificationMonitorName(preferredScreenName) {
+        if (preferredScreenName && !root.monitorHasFullscreen(preferredScreenName))
+            return preferredScreenName;
+
+        const fallbackMonitor = root.monitors.find(mon => !root.monitorHasFullscreen(mon.name));
+        if (fallbackMonitor)
+            return fallbackMonitor.name;
+
+        return preferredScreenName ?? "";
+    }
+
+    function anyMonitorHasFullscreen() {
+        if (!root.monitorsReady || !root.workspacesReady)
+            return true;
+
+        return root.monitors.some(mon => root.monitorHasFullscreen(mon.name));
     }
 
     // Internals
@@ -118,6 +156,7 @@ Singleton {
             id: monitorsCollector
             onStreamFinished: {
                 root.monitors = JSON.parse(monitorsCollector.text);
+                root.monitorsReady = true;
             }
         }
     }
@@ -149,6 +188,7 @@ Singleton {
                 }
                 root.workspaceById = tempWorkspaceById;
                 root.workspaceIds = root.workspaces.map(ws => ws.id);
+                root.workspacesReady = true;
             }
         }
     }
