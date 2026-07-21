@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# You can pass the IP as an argument (e.g., `mi9t 192.168.0.171:5555`)
+# If you don't pass an IP, it will default to USB connection.
+DEVICE=$1
+
+# Set Hyprland window rules dynamically for the Mi 9T Pro
+hyprctl keyword windowrulev2 "float,title:^(Mi_9T_Pro)$" > /dev/null
+hyprctl keyword windowrulev2 "size 400 866,title:^(Mi_9T_Pro)$" > /dev/null
+hyprctl keyword windowrulev2 "center,title:^(Mi_9T_Pro)$" > /dev/null
+
+echo "Launching scrcpy for Mi 9T Pro..."
+
+# If an IP was passed, connect and use the -s flag
+if [ -n "$DEVICE" ]; then
+    echo "Connecting via WiFi to $DEVICE..."
+    adb connect $DEVICE
+    TARGET_FLAG="-s $DEVICE"
+else
+    echo "Connecting via USB..."
+    TARGET_FLAG="-d" # Forces USB device
+fi
+
+# Flags for Mi 9T Pro (60Hz native, 1080p native)
+scrcpy $TARGET_FLAG \
+    --window-title="Mi_9T_Pro" \
+    --max-fps=60 \
+    -m 1080 \
+    -b 16M \
+    -S \
+    -w \
+    --keyboard=uhid \
+    --mouse=uhid

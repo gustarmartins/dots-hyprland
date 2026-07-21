@@ -1,0 +1,94 @@
+#!/bin/bash
+set -uo pipefail
+
+APPLY=/usr/local/bin/focus-mode-apply
+MODE_FILE="/run/focus-mode/enabled-$UID"
+POLL_SECONDS=1
+STABLE_SAMPLES=1
+REFRESH_TICKS=30
+
+last=""
+last_kind=""
+candidate=""
+candidate_kind="app"
+stable=0
+ticks=0
+
+snapshot() {
+    local window pid kind monitors clients visible
+    window=$(hyprctl activewindow -j 2>/dev/null || true)
+    pid=$(jq -r '.pid // empty' <<<"$window")
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null && [ -d "/proc/$pid" ] || return 1
+
+    kind=$(jq -r '
+        if ((.contentType // "") == "game")
+           or ((.class // "") | test("eden|yuzu|suyu|Ryujinx|Cemu|steam|lutris|heroic|osu"; "i"))
+        then "game" else "app" end
+    ' <<<"$window")
+    if [ "$kind" = game ]; then
+        printf '%s game active-game\n' "$pid"
+        return 0
+    fi
+
+    # A controller-driven game may remain visible on one monitor while a
+    # terminal owns global keyboard focus on the other. Prefer a mapped game
+    # on any monitor's active workspace over that unrelated terminal window.
+    monitors=$(hyprctl monitors -j 2>/dev/null || true)
+    clients=$(hyprctl clients -j 2>/dev/null || true)
+    visible=$(jq -nr --argjson monitors "${monitors:-[]}" --argjson clients "${clients:-[]}" '
+        ($monitors | map(.activeWorkspace.id)) as $active |
+        [ $clients[]
+          | select((.mapped // false) and ((.hidden // false) | not))
+          | select((.workspace.id // -999) as $wid | ($active | index($wid)) != null)
+          | select(((.contentType // "") == "game")
+                   or ((.class // "") | test("eden|yuzu|suyu|Ryujinx|Cemu|steam|lutris|heroic|osu"; "i")))
+          | . + {selector_score: (((.fullscreen // 0) * 100)
+                    + (if .inhibitingIdle then 10 else 0 end)
+                    - ((.focusHistoryID // 999) / 1000))}
+        ] | max_by(.selector_score) // empty | "\(.pid) game visible-game"
+    ' 2>/dev/null || true)
+    if [ -n "$visible" ]; then
+        printf '%s\n' "$visible"
+    else
+        printf '%s app active-app\n' "$pid"
+    fi
+}
+
+if [ "${1:-}" = select ]; then
+    snapshot
+    exit
+fi
+
+while :; do
+    if [ ! -f "$MODE_FILE" ]; then
+        last=""
+        last_kind=""
+        candidate=""
+        stable=0
+        ticks=0
+        sleep "$POLL_SECONDS"
+        continue
+    fi
+
+    if read -r pid kind source < <(snapshot); then
+        if [ "$pid" = "$candidate" ]; then
+            stable=$((stable + 1))
+            candidate_kind=$kind
+        else
+            candidate=$pid
+            candidate_kind=$kind
+            stable=1
+        fi
+
+        ticks=$((ticks + 1))
+        if [ "$stable" -ge "$STABLE_SAMPLES" ] && \
+           { [ "$candidate" != "$last" ] || [ "$candidate_kind" != "$last_kind" ] || \
+             { [ "$candidate_kind" = game ] && [ "$ticks" -ge "$REFRESH_TICKS" ]; }; }; then
+            sudo -n "$APPLY" focus "$candidate" "$candidate_kind" 2>/dev/null || true
+            last=$candidate
+            last_kind=$candidate_kind
+            ticks=0
+        fi
+    fi
+    sleep "$POLL_SECONDS"
+done

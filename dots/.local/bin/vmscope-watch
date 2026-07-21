@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# vmscope-watch — quiet sentinel for your real workflow:
+#   "stay on Blazing/Ultra until ZRAM fills, then maybe switch to Heavy."
+# Watches zram fill % + PSI memory pressure; when you're on a zram-only profile
+# and headroom runs low, it nudges (with a one-tap action) instead of you eyeballing.
+set -uo pipefail
+
+ZRAM=/sys/block/zram0
+MEMMODE="$HOME/.local/bin/memory-mode.sh"
+COOLDOWN_FILE=/tmp/vmscope-watch.last
+STATE_FILE=/tmp/vmscope-watch.state
+INTERVAL=${VMSCOPE_INTERVAL:-15}     # seconds between checks
+ZRAM_WARN=${VMSCOPE_ZRAM_WARN:-65}   # % stored before zram becomes a signal input
+ZRAM_CRIT=${VMSCOPE_ZRAM_CRIT:-90}   # % stored before low headroom becomes urgent
+MEM_AVAIL_WARN_MB=${VMSCOPE_MEM_AVAIL_WARN_MB:-2048}
+MEM_AVAIL_CRIT_MB=${VMSCOPE_MEM_AVAIL_CRIT_MB:-1024}
+SWAP_FREE_WARN_MB=${VMSCOPE_SWAP_FREE_WARN_MB:-512}
+PSI_FULL10_WARN=${VMSCOPE_PSI_FULL10_WARN:-10}
+PSI_FULL60_WARN=${VMSCOPE_PSI_FULL60_WARN:-8}
+ZRAM_RAMP_PCT=${VMSCOPE_ZRAM_RAMP_PCT:-8}
+AVAIL_DROP_MB=${VMSCOPE_AVAIL_DROP_MB:-512}
+RAMP_WINDOW=${VMSCOPE_RAMP_WINDOW:-90}
+COOLDOWN=${VMSCOPE_COOLDOWN:-300}    # seconds between nudges
+
+zram_pct() {
+  local ds orig; ds=$(cat "$ZRAM/disksize" 2>/dev/null) || return 1
+  orig=$(awk '{print $1}' "$ZRAM/mm_stat" 2>/dev/null) || return 1
+  [[ -z $ds || $ds -eq 0 ]] && return 1
+  awk -v o="$orig" -v d="$ds" 'BEGIN{printf "%.0f", o*100/d}'
+}
+mem_avail_mb() { awk '/^MemAvailable:/{printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null; }
+swap_free_mb() { awk '/^SwapFree:/{printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null; }
+psi_full10() { awk '/^full/{for(i=1;i<=NF;i++)if($i~/avg10/){split($i,a,"=");print a[2]}}' /proc/pressure/memory 2>/dev/null; }
+psi_full60() { awk '/^full/{for(i=1;i<=NF;i++)if($i~/avg60/){split($i,a,"=");print a[2]}}' /proc/pressure/memory 2>/dev/null; }
+profile()  { swapon --show=NAME --noheadings 2>/dev/null | grep -qx /dev/nvme0n1p1 && return 1
+             zram_backing_uses_nvme && return 1
+             local sw; sw=$(sysctl -n vm.swappiness 2>/dev/null); [[ $sw == 200 ]] && echo ultra || echo blazing; }
+zram_backing_uses_nvme() {
+  local backing resolved
+  backing=$(cat "$ZRAM/backing_dev" 2>/dev/null || echo none)
+  [[ -n $backing && $backing != none ]] || return 1
+  resolved=$(readlink -f "$backing" 2>/dev/null || echo "$backing")
+  [[ $resolved == /dev/nvme0n1p1 ]]
+}
+cooled()   { local now last; now=$(date +%s); last=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0); (( now-last >= COOLDOWN )); }
+mark()     { date +%s >"$COOLDOWN_FILE"; }
+ge()       { awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN{exit !(a>=b)}'; }
+
+nudge() {
+  local zp=$1 psi10=$2 psi60=$3 avail=$4 swapfree=$5 prof=$6 reason=$7
+  local choice
+  choice=$(notify-send -A "heavy=Switch to Heavy" -A "open=Open vmscope" \
+    -u critical -i dialog-warning -t 20000 \
+    "Memory pressure on ${prof^}" \
+    "ZRAM ${zp}%, available ${avail} MiB, swap free ${swapfree} MiB, PSI full10/full60 ${psi10}/${psi60}. ${reason}. Add the NVMe tier + keep app RAM resident?" 2>/dev/null)
+  case "$choice" in
+    heavy) "$MEMMODE" set heavy && notify-send -t 4000 -i emblem-default "vmscope" "Switched to Heavy — NVMe tier on, swappiness 60." ;;
+    open)  hyprctl dispatch exec "kitty --class vmscope-float $HOME/.local/bin/vmscope watch" >/dev/null 2>&1 ;;
+  esac
+  mark
+}
+
+echo "vmscope-watch: every ${INTERVAL}s | zram>${ZRAM_WARN}% arms; nudge on active PSI+low headroom, zram>${ZRAM_CRIT}%+low headroom, or fast growth (cooldown ${COOLDOWN}s)"
+while :; do
+  if prof=$(profile); then                 # only on zram-only profiles (blazing/ultra)
+    now=$(date +%s)
+    zp=$(zram_pct) || zp=0
+    avail=$(mem_avail_mb); avail=${avail:-0}
+    swapfree=$(swap_free_mb); swapfree=${swapfree:-0}
+    psi10=$(psi_full10); psi10=${psi10:-0}
+    psi60=$(psi_full60); psi60=${psi60:-0}
+
+    if [[ -r $STATE_FILE ]]; then
+      read -r last_ts last_zp last_avail <"$STATE_FILE" || {
+        last_ts=0
+        last_zp=$zp
+        last_avail=$avail
+      }
+    else
+      last_ts=0
+      last_zp=$zp
+      last_avail=$avail
+    fi
+
+    reason=
+    if ge "$psi10" "$PSI_FULL10_WARN" && { (( zp >= ZRAM_WARN )) || (( avail <= MEM_AVAIL_WARN_MB )) || (( swapfree <= SWAP_FREE_WARN_MB )); }; then
+      reason="Memory stalls are active and swap headroom is tight"
+    elif ge "$psi60" "$PSI_FULL60_WARN" && { (( avail <= MEM_AVAIL_WARN_MB )) || (( swapfree <= SWAP_FREE_WARN_MB && zp >= ZRAM_WARN )); }; then
+      reason="Memory stalls are sustained with low headroom"
+    elif (( zp >= ZRAM_CRIT && avail <= MEM_AVAIL_WARN_MB )); then
+      reason="ZRAM is near full and available RAM is low"
+    elif (( zp >= ZRAM_WARN && avail <= MEM_AVAIL_CRIT_MB )); then
+      reason="Available RAM is critically low"
+    elif (( zp >= ZRAM_WARN && last_ts > 0 && now-last_ts <= RAMP_WINDOW )); then
+      dz=$(( zp - last_zp ))
+      da=$(( last_avail - avail ))
+      if (( dz >= ZRAM_RAMP_PCT )) && { (( da >= AVAIL_DROP_MB )) || (( avail <= MEM_AVAIL_WARN_MB )); }; then
+        reason="ZRAM is filling quickly while headroom is falling"
+      fi
+    fi
+
+    if [[ -n $reason ]] && cooled; then
+      nudge "$zp" "$psi10" "$psi60" "$avail" "$swapfree" "$prof" "$reason"
+    fi
+
+    printf '%s %s %s\n' "$now" "$zp" "$avail" >"$STATE_FILE"
+  fi
+  sleep "$INTERVAL"
+done

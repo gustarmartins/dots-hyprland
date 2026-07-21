@@ -1,0 +1,767 @@
+#!/usr/bin/env bash
+# fontctl — Unified font and rendering configuration for Linux desktops
+# Updates fontconfig, GTK2/3/4, KDE/Qt, GSettings, illogical-impulse,
+# Kitty, and Firefox in a single command.
+#
+# Usage:
+#   fontctl set [OPTIONS]        Set font and/or rendering across all targets
+#   fontctl status               Show current configuration across all targets
+#   fontctl preset <name>        Apply a named font preset
+#   fontctl fix-rendering        Apply rendering fixes without changing fonts
+#   fontctl help                 Show usage information
+#
+# Dependencies: jq, xmlstarlet, gsettings, sed
+
+set -euo pipefail
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+FONTCONFIG_USER="$HOME/.config/fontconfig/fonts.conf"
+FONTCONFIG_SYSTEM="/etc/fonts/local.conf"
+GTK3_SETTINGS="$HOME/.config/gtk-3.0/settings.ini"
+GTK4_SETTINGS="$HOME/.config/gtk-4.0/settings.ini"
+GTK2_SETTINGS="$HOME/.gtkrc-2.0"
+KDEGLOBALS="$HOME/.config/kdeglobals"
+TROLLTECH="$HOME/.config/Trolltech.conf"
+II_CONFIG="$HOME/.config/illogical-impulse/config.json"
+KITTY_CONF="$HOME/.config/kitty/kitty.conf"
+BACKUP_DIR="$HOME/.config/fontctl/backups"
+
+# ── Colors ─────────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m' # No Color
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+log_info()  { echo -e "${CYAN}●${NC} $*"; }
+log_ok()    { echo -e "${GREEN}✓${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}⚠${NC} $*"; }
+log_err()   { echo -e "${RED}✗${NC} $*" >&2; }
+log_dim()   { echo -e "${DIM}  $*${NC}"; }
+
+die() { log_err "$@"; exit 1; }
+
+check_deps() {
+    local missing=()
+    for cmd in jq xmlstarlet gsettings sed; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    if (( ${#missing[@]} )); then
+        die "Missing dependencies: ${missing[*]}"
+    fi
+}
+
+# ── Firefox Profile Detection ──────────────────────────────────────────────────
+find_firefox_userjs() {
+    local ff_dir="$HOME/.mozilla/firefox"
+    [[ -d "$ff_dir" ]] || return 1
+    
+    # Find the default profile from profiles.ini
+    local profile_rel
+    profile_rel=$(awk -F= '
+        /^\[Profile/   { path=""; def=0 }
+        /^Path=/       { path=$2 }
+        /^Default=1/   { def=1 }
+        def && path    { print path; exit }
+    ' "$ff_dir/profiles.ini" 2>/dev/null)
+    
+    if [[ -n "$profile_rel" ]]; then
+        echo "$ff_dir/$profile_rel/user.js"
+        return 0
+    fi
+    
+    # Fallback: find first profile directory with user.js
+    local found
+    found=$(find "$ff_dir" -maxdepth 2 -name "user.js" -print -quit 2>/dev/null)
+    [[ -n "$found" ]] && echo "$found" || return 1
+}
+
+# ── Backup System ──────────────────────────────────────────────────────────────
+create_backup() {
+    local ts
+    ts=$(date +%Y%m%d_%H%M%S)
+    local bak_dir="$BACKUP_DIR/$ts"
+    mkdir -p "$bak_dir"
+    
+    local files=(
+        "$FONTCONFIG_USER"
+        "$GTK3_SETTINGS"
+        "$GTK4_SETTINGS"
+        "$GTK2_SETTINGS"
+        "$KDEGLOBALS"
+        "$TROLLTECH"
+        "$II_CONFIG"
+        "$KITTY_CONF"
+    )
+    local ff_userjs
+    ff_userjs=$(find_firefox_userjs 2>/dev/null) && files+=("$ff_userjs")
+    
+    local count=0
+    for f in "${files[@]}"; do
+        if [[ -f "$f" ]]; then
+            local rel="${f#$HOME/}"
+            mkdir -p "$bak_dir/$(dirname "$rel")"
+            cp "$f" "$bak_dir/$rel"
+            count=$((count+1))
+        fi
+    done
+    
+    # Save gsettings state
+    {
+        echo "font-name=$(gsettings get org.gnome.desktop.interface font-name 2>/dev/null)"
+        echo "monospace-font-name=$(gsettings get org.gnome.desktop.interface monospace-font-name 2>/dev/null)"
+        echo "document-font-name=$(gsettings get org.gnome.desktop.interface document-font-name 2>/dev/null)"
+        echo "font-hinting=$(gsettings get org.gnome.desktop.interface font-hinting 2>/dev/null)"
+        echo "font-antialiasing=$(gsettings get org.gnome.desktop.interface font-antialiasing 2>/dev/null)"
+        echo "font-rgba-order=$(gsettings get org.gnome.desktop.interface font-rgba-order 2>/dev/null)"
+    } > "$bak_dir/gsettings.txt" 2>/dev/null
+    ((count++))
+    
+    log_dim "Backup: $bak_dir ($count files)"
+    echo "$bak_dir"
+}
+
+# ── Target Update Functions ────────────────────────────────────────────────────
+
+# 1. Fontconfig (user)
+update_fontconfig() {
+    local ui_font="$1" hintstyle="$2" subpixel="$3" lcdfilter="$4"
+    
+    cat > "$FONTCONFIG_USER" << XMLEOF
+<?xml version='1.0'?>
+<!DOCTYPE fontconfig SYSTEM 'urn:fontconfig:fonts.dtd'>
+<fontconfig>
+ <!-- Managed by fontctl. Do not edit manually. -->
+ <match target="font">
+  <edit mode="assign" name="antialias"><bool>true</bool></edit>
+  <edit mode="assign" name="hinting"><bool>true</bool></edit>
+  <edit mode="assign" name="hintstyle"><const>${hintstyle}</const></edit>
+  <edit mode="assign" name="rgba"><const>${subpixel}</const></edit>
+  <edit mode="assign" name="lcdfilter"><const>${lcdfilter}</const></edit>
+  <edit mode="assign" name="autohint"><bool>false</bool></edit>
+  <edit mode="assign" name="embeddedbitmap"><bool>false</bool></edit>
+ </match>
+
+ <dir>~/.local/share/fonts</dir>
+
+ <!-- Preferred sans-serif / UI fonts -->
+ <match target="pattern">
+  <test qual="any" name="family"><string>sans-serif</string></test>
+  <edit name="family" mode="prepend" binding="strong"><string>${ui_font}</string></edit>
+ </match>
+ <match target="pattern">
+  <test qual="any" name="family"><string>ui-rounded</string></test>
+  <edit name="family" mode="prepend" binding="strong"><string>${ui_font}</string></edit>
+ </match>
+ <match target="pattern">
+  <test qual="any" name="family"><string>system-ui</string></test>
+  <edit name="family" mode="prepend" binding="strong"><string>${ui_font}</string></edit>
+ </match>
+</fontconfig>
+XMLEOF
+    log_ok "fontconfig (user): ${ui_font}, ${hintstyle}, ${subpixel}"
+}
+
+# 2. /etc/fonts/local.conf (system — needs privilege escalation)
+update_fontconfig_system() {
+    local ui_font="$1" hintstyle="$2" subpixel="$3" lcdfilter="$4"
+    
+    local tmpfile
+    tmpfile=$(mktemp /tmp/fontctl_local.conf.XXXXXX)
+    
+    cat > "$tmpfile" << XMLEOF
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <!-- Managed by fontctl. Do not edit manually. -->
+  <match target="font">
+    <edit name="antialias" mode="assign"><bool>true</bool></edit>
+    <edit name="hinting" mode="assign"><bool>true</bool></edit>
+    <edit name="hintstyle" mode="assign"><const>${hintstyle}</const></edit>
+    <edit name="rgba" mode="assign"><const>${subpixel}</const></edit>
+    <edit name="lcdfilter" mode="assign"><const>${lcdfilter}</const></edit>
+    <edit name="autohint" mode="assign"><bool>false</bool></edit>
+  </match>
+
+  <match target="pattern">
+    <test qual="any" name="family"><string>sans-serif</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>${ui_font}</string></edit>
+  </match>
+  <match target="pattern">
+    <test qual="any" name="family"><string>ui-rounded</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>${ui_font}</string></edit>
+  </match>
+  <match target="pattern">
+    <test qual="any" name="family"><string>system-ui</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>${ui_font}</string></edit>
+  </match>
+</fontconfig>
+XMLEOF
+    
+    if [[ -w "$FONTCONFIG_SYSTEM" ]] || [[ -w "$(dirname "$FONTCONFIG_SYSTEM")" ]]; then
+        cp "$tmpfile" "$FONTCONFIG_SYSTEM"
+        log_ok "fontconfig (system): synced"
+    elif command -v pkexec &>/dev/null; then
+        pkexec cp "$tmpfile" "$FONTCONFIG_SYSTEM" 2>/dev/null && \
+            log_ok "fontconfig (system): synced (via pkexec)" || \
+            log_warn "fontconfig (system): skipped (auth denied)"
+    else
+        log_warn "fontconfig (system): skipped (no write access, no pkexec)"
+    fi
+    rm -f "$tmpfile"
+}
+
+# 3. GTK3 settings.ini
+update_gtk3() {
+    local ui_font="$1" ui_size="$2" hintstyle="$3" dpi="$4"
+    local file="$GTK3_SETTINGS"
+    [[ -f "$file" ]] || return 0
+    
+    sed -i \
+        -e "s/^gtk-font-name=.*/gtk-font-name=${ui_font},  ${ui_size}/" \
+        -e "s/^gtk-xft-hintstyle=.*/gtk-xft-hintstyle=${hintstyle}/" \
+        -e "s/^gtk-xft-antialias=.*/gtk-xft-antialias=1/" \
+        -e "s/^gtk-xft-hinting=.*/gtk-xft-hinting=1/" \
+        -e "s/^gtk-xft-rgba=.*/gtk-xft-rgba=rgb/" \
+        "$file"
+    
+    if [[ -n "$dpi" ]]; then
+        sed -i "s/^gtk-xft-dpi=.*/gtk-xft-dpi=${dpi}/" "$file"
+    fi
+    
+    log_ok "GTK3: ${ui_font} ${ui_size}pt, ${hintstyle}"
+}
+
+# 4. GTK4 settings.ini
+update_gtk4() {
+    local ui_font="$1" ui_size="$2" dpi="$3"
+    local file="$GTK4_SETTINGS"
+    [[ -f "$file" ]] || return 0
+    
+    sed -i \
+        -e "s/^gtk-font-name=.*/gtk-font-name=${ui_font},  ${ui_size}/" \
+        "$file"
+    
+    if [[ -n "$dpi" ]]; then
+        sed -i "s/^gtk-xft-dpi=.*/gtk-xft-dpi=${dpi}/" "$file"
+    fi
+    
+    log_ok "GTK4: ${ui_font} ${ui_size}pt"
+}
+
+# 5. GTK2 .gtkrc-2.0
+update_gtk2() {
+    local ui_font="$1" ui_size="$2" hintstyle="$3"
+    local file="$GTK2_SETTINGS"
+    [[ -f "$file" ]] || return 0
+    
+    sed -i \
+        -e "s/^gtk-font-name=.*/gtk-font-name=\"${ui_font},  ${ui_size}\"/" \
+        -e "s/^gtk-xft-hintstyle=.*/gtk-xft-hintstyle=\"${hintstyle}\"/" \
+        -e "s/^gtk-xft-antialias=.*/gtk-xft-antialias=1/" \
+        -e "s/^gtk-xft-hinting=.*/gtk-xft-hinting=1/" \
+        -e "s/^gtk-xft-rgba=.*/gtk-xft-rgba=\"rgb\"/" \
+        "$file"
+    
+    log_ok "GTK2: ${ui_font} ${ui_size}pt, ${hintstyle}"
+}
+
+# 6. KDE globals
+update_kdeglobals() {
+    local ui_font="$1" ui_size="$2" mono_font="$3" mono_size="$4" \
+          title_font="$5" title_size="$6" hintstyle="$7"
+    local file="$KDEGLOBALS"
+    [[ -f "$file" ]] || return 0
+    
+    # Font format: Name,size,-1,5,weight,0,0,0,0,0,0,0,0,0,0,1,style,0,0
+    local ui_entry="${ui_font},${ui_size},-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0"
+    local mono_entry="${mono_font},${mono_size},-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0"
+    local title_entry="${title_font},${title_size},-1,5,700,0,0,0,0,0,0,0,0,0,0,1,Bold,0,0"
+    local small_entry="${ui_font},10,-1,5,455,0,0,0,0,0,0,0,0,0,0,1,Regular,0,0"
+    
+    sed -i \
+        -e "/^\[General\]/,/^\[/{
+            s/^font=.*/font=${ui_entry}/
+            s/^menuFont=.*/menuFont=${ui_entry}/
+            s/^toolBarFont=.*/toolBarFont=${ui_entry}/
+            s/^fixed=.*/fixed=${mono_entry}/
+            s/^smallestReadableFont=.*/smallestReadableFont=${small_entry}/
+            s/^XftHintStyle=.*/XftHintStyle=${hintstyle}/
+            s/^XftAntialias=.*/XftAntialias=true/
+            s/^XftSubPixel=.*/XftSubPixel=rgb/
+        }" \
+        "$file"
+    
+    # Update WM active font (title bar)
+    sed -i "/^\[WM\]/,/^\[/{
+        s/^activeFont=.*/activeFont=${title_entry}/
+    }" "$file"
+    
+    log_ok "KDE globals: ${ui_font} ${ui_size}pt, mono=${mono_font} ${mono_size}pt, ${hintstyle}"
+}
+
+# 7. Trolltech.conf (Qt5 fallback)
+update_trolltech() {
+    local ui_font="$1" ui_size="$2"
+    local file="$TROLLTECH"
+    [[ -f "$file" ]] || return 0
+    
+    local entry="${ui_font},${ui_size},-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0"
+    sed -i "s/^font=.*/font=\"${entry}\"/" "$file"
+    
+    log_ok "Trolltech.conf: ${ui_font} ${ui_size}pt"
+}
+
+# 8. GSettings (dconf)
+update_gsettings() {
+    local ui_font="$1" ui_size="$2" mono_font="$3" mono_size="$4" hintstyle="$5"
+    
+    # Map fontconfig hintstyle names to GSettings names
+    local gs_hint
+    case "$hintstyle" in
+        hintnone)   gs_hint="none" ;;
+        hintslight) gs_hint="slight" ;;
+        hintmedium) gs_hint="medium" ;;
+        hintfull)   gs_hint="full" ;;
+        *)          gs_hint="full" ;;
+    esac
+    
+    gsettings set org.gnome.desktop.interface font-name "${ui_font}  ${ui_size}" 2>/dev/null
+    gsettings set org.gnome.desktop.interface document-font-name "${ui_font}  ${ui_size}" 2>/dev/null
+    gsettings set org.gnome.desktop.interface monospace-font-name "${mono_font} ${mono_size}" 2>/dev/null
+    gsettings set org.gnome.desktop.interface font-hinting "$gs_hint" 2>/dev/null
+    gsettings set org.gnome.desktop.interface font-antialiasing "rgba" 2>/dev/null
+    gsettings set org.gnome.desktop.interface font-rgba-order "rgb" 2>/dev/null
+    
+    log_ok "GSettings: ${ui_font} ${ui_size}pt, mono=${mono_font} ${mono_size}pt, hint=${gs_hint}"
+}
+
+# 9. illogical-impulse config.json
+update_ii_config() {
+    local ui_font="$1" mono_font="$2" title_font="$3" \
+          numbers_font="$4" reading_font="$5" expressive_font="$6"
+    local file="$II_CONFIG"
+    [[ -f "$file" ]] || { log_warn "II config not found: $file"; return 0; }
+    
+    local tmpfile
+    tmpfile=$(mktemp)
+    
+    jq --arg main "$ui_font" \
+       --arg mono "$mono_font" \
+       --arg title "$title_font" \
+       --arg numbers "$numbers_font" \
+       --arg reading "$reading_font" \
+       --arg expressive "$expressive_font" \
+       '.appearance.fonts.main = $main |
+        .appearance.fonts.monospace = $mono |
+        .appearance.fonts.iconNerd = $mono |
+        .appearance.fonts.title = $title |
+        .appearance.fonts.numbers = $numbers |
+        .appearance.fonts.reading = $reading |
+        .appearance.fonts.expressive = $expressive' \
+       "$file" > "$tmpfile" && mv "$tmpfile" "$file"
+    
+    log_ok "illogical-impulse: main=${ui_font}, title=${title_font}, mono=${mono_font}"
+}
+
+# 10. Kitty
+update_kitty() {
+    local mono_font="$1" mono_size="$2"
+    local file="$KITTY_CONF"
+    [[ -f "$file" ]] || return 0
+    
+    sed -i \
+        -e "s/^font_family.*/font_family      ${mono_font}/" \
+        -e "s/^font_size[[:space:]].*/font_size ${mono_size}/" \
+        "$file"
+    
+    log_ok "Kitty: ${mono_font} ${mono_size}pt"
+}
+
+# 11. Firefox user.js
+update_firefox() {
+    local ff_userjs
+    ff_userjs=$(find_firefox_userjs 2>/dev/null) || { log_warn "Firefox profile not found"; return 0; }
+    [[ -f "$ff_userjs" ]] || { log_warn "Firefox user.js not found"; return 0; }
+    
+    # Ensure subpixel AA is forced
+    if ! grep -q "force-subpixel-aa-where-possible" "$ff_userjs" 2>/dev/null; then
+        {
+            echo ''
+            echo '// Force subpixel AA even when Wayland reports unknown subpixel layout'
+            echo 'user_pref("gfx.webrender.quality.force-subpixel-aa-where-possible", true);'
+        } >> "$ff_userjs"
+        log_ok "Firefox: added subpixel AA fix"
+    else
+        log_ok "Firefox: subpixel AA fix already present"
+    fi
+}
+
+# ── Post-Apply Hooks ───────────────────────────────────────────────────────────
+post_apply() {
+    echo ""
+    log_info "Applying changes..."
+    
+    # Reload Hyprland config
+    if command -v hyprctl &>/dev/null && hyprctl monitors &>/dev/null 2>&1; then
+        hyprctl reload &>/dev/null && log_ok "Hyprland reloaded" || log_warn "Hyprland reload failed"
+    fi
+    
+    # Reload Quickshell (if running)
+    if pgrep -x quickshell &>/dev/null; then
+        log_dim "Quickshell is running — restart it to pick up font changes"
+    fi
+    
+    # Hint about Firefox
+    if pgrep -x firefox &>/dev/null; then
+        log_dim "Restart Firefox to apply subpixel AA changes"
+    fi
+    
+    echo ""
+    log_info "Done! Some apps may need a restart to see changes."
+}
+
+# ── Status Command ─────────────────────────────────────────────────────────────
+cmd_status() {
+    echo -e "\n${BOLD}fontctl status${NC} — Font configuration across all targets\n"
+    
+    printf "${BOLD}%-24s %-26s %-14s %-10s${NC}\n" "TARGET" "UI FONT" "HINTSTYLE" "SUBPIXEL"
+    printf "%-24s %-26s %-14s %-10s\n" "────────────────────────" "──────────────────────────" "──────────────" "──────────"
+    
+    # 1. Fontconfig
+    local fc_hint fc_rgba fc_family
+    fc_hint=$(fc-match -v sans-serif 2>/dev/null | awk '/hintstyle:/{print $2}' | head -1)
+    fc_rgba=$(fc-match -v sans-serif 2>/dev/null | awk '/\brgba:/{print $2}' | head -1)
+    fc_family=$(fc-match sans-serif 2>/dev/null | sed 's/.*: "\(.*\)" ".*/\1/')
+    # Map numeric values
+    case "$fc_hint" in
+        0*) fc_hint="hintnone" ;; 1*) fc_hint="hintslight" ;; 2*) fc_hint="hintmedium" ;; 3*) fc_hint="hintfull" ;;
+    esac
+    case "$fc_rgba" in
+        0*) fc_rgba="unknown" ;; 1*) fc_rgba="rgb" ;; 2*) fc_rgba="bgr" ;; 3*) fc_rgba="vrgb" ;; 4*) fc_rgba="vbgr" ;;
+    esac
+    printf "%-24s %-26s %-14s %-10s\n" "fontconfig (match)" "$fc_family" "$fc_hint" "$fc_rgba"
+    
+    # Fontconfig file declared hintstyle
+    if [[ -f "$FONTCONFIG_USER" ]]; then
+        local fc_file_hint fc_file_rgba
+        fc_file_hint=$(xmlstarlet sel -t -v "//match[@target='font']/edit[@name='hintstyle']/const" "$FONTCONFIG_USER" 2>/dev/null | tail -1)
+        fc_file_rgba=$(xmlstarlet sel -t -v "//match[@target='font']/edit[@name='rgba']/const" "$FONTCONFIG_USER" 2>/dev/null | tail -1)
+        printf "%-24s %-26s %-14s %-10s\n" "fontconfig (file)" "—" "${fc_file_hint:-?}" "${fc_file_rgba:-?}"
+    fi
+    
+    # 3. GTK3
+    if [[ -f "$GTK3_SETTINGS" ]]; then
+        local gtk3_font gtk3_hint gtk3_rgba
+        gtk3_font=$(grep "^gtk-font-name=" "$GTK3_SETTINGS" 2>/dev/null | cut -d= -f2)
+        gtk3_hint=$(grep "^gtk-xft-hintstyle=" "$GTK3_SETTINGS" 2>/dev/null | cut -d= -f2)
+        gtk3_rgba=$(grep "^gtk-xft-rgba=" "$GTK3_SETTINGS" 2>/dev/null | cut -d= -f2)
+        printf "%-24s %-26s %-14s %-10s\n" "GTK3" "$gtk3_font" "$gtk3_hint" "$gtk3_rgba"
+    fi
+    
+    # 4. GTK4
+    if [[ -f "$GTK4_SETTINGS" ]]; then
+        local gtk4_font
+        gtk4_font=$(grep "^gtk-font-name=" "$GTK4_SETTINGS" 2>/dev/null | cut -d= -f2)
+        printf "%-24s %-26s %-14s %-10s\n" "GTK4" "$gtk4_font" "—" "—"
+    fi
+    
+    # 5. GTK2
+    if [[ -f "$GTK2_SETTINGS" ]]; then
+        local gtk2_font gtk2_hint gtk2_rgba
+        gtk2_font=$(grep "^gtk-font-name=" "$GTK2_SETTINGS" 2>/dev/null | cut -d= -f2 | tr -d '"')
+        gtk2_hint=$(grep "^gtk-xft-hintstyle=" "$GTK2_SETTINGS" 2>/dev/null | cut -d= -f2 | tr -d '"')
+        gtk2_rgba=$(grep "^gtk-xft-rgba=" "$GTK2_SETTINGS" 2>/dev/null | cut -d= -f2 | tr -d '"')
+        printf "%-24s %-26s %-14s %-10s\n" "GTK2" "$gtk2_font" "$gtk2_hint" "$gtk2_rgba"
+    fi
+    
+    # 6. KDE globals
+    if [[ -f "$KDEGLOBALS" ]]; then
+        local kde_font kde_hint kde_subpx kde_mono
+        kde_font=$(awk -F= '/^\[General\]/{found=1} found && /^font=/{print $2; exit}' "$KDEGLOBALS" | cut -d, -f1)
+        kde_mono=$(awk -F= '/^\[General\]/{found=1} found && /^fixed=/{print $2; exit}' "$KDEGLOBALS" | cut -d, -f1)
+        kde_hint=$(awk -F= '/^\[General\]/{found=1} found && /^XftHintStyle=/{print $2; exit}' "$KDEGLOBALS")
+        kde_subpx=$(awk -F= '/^\[General\]/{found=1} found && /^XftSubPixel=/{print $2; exit}' "$KDEGLOBALS")
+        printf "%-24s %-26s %-14s %-10s\n" "KDE (ui)" "$kde_font" "$kde_hint" "$kde_subpx"
+        printf "%-24s %-26s %-14s %-10s\n" "KDE (mono)" "$kde_mono" "—" "—"
+    fi
+    
+    # 7. Trolltech
+    if [[ -f "$TROLLTECH" ]]; then
+        local qt_font
+        qt_font=$(grep "^font=" "$TROLLTECH" 2>/dev/null | cut -d= -f2 | tr -d '"' | cut -d, -f1)
+        printf "%-24s %-26s %-14s %-10s\n" "Trolltech.conf" "$qt_font" "—" "—"
+    fi
+    
+    # 8. GSettings
+    local gs_font gs_mono gs_hint gs_rgba
+    gs_font=$(gsettings get org.gnome.desktop.interface font-name 2>/dev/null | tr -d "'")
+    gs_mono=$(gsettings get org.gnome.desktop.interface monospace-font-name 2>/dev/null | tr -d "'")
+    gs_hint=$(gsettings get org.gnome.desktop.interface font-hinting 2>/dev/null | tr -d "'")
+    gs_rgba=$(gsettings get org.gnome.desktop.interface font-rgba-order 2>/dev/null | tr -d "'")
+    printf "%-24s %-26s %-14s %-10s\n" "GSettings (ui)" "$gs_font" "$gs_hint" "$gs_rgba"
+    printf "%-24s %-26s %-14s %-10s\n" "GSettings (mono)" "$gs_mono" "—" "—"
+    
+    # 9. illogical-impulse
+    if [[ -f "$II_CONFIG" ]]; then
+        local ii_main ii_title ii_mono
+        ii_main=$(jq -r '.appearance.fonts.main // "?"' "$II_CONFIG" 2>/dev/null)
+        ii_title=$(jq -r '.appearance.fonts.title // "?"' "$II_CONFIG" 2>/dev/null)
+        ii_mono=$(jq -r '.appearance.fonts.monospace // "?"' "$II_CONFIG" 2>/dev/null)
+        printf "%-24s %-26s %-14s %-10s\n" "II (main)" "$ii_main" "—" "—"
+        printf "%-24s %-26s %-14s %-10s\n" "II (title)" "$ii_title" "—" "—"
+        printf "%-24s %-26s %-14s %-10s\n" "II (mono)" "$ii_mono" "—" "—"
+    fi
+    
+    # 10. Kitty
+    if [[ -f "$KITTY_CONF" ]]; then
+        local kitty_font kitty_size
+        kitty_font=$(grep "^font_family" "$KITTY_CONF" 2>/dev/null | sed 's/^font_family[[:space:]]*//')
+        kitty_size=$(grep "^font_size" "$KITTY_CONF" 2>/dev/null | awk '{print $2}')
+        printf "%-24s %-26s %-14s %-10s\n" "Kitty" "${kitty_font} ${kitty_size}pt" "—" "—"
+    fi
+    
+    # 11. Firefox
+    local ff_userjs
+    ff_userjs=$(find_firefox_userjs 2>/dev/null)
+    if [[ -n "$ff_userjs" && -f "$ff_userjs" ]]; then
+        local ff_subpix="no"
+        grep -q "force-subpixel-aa-where-possible.*true" "$ff_userjs" 2>/dev/null && ff_subpix="forced"
+        printf "%-24s %-26s %-14s %-10s\n" "Firefox" "—" "—" "subpx=$ff_subpix"
+    fi
+    
+    # Wayland subpixel
+    echo ""
+    local wl_subpix
+    wl_subpix=$(wayland-info 2>/dev/null | grep -A8 "wl_output" | grep "subpixel_orientation" | head -1 | awk '{print $NF}' | tr -d ',')
+    if [[ -n "$wl_subpix" ]]; then
+        if [[ "$wl_subpix" == "unknown" ]]; then
+            echo -e "  ${YELLOW}Wayland subpixel: ${wl_subpix}${NC} (EDID doesn't report it — fontconfig rgba=rgb overrides for GTK/Qt)"
+        else
+            echo -e "  ${GREEN}Wayland subpixel: ${wl_subpix}${NC}"
+        fi
+    fi
+    echo ""
+}
+
+# ── Set Command ────────────────────────────────────────────────────────────────
+cmd_set() {
+    local ui_font="" ui_size="11" mono_font="" mono_size="13"
+    local title_font="" title_size="12"
+    local numbers_font="" reading_font="" expressive_font=""
+    local hintstyle="hintfull" subpixel="rgb" lcdfilter="lcddefault"
+    local dpi="" rendering_only=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ui)          ui_font="$2"; shift 2 ;;
+            --ui-size)     ui_size="$2"; shift 2 ;;
+            --mono)        mono_font="$2"; shift 2 ;;
+            --mono-size)   mono_size="$2"; shift 2 ;;
+            --title)       title_font="$2"; shift 2 ;;
+            --title-size)  title_size="$2"; shift 2 ;;
+            --numbers)     numbers_font="$2"; shift 2 ;;
+            --reading)     reading_font="$2"; shift 2 ;;
+            --expressive)  expressive_font="$2"; shift 2 ;;
+            --hintstyle)   hintstyle="$2"; shift 2 ;;
+            --subpixel)    subpixel="$2"; shift 2 ;;
+            --lcdfilter)   lcdfilter="$2"; shift 2 ;;
+            --dpi)         dpi="$2"; shift 2 ;;
+            --rendering-only) rendering_only=true; shift ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+    
+    # If no font specified and not rendering-only, read current
+    if [[ -z "$ui_font" && "$rendering_only" == false ]]; then
+        die "Specify at least --ui <font> or use --rendering-only"
+    fi
+    
+    # Defaults: inherit from ui_font if not set
+    [[ -z "$title_font" ]] && title_font="${ui_font}"
+    [[ -z "$numbers_font" ]] && numbers_font="${ui_font}"
+    [[ -z "$reading_font" ]] && reading_font="Readex Pro"
+    [[ -z "$expressive_font" ]] && expressive_font="Space Grotesk"
+    
+    # If rendering-only, read current font from fontconfig
+    if [[ "$rendering_only" == true ]]; then
+        ui_font=$(fc-match sans-serif 2>/dev/null | sed 's/.*: "\(.*\)" ".*/\1/')
+        mono_font=$(fc-match monospace 2>/dev/null | sed 's/.*: "\(.*\)" ".*/\1/')
+        title_font="$ui_font"
+        numbers_font="$ui_font"
+        [[ -z "$ui_font" ]] && die "Could not determine current UI font"
+    fi
+    
+    # Default mono if not specified
+    [[ -z "$mono_font" ]] && mono_font=$(fc-match monospace 2>/dev/null | sed 's/.*: "\(.*\)" ".*/\1/')
+    [[ -z "$mono_font" ]] && mono_font="JetBrainsMono Nerd Font Mono"
+    
+    echo -e "\n${BOLD}fontctl set${NC}"
+    echo -e "  UI:    ${CYAN}${ui_font}${NC} ${ui_size}pt"
+    echo -e "  Mono:  ${CYAN}${mono_font}${NC} ${mono_size}pt"
+    echo -e "  Title: ${CYAN}${title_font}${NC} ${title_size}pt"
+    echo -e "  Hint:  ${hintstyle}  Subpixel: ${subpixel}  LCD: ${lcdfilter}"
+    echo ""
+    
+    # Backup
+    create_backup
+    echo ""
+    
+    # Apply to all targets
+    update_fontconfig "$ui_font" "$hintstyle" "$subpixel" "$lcdfilter"
+    update_fontconfig_system "$ui_font" "$hintstyle" "$subpixel" "$lcdfilter"
+    update_gtk3 "$ui_font" "$ui_size" "$hintstyle" "$dpi"
+    update_gtk4 "$ui_font" "$ui_size" "$dpi"
+    update_gtk2 "$ui_font" "$ui_size" "$hintstyle"
+    update_kdeglobals "$ui_font" "$ui_size" "$mono_font" "$mono_size" "$title_font" "$title_size" "$hintstyle"
+    update_trolltech "$ui_font" "$ui_size"
+    update_gsettings "$ui_font" "$ui_size" "$mono_font" "$mono_size" "$hintstyle"
+    update_ii_config "$ui_font" "$mono_font" "$title_font" "$numbers_font" "$reading_font" "$expressive_font"
+    
+    if [[ "$rendering_only" == false ]]; then
+        update_kitty "$mono_font" "$mono_size"
+    fi
+    
+    update_firefox
+    
+    post_apply
+}
+
+# ── Preset Command ─────────────────────────────────────────────────────────────
+cmd_preset() {
+    local name="${1:-}"
+    
+    case "$name" in
+        apple)
+            echo -e "${BOLD}Preset: Apple${NC} — SF Pro + SF Mono"
+            cmd_set --ui "SF Pro" --ui-size 11 \
+                    --mono "SF Mono" --mono-size 13 \
+                    --title "SF Pro Display" --title-size 12 \
+                    --numbers "SF Pro" \
+                    --hintstyle hintslight --subpixel rgb
+            ;;
+        google)
+            echo -e "${BOLD}Preset: Google${NC} — Google Sans Flex + JetBrains Mono NF"
+            cmd_set --ui "Google Sans Flex" --ui-size 11 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 \
+                    --title "Google Sans Flex" --title-size 12 \
+                    --numbers "Fira Sans Heavy" \
+                    --hintstyle hintslight --subpixel rgb
+            ;;
+        inter)
+            echo -e "${BOLD}Preset: Inter${NC} — Inter + JetBrains Mono NF"
+            cmd_set --ui "Inter Variable" --ui-size 11 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 \
+                    --title "Inter Variable" --title-size 12 \
+                    --numbers "Inter Variable" \
+                    --hintstyle hintslight --subpixel rgb
+            ;;
+        noto)
+            echo -e "${BOLD}Preset: Noto${NC} — Noto Sans + Noto Sans Mono"
+            cmd_set --ui "Noto Sans" --ui-size 11 \
+                    --mono "Noto Sans Mono" --mono-size 13 \
+                    --title "Noto Sans" --title-size 12 \
+                    --numbers "Noto Sans" \
+                    --hintstyle hintslight --subpixel rgb
+            ;;
+        list)
+            echo -e "${BOLD}Available presets:${NC}"
+            echo -e "  ${CYAN}apple${NC}   — SF Pro + SF Mono"
+            echo -e "  ${CYAN}google${NC}  — Google Sans Flex + JetBrains Mono NF"
+            echo -e "  ${CYAN}inter${NC}   — Inter Variable + JetBrains Mono NF"
+            echo -e "  ${CYAN}noto${NC}    — Noto Sans + Noto Sans Mono"
+            ;;
+        "")
+            die "Usage: fontctl preset <name|list>"
+            ;;
+        *)
+            die "Unknown preset: $name (run 'fontctl preset list' to see available presets)"
+            ;;
+    esac
+}
+
+# ── Fix-Rendering Command ─────────────────────────────────────────────────────
+cmd_fix_rendering() {
+    echo -e "\n${BOLD}fontctl fix-rendering${NC} — Apply rendering fixes only\n"
+    
+    create_backup
+    echo ""
+    
+    cmd_set --rendering-only \
+            --hintstyle hintslight --subpixel rgb --lcdfilter lcddefault
+}
+
+# ── Help ───────────────────────────────────────────────────────────────────────
+cmd_help() {
+    cat << 'EOF'
+
+  fontctl — Unified font and rendering configuration
+
+  USAGE
+    fontctl set [OPTIONS]          Set font and/or rendering across all targets
+    fontctl status                 Show current configuration across all targets  
+    fontctl preset <name|list>     Apply a named font preset
+    fontctl fix-rendering          Apply rendering fixes without changing fonts
+    fontctl help                   Show this help
+
+  SET OPTIONS
+    --ui <name>                    UI/system font family
+    --ui-size <pt>                 UI font size (default: 11)
+    --mono <name>                  Monospace font family
+    --mono-size <pt>               Monospace font size (default: 13)
+    --title <name>                 Title/header font (default: same as --ui)
+    --title-size <pt>              Title font size (default: 12)
+    --numbers <name>               Numbers font (default: same as --ui)
+    --reading <name>               Reading font for II (default: Readex Pro)
+    --expressive <name>            Expressive font for II (default: Space Grotesk)
+    --hintstyle <style>            hintnone|hintslight|hintmedium|hintfull
+    --subpixel <order>             rgb|bgr|vrgb|vbgr|none
+    --lcdfilter <filter>           lcdnone|lcddefault|lcdlight|lcdlegacy
+    --dpi <value×1024>             GTK DPI (e.g. 98304 for 96dpi)
+    --rendering-only               Only change rendering, keep current fonts
+
+  TARGETS UPDATED
+    1.  ~/.config/fontconfig/fonts.conf
+    2.  /etc/fonts/local.conf (with pkexec)
+    3.  ~/.config/gtk-3.0/settings.ini
+    4.  ~/.config/gtk-4.0/settings.ini
+    5.  ~/.gtkrc-2.0
+    6.  ~/.config/kdeglobals
+    7.  ~/.config/Trolltech.conf
+    8.  GSettings (dconf)
+    9.  ~/.config/illogical-impulse/config.json
+    10. ~/.config/kitty/kitty.conf
+    11. Firefox user.js (subpixel AA)
+
+  EXAMPLES
+    fontctl set --ui "SF Pro" --mono "SF Mono" --mono-size 13
+    fontctl preset apple
+    fontctl preset list
+    fontctl status
+    fontctl fix-rendering
+
+EOF
+}
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+main() {
+    check_deps
+    
+    local cmd="${1:-help}"
+    shift || true
+    
+    case "$cmd" in
+        set)            cmd_set "$@" ;;
+        status)         cmd_status ;;
+        preset)         cmd_preset "$@" ;;
+        fix-rendering)  cmd_fix_rendering ;;
+        help|--help|-h) cmd_help ;;
+        *)              die "Unknown command: $cmd (try 'fontctl help')" ;;
+    esac
+}
+
+main "$@"
