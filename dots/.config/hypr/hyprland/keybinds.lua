@@ -7,7 +7,9 @@ end
 local qsScripts = "$HOME/.config/quickshell/$qsConfig/scripts"
 local hyprScripts = "$HOME/.config/hypr/hyprland/scripts"
 local qsIpcCall = "qs -c $qsConfig ipc call"
-local qsIsAlive = qsIpcCall .. " TEST_ALIVE"
+-- Current Quickshell requires both an IPC target and function for `ipc call`.
+-- `ipc show` is the side-effect-free liveness probe for the selected config.
+local qsIsAlive = "qs -c $qsConfig ipc show >/dev/null"
 
 hl.bind("SUPER + SUPER_L", hl.dsp.global("quickshell:searchToggleRelease"), { description = "Shell: Toggle search" })
 hl.bind("SUPER + SUPER_R", hl.dsp.global("quickshell:searchToggleRelease"))

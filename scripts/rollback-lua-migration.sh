@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restore a local pre-migration backup and switch Hyprland back to hyprlang.
+# Restore a local pre-migration backup without changing managers in-process.
 
 set -euo pipefail
 
@@ -29,8 +29,6 @@ sudo install -m 755 "$backup_dir/system/fix-dpms-resume.sh" /usr/local/bin/fix-d
 sudo install -m 644 "$backup_dir/system/display-resume-fix.service" /etc/systemd/system/display-resume-fix.service
 sudo systemctl daemon-reload
 
-hyprctl reload full-reset
-sleep 1
-hyprctl configerrors
-
 echo "Legacy Hyprland configuration restored from $backup_dir"
+echo "Restart the Hyprland session to switch back to hyprlang."
+echo "Do not use 'hyprctl reload full-reset' on Hyprland 0.56.0: it can abort while flushing config caches."

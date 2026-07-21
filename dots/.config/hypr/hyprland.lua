@@ -1,6 +1,8 @@
 -- This file sources other files in `hyprland` and `custom` folders
 -- You wanna add your stuff in files in `custom`
 
+local migrationTest = os.getenv("HYPRLAND_MIGRATION_TEST") == "1"
+
 -- Internal stuff --
 require("hyprland.lib")
 require("hyprland.services")
@@ -12,7 +14,9 @@ if is_file_exists(HOME .. "/.config/hypr/custom/env.lua") then
 end
 
 -- Default configurations --
-require("hyprland.execs")
+if not migrationTest then
+    require("hyprland.execs")
+end
 require("hyprland.general")
 require("hyprland.rules")
 require("hyprland.colors")
@@ -36,7 +40,9 @@ end
 if is_file_exists(HOME .. "/.config/hypr/workspaces.lua") then
     require("workspaces")
 end
-if is_file_exists(HOME .. "/.config/hypr/monitors.lua") then
+if migrationTest then
+    hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.0 })
+elseif is_file_exists(HOME .. "/.config/hypr/monitors.lua") then
     require("monitors")
 end
 
