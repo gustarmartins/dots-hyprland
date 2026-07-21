@@ -1,4 +1,4 @@
--- Generated from active.conf. Keep the legacy profile as migration provenance.
+-- Generated from horizontal_signature.conf. Keep the legacy profile as migration provenance.
 hl.config({ animations = { enabled = true } })
 hl.curve("pop", { type = "bezier", points = {{ 0.26, 1.12 }, { 0.32, 1.0 }} })
 hl.curve("glide", { type = "bezier", points = {{ 0.12, 0.92 }, { 0.18, 1.0 }} })
