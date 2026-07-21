@@ -17,7 +17,7 @@ hl.config({
         focus_on_activate = false,
         middle_click_paste = false,
         animate_mouse_windowdragging = true,
-        vrr = 1,
+        vrr = 2,
     },
     cursor = {
         no_break_fs_vrr = 0,

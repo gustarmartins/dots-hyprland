@@ -4,7 +4,7 @@ local monitors = {
         mode = "1920x1080@144.0",
         position = "0x0",
         scale = 1.0,
-        vrr = 1,
+        vrr = 2,
     },
     aoc_recovery = {
         output = "DP-1",
@@ -12,7 +12,7 @@ local monitors = {
         position = "0x0",
         scale = 1.0,
         bitdepth = 10,
-        vrr = 1,
+        vrr = 2,
     },
     arzopa = {
         output = "desc:GWD ARZOPA 5=\\x9d\\x16%\\xf9`S0001",
