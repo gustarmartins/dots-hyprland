@@ -139,12 +139,12 @@ LastUsedCustomAccentColor=184,117,220
 TerminalApplication=kitty -1
 XftAntialias=true
 XftHintStyle=hintfull
-XftSubPixel=none
-fixed=JetBrainsMono NF,13,-1,5,300,1,0,0,0,0,0,0,0,0,0,1,Italic,0,0
-font=Space Grotesk,13,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium,0,0
-menuFont=Space Grotesk,13,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium,0,0
-smallestReadableFont=Space Grotesk,11,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium,0,0
-toolBarFont=Space Grotesk,13,-1,5,500,0,0,0,0,0,0,0,0,0,0,1,Medium,0,0
+XftSubPixel=rgb
+fixed=SF Mono,13,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
+font=Slate for OnePlus,13,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
+menuFont=Slate for OnePlus,13,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
+smallestReadableFont=Slate for OnePlus,10,-1,5,455,0,0,0,0,0,0,0,0,0,0,1,Regular,0,0
+toolBarFont=Slate for OnePlus,13,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
 
 [Icons]
 Theme=breeze-plus-dark
