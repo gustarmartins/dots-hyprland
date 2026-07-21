@@ -81,7 +81,7 @@ Item {
             horizontalAlignment: Text.AlignHCenter
             elide: Text.ElideRight // Truncates the text on the right
             color: Appearance.colors.colOnLayer1
-            text: `${cleanedTitle}${activePlayer?.trackArtist ? ' • ' + activePlayer.trackArtist : ''}`
+            text: cleanedTitle
         }
 
     }

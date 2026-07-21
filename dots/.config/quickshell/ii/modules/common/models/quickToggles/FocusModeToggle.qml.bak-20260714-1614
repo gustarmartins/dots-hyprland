@@ -43,5 +43,5 @@ QuickToggleModel {
         onTriggered: fetchState.running = true
     }
 
-    tooltipText: Translation.tr("Keeps the focused app hot: CPU/GPU boost, RAM and OOM protection")
+    tooltipText: Translation.tr("Realtime audio + GPU/CPU pinned to the focused app")
 }

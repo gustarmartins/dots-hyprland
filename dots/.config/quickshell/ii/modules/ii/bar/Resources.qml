@@ -20,8 +20,10 @@ MouseArea {
         anchors.rightMargin: 4
 
         Resource {
-            iconName: "leaderboard"
-            percentage: ResourceUsage.vramUsedPercentage
+            // GPU engine load. VRAM moved to the hover popup — busy% is the
+            // number that actually tells you the card is working.
+            iconName: "developer_board"
+            percentage: ResourceUsage.gpuUsage
             shown: true
             warningThreshold: 90
         }
