@@ -4,11 +4,6 @@
 # If you don't pass an IP, it will default to USB connection.
 DEVICE=$1
 
-# Set Hyprland window rules dynamically for the Mi 9T Pro
-hyprctl keyword windowrulev2 "float,title:^(Mi_9T_Pro)$" > /dev/null
-hyprctl keyword windowrulev2 "size 400 866,title:^(Mi_9T_Pro)$" > /dev/null
-hyprctl keyword windowrulev2 "center,title:^(Mi_9T_Pro)$" > /dev/null
-
 echo "Launching scrcpy for Mi 9T Pro..."
 
 # If an IP was passed, connect and use the -s flag

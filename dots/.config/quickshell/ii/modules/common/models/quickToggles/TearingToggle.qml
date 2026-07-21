@@ -16,9 +16,9 @@ QuickToggleModel {
     mainAction: () => {
         root.toggled = !root.toggled
         if (root.toggled) {
-            Quickshell.execDetached(["bash", "-c", `hyprctl keyword general:allow_tearing 1`])
+            HyprlandConfig.set("general:allow_tearing", 1)
         } else {
-            Quickshell.execDetached(["bash", "-c", `hyprctl keyword general:allow_tearing 0`])
+            HyprlandConfig.set("general:allow_tearing", 0)
         }
     }
     Process {

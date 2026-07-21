@@ -5,6 +5,7 @@
 import os
 import socket
 import json as _json
+import re
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("hyprland")
@@ -41,6 +42,76 @@ def _jreq(cmd: str):
         return _json.loads(raw)
     except Exception:
         return raw
+
+
+def _lua_literal(value: str) -> str:
+    """Return a safe Lua literal for a CLI-style scalar value."""
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered
+    if re.fullmatch(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", value):
+        return value
+    return _json.dumps(value)
+
+
+def _config_expr(name: str, value: str) -> str:
+    parts = name.split(":")
+    if not parts or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part) for part in parts):
+        raise ValueError(f"Invalid Hyprland Lua config path: {name!r}")
+    nested = _lua_literal(value)
+    for part in reversed(parts):
+        nested = f"{{ {part} = {nested} }}"
+    return f"hl.config({nested})"
+
+
+def _legacy_dispatch_expr(dispatcher: str, args: str) -> str:
+    """Translate the small compatibility surface previously advertised here."""
+    quoted = _json.dumps(args)
+    if dispatcher == "workspace":
+        return f"hl.dsp.focus({{ workspace = {quoted} }})"
+    if dispatcher == "movetoworkspacesilent":
+        return f"hl.dsp.window.move({{ workspace = {quoted}, follow = false }})"
+    if dispatcher == "movetoworkspace":
+        return f"hl.dsp.window.move({{ workspace = {quoted}, follow = true }})"
+    if dispatcher == "focusmonitor":
+        return f"hl.dsp.focus({{ monitor = {quoted} }})"
+    if dispatcher == "exec":
+        return f"hl.dsp.exec_cmd({quoted})"
+    if dispatcher == "togglefloating":
+        return 'hl.dsp.window.float({ action = "toggle" })'
+    if dispatcher == "fullscreen":
+        mode = "maximized" if args == "1" else "fullscreen"
+        return f'hl.dsp.window.fullscreen({{ mode = "{mode}", action = "toggle" }})'
+    raise ValueError(
+        f"Legacy dispatcher {dispatcher!r} has no safe Lua mapping; "
+        "pass a complete hl.dsp.*(...) expression instead"
+    )
+
+
+def _dispatch_expr(dispatcher: str, args: str = "") -> str:
+    if dispatcher.lstrip().startswith("hl.dsp."):
+        if args:
+            raise ValueError("Do not pass args separately with a Lua hl.dsp expression")
+        return dispatcher.strip()
+    return _legacy_dispatch_expr(dispatcher, args)
+
+
+def _batch_expr(command: str) -> str:
+    kind, separator, rest = command.strip().partition(" ")
+    if not separator:
+        raise ValueError(f"Batch command is missing arguments: {command!r}")
+    if kind == "eval":
+        return rest
+    if kind == "keyword":
+        name, separator, value = rest.partition(" ")
+        if not separator:
+            raise ValueError(f"Keyword command is missing a value: {command!r}")
+        return _config_expr(name, value)
+    if kind == "dispatch":
+        dispatcher, _, args = rest.partition(" ")
+        expression = _dispatch_expr(dispatcher, args)
+        return f"hl.dispatch({expression})"
+    raise ValueError(f"Unsupported Lua batch command: {kind!r}")
 
 
 @mcp.tool()
@@ -124,14 +195,20 @@ def rollinglog(lines: int = 40):
 
 @mcp.tool()
 def dispatch(dispatcher: str, args: str = ""):
-    """Run a dispatcher (write). Examples: dispatch('workspace','2'), dispatch('fullscreen','0'), dispatch('togglefloating'), dispatch('exec','kitty'). Returns 'ok' on success."""
-    return _req(f"dispatch {dispatcher} {args}".strip())
+    """Run a Lua dispatcher (write). Prefer a complete expression such as 'hl.dsp.focus({ workspace = "2" })'. A small legacy compatibility map remains for workspace, move-to-workspace, focus-monitor, exec, floating, and fullscreen."""
+    return _req("dispatch " + _dispatch_expr(dispatcher, args))
 
 
 @mcp.tool()
 def keyword(name: str, value: str):
-    """Set a config option live at runtime (write), e.g. keyword('misc:vrr','2'). Does NOT persist to config files."""
-    return _req(f"keyword {name} {value}")
+    """Set a Lua config option live at runtime (write), e.g. keyword('misc:vrr','2'). Does NOT persist to config files."""
+    return _req("eval " + _config_expr(name, value))
+
+
+@mcp.tool()
+def eval_lua(code: str):
+    """Evaluate Lua in the active Hyprland config manager (write)."""
+    return _req("eval " + code)
 
 
 @mcp.tool()
@@ -142,13 +219,13 @@ def reload():
 
 @mcp.tool()
 def batch(commands: list[str]):
-    """Run several commands atomically in one connection (write). Each element is a full command like 'keyword misc:vrr 2' or 'dispatch workspace 3'."""
-    return _req("[[BATCH]]" + " ; ".join(commands))
+    """Run several Lua config/dispatcher expressions in one eval request (write). Accepts 'eval ...', mapped 'keyword ...', or mapped 'dispatch ...' entries."""
+    return _req("eval " + "; ".join(_batch_expr(command) for command in commands))
 
 
 @mcp.tool()
 def raw(command: str):
-    """Escape hatch: send any raw request over .socket.sock exactly as hyprctl would (without the leading 'hyprctl'). Prefix with 'j/' for JSON."""
+    """Escape hatch: send a raw socket request. With the Lua manager, writes must use 'eval ...' or 'dispatch hl.dsp.*(...)'; legacy keyword/dispatcher syntax is intentionally not translated here."""
     return _req(command)
 
 

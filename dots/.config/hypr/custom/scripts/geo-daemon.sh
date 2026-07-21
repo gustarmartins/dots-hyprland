@@ -216,17 +216,17 @@ start_daemon() {
             local mon_x="$6" mon_y="$7"
             local gx=$(( rel_x + mon_x ))
             local gy=$(( rel_y + mon_y ))
-            hyprctl --batch \
-                "dispatch setprop address:$addr no_anim 1 ; \
-                 dispatch setfloating address:$addr" &>/dev/null
+            hyprctl eval \
+                "hl.dispatch(hl.dsp.window.set_prop({ prop = \"no_anim\", value = \"1\", window = \"address:$addr\" })); \
+                 hl.dispatch(hl.dsp.window.float({ action = \"enable\", window = \"address:$addr\" }))" &>/dev/null
             {
                 sleep 0.05
-                hyprctl --batch \
-                    "dispatch resizewindowpixel exact $w $h,address:$addr ; \
-                     dispatch movewindowpixel exact $gx $gy,address:$addr ; \
-                     dispatch alterzorder top,address:$addr" &>/dev/null
+                hyprctl eval \
+                    "hl.dispatch(hl.dsp.window.resize({ x = $w, y = $h, window = \"address:$addr\" })); \
+                     hl.dispatch(hl.dsp.window.move({ x = $gx, y = $gy, window = \"address:$addr\" })); \
+                     hl.dispatch(hl.dsp.window.alter_zorder({ mode = \"top\", window = \"address:$addr\" }))" &>/dev/null
                 sleep 0.05
-                hyprctl dispatch setprop "address:$addr" no_anim 0 &>/dev/null
+                hyprctl dispatch "hl.dsp.window.set_prop({ prop = \"no_anim\", value = \"0\", window = \"address:$addr\" })" &>/dev/null
             } &
         }
 
@@ -253,10 +253,10 @@ start_daemon() {
             # 2. Master-float (only when enabled)
             if [ -f "$master_float_state" ]; then
                 if is_exempt "$win_class" "$win_title"; then
-                    hyprctl dispatch setfloating "address:$addr" &>/dev/null
+                    hyprctl dispatch "hl.dsp.window.float({ action = \"enable\", window = \"address:$addr\" })" &>/dev/null
                     {
                         sleep 0.05
-                        hyprctl dispatch alterzorder "top,address:$addr" &>/dev/null
+                        hyprctl dispatch "hl.dsp.window.alter_zorder({ mode = \"top\", window = \"address:$addr\" })" &>/dev/null
                     } &
                 else
                     read -r win_w win_h <<< "$default_size"

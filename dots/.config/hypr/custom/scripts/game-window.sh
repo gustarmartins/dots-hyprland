@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GEN_RULES="$HOME/.config/hypr/custom/generated_game_rules.conf"
+GAME_CLASSES="$HOME/.config/hypr/custom/game_classes.txt"
 
 notify() {
     notify-send -a Hyprland -t "${3:-3000}" "$1" "$2"
@@ -23,7 +23,7 @@ toggle_tag() {
         echo off
         return
     fi
-    hyprctl dispatch tagwindow "$tag" "address:$addr" >/dev/null
+    hyprctl dispatch "hl.dsp.window.tag({ tag = \"$tag\", window = \"address:$addr\" })" >/dev/null
     win=$(active)
     cls=$(jq -r '.class' <<<"$win")
     tags=$(jq -r '.tags | join(" ") | if . == "" then "none" else . end' <<<"$win")
@@ -49,25 +49,23 @@ cmd_tear() {
 }
 
 cmd_persist() {
-    local cls esc line win
+    local cls win
     cls=$(active | jq -r '.class // empty')
     if [[ -z "$cls" ]]; then
         notify "Game mode" "no active window"
         return
     fi
-    esc=$(printf '%s' "$cls" | sed -E 's/[][^$.|?*+(){}\\]/\\&/g')
-    line="windowrule = match:class ^(${esc})\$, tag +gamemode"
-    touch "$GEN_RULES"
-    if grep -qxF "$line" "$GEN_RULES"; then
-        grep -vxF "$line" "$GEN_RULES" > "${GEN_RULES}.tmp" || true
-        mv "${GEN_RULES}.tmp" "$GEN_RULES"
-        hyprctl reload config-only >/dev/null
+    touch "$GAME_CLASSES"
+    if grep -qxF "$cls" "$GAME_CLASSES"; then
+        grep -vxF "$cls" "$GAME_CLASSES" > "${GAME_CLASSES}.tmp" || true
+        mv "${GAME_CLASSES}.tmp" "$GAME_CLASSES"
+        hyprctl reload >/dev/null
         notify "Game mode rule removed" "$cls"
     else
-        printf '%s\n' "$line" >> "$GEN_RULES"
-        hyprctl reload config-only >/dev/null
+        printf '%s\n' "$cls" >> "$GAME_CLASSES"
+        hyprctl reload >/dev/null
         win=$(active)
-        has_tag gamemode <<<"$win" || hyprctl dispatch tagwindow +gamemode "address:$(jq -r '.address' <<<"$win")" >/dev/null
+        has_tag gamemode <<<"$win" || hyprctl dispatch "hl.dsp.window.tag({ tag = \"+gamemode\", window = \"address:$(jq -r '.address' <<<"$win")\" })" >/dev/null
         notify "Game mode rule saved" "$cls — full effect from next launch"
     fi
 }
@@ -77,7 +75,9 @@ cmd_launch() {
         notify "Game mode launch" "no command given"
         exit 1
     fi
-    hyprctl dispatch exec -- "[tag +gamemode] $*" >/dev/null
+    local quoted
+    quoted=$(printf '%s' "$*" | jq -Rs .)
+    hyprctl dispatch "hl.dsp.exec_cmd($quoted, { tag = \"+gamemode\" })" >/dev/null
     notify "Launching in game mode" "$*"
 }
 

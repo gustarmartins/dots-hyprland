@@ -16,9 +16,9 @@ QuickToggleModel {
     mainAction: () => {
         root.toggled = !root.toggled
         if (root.toggled) {
-            Quickshell.execDetached(["bash", "-c", `hyprctl keyword render:new_render_scheduling 1`])
+            HyprlandConfig.set("render:new_render_scheduling", 1)
         } else {
-            Quickshell.execDetached(["bash", "-c", `hyprctl keyword render:new_render_scheduling 0`])
+            HyprlandConfig.set("render:new_render_scheduling", 0)
         }
     }
     Process {

@@ -6,7 +6,6 @@
 # which is more effective than DPMS for resetting the monitor's internal scaler.
 
 MONITOR="DP-1"
-MONITOR_CONF="1920x1080@144,0x0,1,bitdepth,10,vrr,1"
 LOG_TAG="monitor-wake-fix"
 
 log() {
@@ -17,21 +16,21 @@ log() {
 log "Aggressive monitor wake fix triggered for $MONITOR"
 
 # Step 1: Disable the monitor entirely (kills the signal/link)
-hyprctl keyword monitor "$MONITOR,disable"
+hyprctl eval 'hl.monitor({ output = "DP-1", disabled = true })'
 log "Monitor $MONITOR disabled (signal dropped)"
 
 # Wait for driver/monitor to realize the link is gone
 sleep 3
 
 # Step 2: Re-enable with full config
-hyprctl keyword monitor "$MONITOR,$MONITOR_CONF"
-log "Monitor $MONITOR re-enabled with config: $MONITOR_CONF"
+hyprctl eval 'hl.monitor(require("monitors").aoc_recovery)'
+log "Monitor $MONITOR re-enabled with the Lua recovery profile"
 
 # Step 3: Give the AOC scaler time to wake up and lock
 sleep 4
 
 # Step 4: Final config re-apply to fix any missed handshake parameters (like 10-bit)
-hyprctl keyword monitor "$MONITOR,$MONITOR_CONF"
+hyprctl eval 'hl.monitor(require("monitors").aoc_recovery)'
 log "Final config re-apply sent"
 
 # Verification

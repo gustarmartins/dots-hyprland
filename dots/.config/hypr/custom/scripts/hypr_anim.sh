@@ -15,9 +15,9 @@ set -o pipefail
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}"
 readonly ANIM_DIR="$CONFIG_DIR/hypr/custom/animations"
 readonly LINK_DIR="$ANIM_DIR/active"
-readonly DEST_FILE="$LINK_DIR/active.conf"
+readonly DEST_FILE="$LINK_DIR/active.lua"
 readonly STATE_FILE="$CONFIG_DIR/hypr/custom/animations/state"
-readonly FALLBACK_ANIM="horizontal_dusky.conf"
+readonly FALLBACK_ANIM="horizontal_dusky.lua"
 
 # Visual Assets (Nerd Fonts)
 readonly ICON_ACTIVE=""   # Checkmark
@@ -66,6 +66,9 @@ if [[ "${1:-}" == "--current" ]]; then
     # 1. Attempt to read existing valid state
     if [[ -f "$STATE_FILE" ]]; then
         saved_anim=$(<"$STATE_FILE")
+        if [[ "$saved_anim" == *.conf ]]; then
+            saved_anim="${saved_anim%.conf}.lua"
+        fi
         if [[ -n "$saved_anim" && -f "$saved_anim" ]]; then
             target_anim="$saved_anim"
         fi
@@ -153,13 +156,13 @@ if [[ ! -d "$ANIM_DIR" ]]; then
     exit 0
 fi
 
-# Gather .conf files safely
+# Gather Lua profiles safely
 shopt -s nullglob
-files=("$ANIM_DIR"/*.conf)
+files=("$ANIM_DIR"/*.lua)
 shopt -u nullglob
 
 if [[ ${#files[@]} -eq 0 ]]; then
-    printf '%s\0icon\x1f%s\x1finfo\x1fignore\n' "No .conf files found" "$ICON_ERROR"
+    printf '%s\0icon\x1f%s\x1finfo\x1fignore\n' "No Lua profiles found" "$ICON_ERROR"
     exit 0
 fi
 

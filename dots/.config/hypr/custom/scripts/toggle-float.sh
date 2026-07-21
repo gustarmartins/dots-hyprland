@@ -23,7 +23,7 @@ if [ -f "$STATE_FILE" ]; then
         --argjson ws "$ACTIVE_WS" \
         '.[] | select(.workspace.id == $ws and .floating == true) | .address' \
     | while read -r addr; do
-        hyprctl dispatch settiled "address:$addr"
+        hyprctl dispatch "hl.dsp.window.float({ action = \"disable\", window = \"address:$addr\" })"
     done
 
     # Stop the daemon if geometry restore is also off
@@ -47,7 +47,7 @@ else
         --argjson ws "$ACTIVE_WS" \
         '.[] | select(.workspace.id == $ws and .floating == false) | .address' \
     | while read -r addr; do
-        hyprctl dispatch setfloating "address:$addr"
+        hyprctl dispatch "hl.dsp.window.float({ action = \"enable\", window = \"address:$addr\" })"
     done
 
     notify-send "Hyprland" "Master Float: ON"

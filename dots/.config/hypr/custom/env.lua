@@ -1,0 +1,5 @@
+hl.env("EDITOR", "kate")
+hl.env("LIBVA_DRIVER_NAME", "radeonsi")
+hl.env("MOZ_WAYLAND_USE_VAAPI", "1")
+hl.env("GTK_IM_MODULE", "xim")
+hl.env("FREETYPE_PROPERTIES", "truetype:interpreter-version=40 cff:no-stem-darkening=1")

@@ -4,8 +4,11 @@ After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate
 
 [Service]
 Type=oneshot
+User=gus
 ExecStart=/usr/local/bin/fix-display-resume.sh
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/gus
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 
 [Install]
 WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

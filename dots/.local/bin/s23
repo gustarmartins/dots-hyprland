@@ -5,13 +5,6 @@ DEVICE="192.168.0.170:6666"
 echo "Connecting to S23 Ultra ($DEVICE)..."
 adb connect $DEVICE
 
-# Set Hyprland window rules dynamically to make the scrcpy window float
-# and set it to a nice phone-proportioned size (e.g. 720x1544 for the S23 Ultra)
-# We match the window by the custom title we give scrcpy
-hyprctl keyword windowrulev2 "float,title:^(S23_Ultra)$" > /dev/null
-hyprctl keyword windowrulev2 "size 400 858,title:^(S23_Ultra)$" > /dev/null
-hyprctl keyword windowrulev2 "center,title:^(S23_Ultra)$" > /dev/null
-
 echo "Launching scrcpy in 720p High-Bitrate mode for Hyprland..."
 scrcpy -s $DEVICE \
     --window-title="S23_Ultra" \

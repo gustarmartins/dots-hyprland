@@ -16,9 +16,9 @@ QuickToggleModel {
     mainAction: () => {
         root.toggled = !root.toggled
         if (root.toggled) {
-            Quickshell.execDetached(["bash", "-c", `hyprctl keyword render:direct_scanout 2`])
+            HyprlandConfig.set("render:direct_scanout", 2)
         } else {
-            Quickshell.execDetached(["bash", "-c", `hyprctl keyword render:direct_scanout 0`])
+            HyprlandConfig.set("render:direct_scanout", 0)
         }
     }
     Process {

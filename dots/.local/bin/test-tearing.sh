@@ -7,8 +7,7 @@
 #                                       blocks tearing on Vega 11!)
 # SDL_VIDEO_DOUBLE_BUFFER     = 1     (required for tearing under SDL/Wayland)
 #
-# NOTE: osu! must already have an `immediate` window rule in hyprland.conf.
-#       e.g.:  windowrule = immediate on, class:osu!
+# NOTE: osu! must already have an `immediate` window rule in the Lua config.
 # ============================================================================
 set -euo pipefail
 
@@ -25,8 +24,8 @@ echo "║  cursor:no_hardware_cursors  = 1  (fixes Vega 11 blocker)   ║"
 echo "║  + SDL_VIDEO_DOUBLE_BUFFER=1                                 ║"
 echo "║                                                              ║"
 echo "║  Make sure you have:                                         ║"
-echo "║    windowrule = immediate on, class:osu!                     ║"
-echo "║  in your hyprland.conf (or equivalent for your osu class)    ║"
+echo "║    immediate = true for the osu! window class                ║"
+echo "║  in your Hyprland Lua window rules                           ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -41,7 +40,7 @@ echo "    cursor:no_hardware_cursors  was: $ORIG_HWCURSOR"
 # ── Apply test settings ────────────────────────────────────────────────────
 echo ""
 echo "[*] Applying test settings..."
-hyprctl --batch "keyword general:allow_tearing true ; keyword cursor:no_hardware_cursors 1"
+hyprctl eval 'hl.config({ general = { allow_tearing = true }, cursor = { no_hardware_cursors = 1 } })'
 echo "[✓] Settings applied."
 echo ""
 echo "[!] NOTE: hw cursors have been disabled to unblock tearing on Vega 11."
@@ -108,7 +107,7 @@ restore_settings() {
     echo "[*] Restoring original Hyprland settings..."
     local tear_val="false"
     [[ "$ORIG_TEARING" == "1" ]] && tear_val="true"
-    hyprctl --batch "keyword general:allow_tearing $tear_val ; keyword cursor:no_hardware_cursors $ORIG_HWCURSOR"
+    hyprctl eval "hl.config({ general = { allow_tearing = $tear_val }, cursor = { no_hardware_cursors = $ORIG_HWCURSOR } })"
     echo "[✓] Settings restored."
 
     # ── Post-game monitor report ────────────────────────────────────────────

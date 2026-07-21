@@ -34,7 +34,7 @@ echo "    render:direct_scanout        was: $ORIG_DS"
 # ── Apply test settings ────────────────────────────────────────────────────
 echo ""
 echo "[*] Applying test settings..."
-hyprctl --batch "keyword render:new_render_scheduling true ; keyword render:direct_scanout 1"
+hyprctl eval 'hl.config({ render = { new_render_scheduling = true, direct_scanout = 1 } })'
 echo "[✓] Settings applied."
 
 # ── Capture baseline monitor state ─────────────────────────────────────────
@@ -99,7 +99,7 @@ restore_settings() {
     # Convert int back to bool string for new_render_scheduling
     local nrs_val="false"
     [[ "$ORIG_NRS" == "1" ]] && nrs_val="true"
-    hyprctl --batch "keyword render:new_render_scheduling $nrs_val ; keyword render:direct_scanout $ORIG_DS"
+    hyprctl eval "hl.config({ render = { new_render_scheduling = $nrs_val, direct_scanout = $ORIG_DS } })"
     echo "[✓] Settings restored."
 
     # ── Post-game monitor report ────────────────────────────────────────────

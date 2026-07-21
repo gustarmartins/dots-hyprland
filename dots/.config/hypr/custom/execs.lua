@@ -1,0 +1,2 @@
+-- Local autostart commands belong inside a hyprland.start handler.
+-- There are currently no additional local commands beyond hyprland/execs.lua.

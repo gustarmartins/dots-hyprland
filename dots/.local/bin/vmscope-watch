@@ -55,7 +55,7 @@ nudge() {
     "ZRAM ${zp}%, available ${avail} MiB, swap free ${swapfree} MiB, PSI full10/full60 ${psi10}/${psi60}. ${reason}. Add the NVMe tier + keep app RAM resident?" 2>/dev/null)
   case "$choice" in
     heavy) "$MEMMODE" set heavy && notify-send -t 4000 -i emblem-default "vmscope" "Switched to Heavy — NVMe tier on, swappiness 60." ;;
-    open)  hyprctl dispatch exec "kitty --class vmscope-float $HOME/.local/bin/vmscope watch" >/dev/null 2>&1 ;;
+    open)  hyprctl dispatch 'hl.dsp.exec_cmd("kitty --class vmscope-float $HOME/.local/bin/vmscope watch")' >/dev/null 2>&1 ;;
   esac
   mark
 }
