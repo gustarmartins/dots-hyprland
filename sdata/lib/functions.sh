@@ -106,8 +106,21 @@ function sudo_init_keepalive(){
   # Start background process to keep sudo session alive
   # This updates the sudo timestamp every 60 seconds
   (
+    keepalive_sleep_pid=""
+    cleanup_keepalive() {
+      trap - EXIT INT TERM
+      if [[ -n "$keepalive_sleep_pid" ]] && kill -0 "$keepalive_sleep_pid" 2>/dev/null; then
+        kill "$keepalive_sleep_pid" 2>/dev/null || true
+        wait "$keepalive_sleep_pid" 2>/dev/null || true
+      fi
+    }
+    trap cleanup_keepalive EXIT INT TERM
+
     while true; do
-      sleep 60
+      sleep 60 &
+      keepalive_sleep_pid=$!
+      wait "$keepalive_sleep_pid" || exit 0
+      keepalive_sleep_pid=""
       sudo true 2>/dev/null || exit 0
     done
   ) &
