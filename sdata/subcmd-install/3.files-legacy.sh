@@ -92,7 +92,22 @@ case "${SKIP_HYPRLAND}" in
       v bash -c "printf \"# For fedora to setup polkit\nexec-once = /usr/libexec/kf6/polkit-kde-authentication-agent-1\n\" >> ${XDG_CONFIG_HOME}/hypr/hyprland/execs.conf"
     fi
 
-    install_dir__ignore_existing "dots/.config/hypr/custom" "${XDG_CONFIG_HOME}/hypr/custom"
+    custom_source="dots/.config/hypr/custom"
+    custom_target="${XDG_CONFIG_HOME}/hypr/custom"
+    if [[ "${INSTALL_FIRSTRUN}" == true ]]; then
+      # A real first install also covers legacy .conf -> Lua migrations. Preserve
+      # the complete old custom tree because rsync --delete removes files which
+      # have no equivalent in the new profile and the generic clash backup does
+      # not include source-absent files.
+      if [[ -d "$custom_target" && "${SKIP_BACKUP}" != true ]]; then
+        custom_backup="${BACKUP_DIR}/.config/hypr/custom.pre-lua.$(date +%Y%m%d-%H%M%S)"
+        v mkdir -p "$custom_backup"
+        v rsync -a "$custom_target/" "$custom_backup/"
+      fi
+      install_dir__sync "$custom_source" "$custom_target"
+    else
+      install_dir__ignore_existing "$custom_source" "$custom_target"
+    fi
     ;;
 esac
 
