@@ -1,14 +1,12 @@
 [Unit]
-Description=Fix display quality after resume (retrain DP link)
+Description=Fix display quality after resume for %i (retrain DP link)
 After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 
 [Service]
 Type=oneshot
-User=gus
+User=%i
 ExecStart=/usr/local/bin/fix-display-resume.sh
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-Environment=HOME=/home/gus
-Environment=XDG_RUNTIME_DIR=/run/user/1000
 
 [Install]
 WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

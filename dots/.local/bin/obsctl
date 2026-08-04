@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+import asyncio, base64, hashlib, json, os, socket, subprocess, sys, time
+
+CFG = os.path.expanduser("~/.config/obs-studio/plugin_config/obs-websocket/config.json")
+PRESETS = os.path.expanduser("~/.config/obs-studio/presets")
+RECORD_SCENE = "Scene"
+IDLE_SCENE = "Scene 2"
+
+
+def load_cfg():
+    try:
+        with open(CFG) as f:
+            c = json.load(f)
+    except OSError:
+        c = {}
+    return c.get("server_port", 4455), c.get("server_password", ""), c.get("server_enabled", False)
+
+
+def notify(title, body="", icon="obs"):
+    subprocess.run(["notify-send", "-a", "OBS", "-i", icon, "-h", "string:x-canonical-private-synchronous:obsctl",
+                    title, body], check=False)
+
+
+def websocket_reachable():
+    port, _, enabled = load_cfg()
+    if not enabled:
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_obs():
+    if websocket_reachable():
+        return
+
+    running = subprocess.run(
+        ["pgrep", "-x", "obs"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    ).returncode == 0
+    if not running:
+        notify("Starting OBS", "Eden profile; recording will start shortly")
+        subprocess.Popen(
+            ["obs", "--profile", "Eden", "--collection", "Eden", "--minimize-to-tray",
+             "--disable-shutdown-check"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if websocket_reachable():
+            # Give the restored PipeWire sources a moment to begin streaming.
+            time.sleep(2)
+            return
+        time.sleep(0.25)
+
+    notify("OBS failed to start", "WebSocket was not ready after 20 seconds", "dialog-error")
+    sys.exit(1)
+
+
+async def call(request_type, data=None):
+    import websockets
+    port, password, enabled = load_cfg()
+    if not enabled:
+        notify("OBS WebSocket disabled", "Tools -> WebSocket Server Settings -> Enable")
+        sys.exit(1)
+    async with websockets.connect(f"ws://127.0.0.1:{port}", open_timeout=3) as ws:
+        hello = json.loads(await ws.recv())
+        ident = {"rpcVersion": hello["d"]["rpcVersion"]}
+        auth = hello["d"].get("authentication")
+        if auth:
+            secret = base64.b64encode(hashlib.sha256((password + auth["salt"]).encode()).digest())
+            ident["authentication"] = base64.b64encode(
+                hashlib.sha256(secret + auth["challenge"].encode()).digest()).decode()
+        await ws.send(json.dumps({"op": 1, "d": ident}))
+        await ws.recv()
+        await ws.send(json.dumps({"op": 6, "d": {"requestType": request_type, "requestId": "1",
+                                                 "requestData": data or {}}}))
+        while True:
+            msg = json.loads(await ws.recv())
+            if msg["op"] == 7:
+                return msg["d"]
+
+
+def run(request_type, data=None):
+    try:
+        return asyncio.run(call(request_type, data))
+    except (OSError, asyncio.TimeoutError):
+        notify("OBS not reachable", "Is OBS running?", "dialog-error")
+        sys.exit(1)
+
+
+def switch_scene(name):
+    r = run("SetCurrentProgramScene", {"sceneName": name})
+    if r["requestStatus"]["code"] != 100:
+        print(r["requestStatus"].get("comment", "scene switch failed"), file=sys.stderr)
+        sys.exit(1)
+
+
+def fmt(ms):
+    s = int(ms // 1000)
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "toggle"
+    if cmd in ("toggle", "start"):
+        ensure_obs()
+    if cmd == "toggle":
+        before = run("GetRecordStatus")["responseData"]
+        if before["outputActive"]:
+            r = run("StopRecord")
+            switch_scene(IDLE_SCENE)
+            path = r.get("responseData", {}).get("outputPath", "")
+            notify("Recording stopped", os.path.basename(path), "media-playback-stop")
+        else:
+            switch_scene(RECORD_SCENE)
+            time.sleep(1)
+            run("StartRecord")
+            notify("Recording started", "", "media-record")
+    elif cmd == "pause":
+        run("ToggleRecordPause")
+        st = run("GetRecordStatus")["responseData"]
+        notify("Recording paused" if st["outputPaused"] else "Recording resumed", fmt(st["outputDuration"]))
+    elif cmd == "status":
+        st = run("GetRecordStatus")["responseData"]
+        if not st["outputActive"]:
+            print("idle")
+        else:
+            print(("paused " if st["outputPaused"] else "recording ") + fmt(st["outputDuration"]))
+    elif cmd == "split":
+        run("SplitRecordFile")
+        notify("Recording split")
+    elif cmd == "start":
+        st = run("GetRecordStatus")["responseData"]
+        if not st["outputActive"]:
+            switch_scene(RECORD_SCENE)
+            time.sleep(1)
+            run("StartRecord")
+        notify("Recording started")
+    elif cmd == "stop":
+        st = run("GetRecordStatus")["responseData"]
+        if st["outputActive"]:
+            run("StopRecord")
+        switch_scene(IDLE_SCENE)
+        notify("Recording stopped")
+    elif cmd == "replay":
+        run("SaveReplayBuffer")
+        notify("Replay saved")
+    elif cmd == "sources":
+        for s in run("GetInputList")["responseData"]["inputs"]:
+            fl = run("GetSourceFilterList", {"sourceName": s["inputName"]})["responseData"]["filters"]
+            print(f"{s['inputName']}  [{s['inputKind']}]" + (f"  filters: {[f['filterName'] for f in fl]}" if fl else ""))
+    elif cmd == "scene":
+        if len(sys.argv) < 3:
+            print("usage: obsctl scene <name>", file=sys.stderr)
+            sys.exit(2)
+        name = " ".join(sys.argv[2:])
+        switch_scene(name)
+        print(name)
+    elif cmd == "fsave":
+        source, fname = sys.argv[2], sys.argv[3]
+        preset = sys.argv[4] if len(sys.argv) > 4 else fname.lower().replace(" ", "-")
+        r = run("GetSourceFilter", {"sourceName": source, "filterName": fname})["responseData"]
+        os.makedirs(PRESETS, exist_ok=True)
+        path = os.path.join(PRESETS, preset + ".json")
+        with open(path, "w") as f:
+            json.dump({"name": fname, "kind": r["filterKind"], "settings": r["filterSettings"]}, f, indent=2)
+        print(f"saved -> {path}")
+    elif cmd == "fload":
+        source, preset = sys.argv[2], sys.argv[3]
+        with open(os.path.join(PRESETS, preset + ".json")) as f:
+            p = json.load(f)
+        name = sys.argv[4] if len(sys.argv) > 4 else p["name"]
+        r = run("CreateSourceFilter", {"sourceName": source, "filterName": name,
+                                       "filterKind": p["kind"], "filterSettings": p["settings"]})
+        if r["requestStatus"]["code"] != 100:
+            run("SetSourceFilterSettings", {"sourceName": source, "filterName": name,
+                                            "filterSettings": p["settings"], "overlay": False})
+        notify(f"Filter applied: {name}", source)
+        print(f"applied {preset} -> {source}")
+    else:
+        print("usage: obsctl [toggle|start|stop|pause|split|status|replay|sources|scene <name>|"
+              "fsave <source> <filter> [preset]|fload <source> <preset> [name]]", file=sys.stderr)
+        sys.exit(2)
+
+
+main()

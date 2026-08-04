@@ -92,9 +92,8 @@ Item { // Bar content region
 
             LeftSidebarButton { // Left sidebar button
                 id: leftSidebarButton
-                visible: false
                 Layout.alignment: Qt.AlignVCenter
-                Layout.leftMargin: visible ? Appearance.rounding.screenRounding : 0
+                Layout.leftMargin: Appearance.rounding.screenRounding
                 colBackground: barLeftSideMouseArea.hovered ? Appearance.colors.colLayer1Hover : ColorUtils.transparentize(Appearance.colors.colLayer1Hover, 1)
             }
 
@@ -263,9 +262,30 @@ Item { // Bar content region
                         Layout.rightMargin: indicatorsRowLayout.realSpacing
                         color: rightSidebarButton.colText
                     }
-                    NotificationUnreadCount {
-                        id: notificationUnreadCount
-                        Layout.alignment: Qt.AlignVCenter
+                    Revealer {
+                        reveal: Notifications.silent || Notifications.unread > 0
+                        Layout.fillHeight: true
+                        Layout.rightMargin: reveal ? indicatorsRowLayout.realSpacing : 0
+                        implicitHeight: reveal ? notificationUnreadCount.implicitHeight : 0
+                        implicitWidth: reveal ? notificationUnreadCount.implicitWidth : 0
+                        Behavior on Layout.rightMargin {
+                            animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                        }
+                        NotificationUnreadCount {
+                            id: notificationUnreadCount
+                        }
+                    }
+                    MaterialSymbol {
+                        text: Network.materialSymbol
+                        iconSize: Appearance.font.pixelSize.larger
+                        color: rightSidebarButton.colText
+                    }
+                    MaterialSymbol {
+                        Layout.leftMargin: indicatorsRowLayout.realSpacing
+                        visible: BluetoothStatus.available
+                        text: BluetoothStatus.connected ? "bluetooth_connected" : BluetoothStatus.enabled ? "bluetooth" : "bluetooth_disabled"
+                        iconSize: Appearance.font.pixelSize.larger
+                        color: rightSidebarButton.colText
                     }
                 }
             }

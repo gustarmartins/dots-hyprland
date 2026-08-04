@@ -16,14 +16,14 @@ QuickToggleModel {
     statusText: root.active ? "Focused" : "Off"
 
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "/home/gus/.local/bin/focus-mode.sh toggle"])
+        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/focus-mode.sh\" toggle"])
         refreshDelay.restart()
     }
 
     Process {
         id: fetchState
         running: true
-        command: ["bash", "-c", "/home/gus/.local/bin/focus-mode.sh get_state"]
+        command: ["bash", "-c", "exec \"$HOME/.local/bin/focus-mode.sh\" get_state"]
         stdout: StdioCollector {
             onStreamFinished: root.active = (text.trim() === "on")
         }

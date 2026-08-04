@@ -8,7 +8,7 @@
 case "${SKIP_MISCCONF}" in
   true) true;;
   *)
-    for i in $(find dots/.config/ -mindepth 1 -maxdepth 1 ! -name 'quickshell' ! -name 'fish' ! -name 'hypr' ! -name 'fontconfig' -exec basename {} \;); do
+    for i in $(find dots/.config/ -mindepth 1 -maxdepth 1 ! -name 'quickshell' ! -name 'fish' ! -name 'hypr' ! -name 'fontconfig' ! -name 'illogical-impulse' -exec basename {} \;); do
 #      i="dots/.config/$i"
       echo "[$0]: Found target: dots/.config/$i"
       if [ -d "dots/.config/$i" ];then install_dir__sync "dots/.config/$i" "$XDG_CONFIG_HOME/$i"
@@ -19,9 +19,29 @@ case "${SKIP_MISCCONF}" in
     ;;
 esac
 
+# This fork's Hyprland and Quickshell profile calls small user-owned helpers
+# (OBS control, VM reporting, Focus Mode, and display recovery). Install only
+# the files shipped by the repository and preserve unrelated local binaries.
+if [[ -d dots/.local/bin && ( "${SKIP_QUICKSHELL}" != true || "${SKIP_HYPRLAND}" != true ) ]]; then
+  install_dir dots/.local/bin "$XDG_BIN_HOME"
+fi
+
 case "${SKIP_QUICKSHELL}" in
   true) true;;
   *)
+    # Install the current shell layout on a fresh profile without deleting the
+    # shell's runtime backups/translations on an existing machine. @HOME@ keeps
+    # the public template portable and is expanded only in the destination copy.
+    profile_config="profile/illogical-impulse/config.json"
+    if [[ -f "$profile_config" ]]; then
+      target_config="$XDG_CONFIG_HOME/illogical-impulse/config.json"
+      install_file__auto_backup "$profile_config" "$target_config"
+      for installed_config in "$target_config" "$target_config.new"; do
+        if [[ -f "$installed_config" ]] && grep -q '@HOME@' "$installed_config"; then
+          sed -i "s|@HOME@|$HOME|g" "$installed_config"
+        fi
+      done
+    fi
      # Should overwriting the whole directory not only ~/.config/quickshell/ii/ cuz https://github.com/end-4/dots-hyprland/issues/2294#issuecomment-3448671064
     install_dir__sync dots/.config/quickshell "$XDG_CONFIG_HOME"/quickshell
     ;;

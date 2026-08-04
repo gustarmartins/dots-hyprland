@@ -1,0 +1,638 @@
+#!/usr/bin/env python3
+import os, sys, glob, re
+
+HOME = os.path.expanduser("~")
+SHARE = os.path.join(HOME, ".local/share/vmatlas")
+DOCFILE = os.path.join(SHARE, "vm-sysctl.txt")
+GUIDE = os.path.join(SHARE, "GUIDE.md")
+VM = "/proc/sys/vm"
+Z = "/sys/block/zram0"
+STATE = "/run/memory-profile.state"
+RAM_PLUS = "/var/lib/ram-plus.swap"
+WB_BOOT_CAP_PAGES = 4 * 1024 * 1024 * 1024 // 4096
+
+
+def on():
+    return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+class C:
+    def __init__(self, e):
+        g = lambda s: s if e else ""
+        self.R = g("\033[0m"); self.B = g("\033[1m"); self.D = g("\033[2m")
+        self.cy = g("\033[36m"); self.gr = g("\033[32m"); self.yl = g("\033[33m")
+        self.rd = g("\033[31m"); self.mg = g("\033[35m"); self.bl = g("\033[34m")
+
+
+c = C(on())
+
+DEFAULTS = {
+    "swappiness": "60", "vfs_cache_pressure": "100", "vfs_cache_pressure_denom": "100",
+    "page-cluster": "3", "dirty_ratio": "20", "dirty_background_ratio": "10",
+    "dirty_bytes": "0", "dirty_background_bytes": "0", "dirty_expire_centisecs": "3000",
+    "dirty_writeback_centisecs": "500", "watermark_scale_factor": "10",
+    "watermark_boost_factor": "15000", "overcommit_memory": "0", "overcommit_ratio": "50",
+    "compaction_proactiveness": "20", "max_map_count": "65530", "extfrag_threshold": "500",
+    "zone_reclaim_mode": "0", "oom_dump_tasks": "1", "oom_kill_allocating_task": "0",
+    "panic_on_oom": "0", "page_lock_unfairness": "5", "min_slab_ratio": "5",
+    "min_unmapped_ratio": "1", "stat_interval": "1", "admin_reserve_kbytes": "8192",
+    "user_reserve_kbytes": "131072", "mmap_min_addr": "65536", "numa_zonelist_order": "Node",
+    "memory_failure_early_kill": "0", "memory_failure_recovery": "1", "enable_soft_offline": "1",
+    "compact_unevictable_allowed": "1", "defrag_mode": "0", "legacy_va_layout": "0",
+    "numa_stat": "1", "unprivileged_userfaultfd": "0", "nr_hugepages": "0",
+    "hugetlb_optimize_vmemmap": "0", "percpu_pagelist_high_fraction": "0",
+    "dirtytime_expire_seconds": "43200", "laptop_mode": "0", "memfd_noexec": "0",
+}
+
+PROFILES = {
+    "ultra":       (False, "200 1 0 131072 10 10G 5G 15000 0"),
+    "blazing":     (False, "150 10 0 262144 150 512M 128M 15000 0"),
+    "optimized":   (True,  "100 20 0 262144 125 256M 64M 15000 0"),
+    "heavy":       (True,  "60 70 0 524288 200 128M 32M 15000 0"),
+    "anti-freeze": (True,  "90 50 0 524288 300 192M 48M 15000 0"),
+}
+ZRAM_PROFILES = {
+    "main":    ("zstd L3 -> zstd L12",      "raw", "ram*2", "ram/2"),
+    "tiered-wb": ("zstd L3 -> zstd L12",    "raw", "ram*2", "ram/2"),
+    "zstd":    ("zstd L3 only",             "no",  "ram*2", "ram/2"),
+    "lz4":     ("lz4 only",                 "no",  "ram*2", "ram/2"),
+    "lz4hc":   ("lz4hc only",               "no",  "ram*2", "ram/2"),
+    "zstd-wb": ("zstd L3 -> zstd L12",      "raw", "ram*2", "ram/2"),
+    "lz4-wb":  ("lz4 -> zstd L12",          "raw", "ram*2", "ram/2"),
+    "lz4hc-wb": ("lz4hc -> zstd L12",       "raw", "ram*2", "ram/2"),
+}
+PRESET_KEYS = ["swappiness", "vfs_cache_pressure", "page-cluster", "min_free_kbytes",
+               "watermark_scale_factor", "dirty_bytes", "dirty_background_bytes",
+               "watermark_boost_factor", "zone_reclaim_mode"]
+
+MAX_SPEED = {
+    "swappiness": "120",
+    "vfs_cache_pressure": "60",
+    "page-cluster": "0",
+    "min_free_kbytes": "131072",
+    "watermark_scale_factor": "100",
+    "watermark_boost_factor": "15000",
+    "zone_reclaim_mode": "0",
+    "dirty_bytes": "268435456",
+    "dirty_background_bytes": "67108864",
+    "compaction_proactiveness": "0",
+    "compact_unevictable_allowed": "1",
+    "defrag_mode": "0",
+    "extfrag_threshold": "750",
+    "numa_stat": "1",
+    "stat_interval": "1",
+    "max_map_count": "1048576",
+}
+
+
+def rd(p):
+    try:
+        with open(p) as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def human(n):
+    try:
+        n = float(n)
+    except Exception:
+        return str(n)
+    neg = n < 0
+    n = abs(n)
+    for u in ["B", "K", "M", "G", "T"]:
+        if n < 1024:
+            s = f"{n:.0f}{u}" if u == "B" else f"{n:.1f}{u}"
+            return ("-" + s) if neg else s
+        n /= 1024
+    return f"{n:.1f}P"
+
+
+def selected(s):
+    if not s:
+        return "?"
+    for tok in s.split():
+        if tok.startswith("[") and tok.endswith("]"):
+            return tok[1:-1]
+    return s.split()[-1] if "#" not in s else s.split()[1]
+
+
+def load_docs():
+    docs = {}
+    if not os.path.exists(DOCFILE):
+        return docs
+    lines = open(DOCFILE, errors="replace").read().splitlines()
+    cur, buf, i = None, [], 0
+    while i < len(lines):
+        line = lines[i]
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if line.strip() and re.fullmatch(r"=+", nxt.strip() or "x") and \
+           re.fullmatch(r"[A-Za-z0-9_\-]+", line.strip()):
+            if cur:
+                docs[cur] = "\n".join(buf).strip()
+            cur, buf, i = line.strip(), [], i + 2
+            continue
+        if cur is not None:
+            buf.append(line)
+        i += 1
+    if cur:
+        docs[cur] = "\n".join(buf).strip()
+    return docs
+
+
+def summary(text, width=66):
+    if not text:
+        return ""
+    t = " ".join(text.split())
+    if ". " in t:
+        t = t.split(". ")[0] + "."
+    return t[:width - 1] + "…" if len(t) > width else t
+
+
+def read_vm():
+    d = {}
+    for p in sorted(glob.glob(VM + "/*")):
+        k = os.path.basename(p)
+        if k in ("compact_memory", "drop_caches", "stat_refresh"):
+            continue
+        v = rd(p)
+        if v is not None:
+            d[k] = " ".join(v.split())
+    return d
+
+
+_KCONF = None
+ZRAM_CAPS = ("CONFIG_ZRAM_MULTI_COMP", "CONFIG_ZRAM_WRITEBACK",
+             "CONFIG_ZRAM_TRACK_ENTRY_ACTIME", "CONFIG_ZRAM_MEMORY_TRACKING")
+
+
+def kconfig():
+    global _KCONF
+    if _KCONF is not None:
+        return _KCONF
+    data = None
+    try:
+        if os.path.exists("/proc/config.gz"):
+            import gzip
+            data = gzip.open("/proc/config.gz", "rt").read()
+        else:
+            data = open("/boot/config-" + os.uname().release).read()
+    except Exception:
+        data = None
+    _KCONF = {}
+    for k in ZRAM_CAPS:
+        if data is None:
+            _KCONF[k] = None
+        else:
+            _KCONF[k] = (k + "=y") in data or (k + "=m") in data
+    return _KCONF
+
+
+def zram_info():
+    if not os.path.isdir(Z):
+        return None
+    z = {}
+    z["primary"] = selected(rd(Z + "/comp_algorithm") or "")
+    rec = rd(Z + "/recomp_algorithm") or ""
+    z["recomp"] = selected(rec) if rec and "#" in rec else None
+    z["recomp_raw"] = " ".join(rec.replace("\x00", " ").split()) if rec else ""
+    z["disksize"] = int(rd(Z + "/disksize") or 0)
+    ml = rd(Z + "/mem_limit")
+    z["mem_limit"] = int(ml) if ml and ml.isdigit() else 0
+    z["backing"] = rd(Z + "/backing_dev")
+    mm = (rd(Z + "/mm_stat") or "").split()
+    if len(mm) >= 8:
+        z["orig"], z["compr"], z["used"] = int(mm[0]), int(mm[1]), int(mm[2])
+        if not z["mem_limit"]:
+            z["mem_limit"] = int(mm[3])
+        z["used_max"] = int(mm[4])
+        z["same"] = int(mm[5])
+        z["huge"] = int(mm[7])
+        z["huge_since"] = int(mm[8]) if len(mm) >= 9 else None
+    bd = (rd(Z + "/bd_stat") or "").split()
+    z["bd_pages"] = int(bd[0]) if bd else 0
+    z["bd_reads"] = int(bd[1]) if len(bd) >= 2 else 0
+    z["bd_writes"] = int(bd[2]) if len(bd) >= 3 else 0
+    z["wb_enable"] = rd(Z + "/writeback_limit_enable")
+    wl = rd(Z + "/writeback_limit")
+    z["wb_limit"] = int(wl) if wl and wl.isdigit() else 0
+    z["compressed_wb"] = rd(Z + "/compressed_writeback")
+    z["wb_batch"] = rd(Z + "/writeback_batch_size")
+    z["caps"] = kconfig()
+    return z
+
+
+def profile_state():
+    if not os.path.exists(STATE):
+        return None
+    d = {}
+    for ln in open(STATE):
+        if "=" in ln:
+            k, v = ln.strip().split("=", 1)
+            d[k] = v
+    return d
+
+
+def writeback_state(z):
+    """Interpret limit=0 as the intentional lock used between guarded passes."""
+    written = z.get("bd_writes", 0)
+    if z.get("wb_enable") != "1":
+        return "unlimited"
+    if written >= WB_BOOT_CAP_PAGES:
+        return "cap-reached"
+    if z.get("wb_limit", 0) > 0:
+        return "pass-active"
+    return "guarded"
+
+
+def mode_name(vm=None):
+    vm = vm or read_vm()
+    if all(vm.get(knob) == value for knob, value in MAX_SPEED.items()):
+        return "stability-consistency"
+    return "manual sysctl pins"
+
+
+def pins():
+    out = []
+    for f in sorted(glob.glob("/etc/sysctl.d/*.conf")):
+        try:
+            for ln in open(f):
+                m = re.match(r"\s*vm\.([\w\-]+)\s*=\s*(.+)", ln)
+                if m:
+                    out.append((os.path.basename(f), m.group(1), m.group(2).strip()))
+        except Exception:
+            pass
+    return out
+
+
+def psi_mem():
+    t = rd("/proc/pressure/memory") or ""
+    m = re.search(r"some avg10=([\d.]+)", t)
+    return m.group(1) if m else "?"
+
+
+def swap_line():
+    rows = []
+    try:
+        for ln in open("/proc/swaps").read().splitlines()[1:]:
+            p = ln.split()
+            if len(p) >= 5:
+                name = os.path.basename(p[0])
+                rows.append(f"{name} pri{p[4]} {human(int(p[2]) * 1024)}")
+    except Exception:
+        pass
+    return "  +  ".join(rows) if rows else "(none)"
+
+
+def ram_plus_on():
+    try:
+        for ln in open("/proc/swaps").read().splitlines()[1:]:
+            if ln.split() and ln.split()[0] == RAM_PLUS:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def meminfo():
+    d = {}
+    for ln in open("/proc/meminfo"):
+        k, _, v = ln.partition(":")
+        d[k] = int(v.split()[0]) * 1024
+    return d
+
+
+def hdr(t):
+    print(f"{c.cy}─ {c.B}{t}{c.R}{c.cy} {'─' * max(2, 58 - len(t))}{c.R}")
+
+
+def status():
+    mi = meminfo()
+    avail = mi.get("MemAvailable", 0)
+    free = mi.get("MemFree", 0)
+    hdr("vmatlas · VM & swap snapshot")
+    print(f"  {c.B}RAM{c.R}   {human(mi.get('MemTotal',0))} total · {human(free)} free · "
+          f"{c.gr}{human(avail)} avail{c.R}   PSI mem some10={psi_mem()}")
+    print(f"  {c.B}swap{c.R}  {swap_line()}")
+
+    vm = read_vm()
+    rp = f"{c.gr}ON · 4 GiB NVMe swap{c.R}" if ram_plus_on() else f"{c.D}off{c.R}"
+    print(f"  {c.B}mode{c.R}  {mode_name(vm)} · RAM Plus {rp}")
+
+    z = zram_info()
+    if z:
+        print()
+        hdr("zram0")
+        rec = f" → recomp {z['recomp']} (idle pages)" if z.get("recomp") else ""
+        print(f"  {c.B}compress{c.R}  {c.gr}{z['primary']}{c.R}{rec}")
+        size = f"{human(z['disksize'])} disksize"
+        if z["mem_limit"]:
+            size += f" · mem_limit {human(z['mem_limit'])}"
+        print(f"  {c.B}size{c.R}      {size}")
+        if "orig" in z and z["compr"]:
+            ratio = z["orig"] / z["compr"] if z["compr"] else 0
+            print(f"  {c.B}stored{c.R}    {human(z['orig'])} → {human(z['compr'])} "
+                  f"in RAM  ({c.cy}{ratio:.2f}x{c.R}, uses {human(z['used'])})")
+        bk = z.get("backing")
+        if bk and bk != "none":
+            wb_state = writeback_state(z)
+            if wb_state == "cap-reached":
+                health = f"{c.yl}4 GiB boot cap reached ({human(z['bd_writes']*4096)} written){c.R}"
+            elif wb_state == "pass-active":
+                health = f"{c.gr}guarded pass: {human(z['wb_limit']*4096)} left{c.R}"
+            elif wb_state == "guarded":
+                remaining = max(0, WB_BOOT_CAP_PAGES - z.get("bd_writes", 0))
+                health = f"{c.gr}locked between passes · {human(remaining*4096)} boot quota{c.R}"
+            else:
+                health = f"{c.rd}UNSAFE: write budget unlimited{c.R}"
+            extra = ""
+            if z.get("compressed_wb") is not None:
+                extra = f" · compressed_wb={z.get('compressed_wb')}"
+            print(f"  {c.B}writeback{c.R} {bk} · {human(z['bd_pages']*4096)} on backing · {health}{extra}")
+            if "loop" in bk:
+                print(f"  {c.D}            (loop file on fs — deadlock-prone under pressure){c.R}")
+
+    docs = load_docs()
+    tuned = []
+    for k, v in vm.items():
+        dft = DEFAULTS.get(k)
+        if dft is None or v == dft:
+            continue
+        if k == "dirty_ratio" and vm.get("dirty_bytes", "0") != "0":
+            continue
+        if k == "dirty_background_ratio" and vm.get("dirty_background_bytes", "0") != "0":
+            continue
+        tuned.append((k, v, dft))
+    if tuned:
+        print()
+        hdr(f"tuned away from kernel default ({len(tuned)})")
+        for k, v, dft in tuned:
+            print(f"  {c.yl}{k:<29}{c.R}{c.B}{v:<14}{c.R}{c.D}(default {dft}){c.R}")
+
+    print()
+    print(f"{c.D}  vmatlas all | zram | explain <knob> | pins | profiles | guide{c.R}")
+
+
+def show_all():
+    vm = read_vm()
+    docs = load_docs()
+    hdr(f"all vm.* knobs ({len(vm)})")
+    for k in sorted(vm):
+        v = vm[k]
+        dft = DEFAULTS.get(k)
+        mark = " " if dft is None or v == dft else f"{c.yl}•{c.R}"
+        print(f" {mark}{c.B}{k:<30}{c.R}{v:<16}{c.D}{summary(docs.get(k,''))}{c.R}")
+    print(f"\n{c.D}  {c.yl}•{c.D} = differs from kernel default · vmatlas explain <knob> for full docs{c.R}")
+
+
+def explain(knob):
+    knob = knob.replace("vm.", "")
+    vm = read_vm()
+    docs = load_docs()
+    hdr(f"explain {knob}")
+    if knob in vm:
+        dft = DEFAULTS.get(knob, "?")
+        print(f"  {c.B}current{c.R} {c.gr}{vm[knob]}{c.R}    {c.B}default{c.R} {dft}\n")
+    if knob in docs:
+        for ln in docs[knob].splitlines():
+            print("  " + ln)
+    else:
+        print(f"  {c.D}(no kernel.org doc for this knob){c.R}")
+
+
+def show_pins():
+    hdr("sysctl.d pins (survive reboot)")
+    ps = pins()
+    if not ps:
+        print("  (none)")
+    for f, k, v in ps:
+        ext = "" if f == "99-vmscope.conf" else f"  {c.rd}⚠ external — invisible to vmscope{c.R}"
+        print(f"  {c.B}vm.{k:<26}{c.R}= {v:<12}{c.D}{f}{c.R}{ext}")
+    print(f"\n{c.D}  vmscope owns 99-vmscope.conf (pin/unpin). External pins cause phantom"
+          f"\n  'drift' the profile widget can't fix — see: vmatlas guide{c.R}")
+
+
+def show_profiles():
+    st = profile_state()
+    cur = st.get("profile") if st else None
+    hdr("memory profiles (/usr/local/bin/memory-profile-apply)")
+    for name, (nvme, vals) in PROFILES.items():
+        m = f"{c.gr}← active{c.R}" if name == cur else ""
+        topo = f"{c.cy}zram+nvme{c.R}" if nvme else f"{c.rd}zram-only (swapoff NVMe){c.R}"
+        print(f"  {c.B}{name:<12}{c.R}{topo}  {m}")
+        pv = vals.split()
+        print(f"  {c.D}    " + " ".join(f"{k}={x}" for k, x in zip(PRESET_KEYS, pv)) + c.R)
+    print(f"\n{c.D}  apply: memory-profile-apply <name>   (or the QS Memory Mode toggle)"
+          f"\n  add your own: vmatlas guide → 'Create a profile'{c.R}")
+
+    print()
+    hdr("zram boot profiles (/usr/local/bin/zram-profile-stage)")
+    for name, (algo, wb, size, limit) in ZRAM_PROFILES.items():
+        wb_text = f"{c.cy}raw-writeback{c.R}" if wb == "raw" else "no-writeback"
+        print(f"  {c.B}{name:<12}{c.R}{algo:<24} {wb_text}  disksize={size} mem_limit={limit}")
+    print(f"\n{c.D}  stage only: sudo zram-profile-stage <name>   (effective next boot)"
+          f"\n  no live zram reset, no swapoff; see: vmatlas guide → 'Stage zram boot profile'{c.R}")
+
+
+def guide():
+    if os.path.exists(GUIDE):
+        sys.stdout.write(open(GUIDE).read())
+    else:
+        print("guide not found at", GUIDE)
+
+
+def helpme():
+    print(f"""{c.B}vmatlas{c.R} — read-only Linux VM/zram/swap reader  ({c.D}never changes anything{c.R})
+  {c.cy}vmatlas{c.R}              snapshot: RAM, swap, zram, profile, tuned knobs
+  {c.cy}vmatlas all{c.R}          every vm.* knob + one-line kernel doc
+  {c.cy}vmatlas zram{c.R}         zram deep-dive only
+  {c.cy}vmatlas tiers{c.R}        zstd primary → zstd recompress → NVMe chain + verdicts
+  {c.cy}vmatlas explain <k>{c.R}  full kernel.org doc for one knob + current/default
+  {c.cy}vmatlas pins{c.R}         what's pinned in /etc/sysctl.d (+ flags externals)
+  {c.cy}vmatlas profiles{c.R}     the 5 memory profiles and what each sets
+  {c.cy}vmatlas guide{c.R}        how to change zram / make profiles / safety
+  {c.cy}vmatlas json{c.R}         machine-readable dump""")
+
+
+def as_json():
+    import json
+    z = zram_info() or {}
+    if z and z.get("compr"):
+        z["ratio"] = round(z["orig"] / z["compr"], 3)
+    print(json.dumps({"vm": read_vm(), "zram": z, "profile": profile_state(),
+                      "pins": pins()}, indent=2))
+
+
+def zram_view():
+    z = zram_info()
+    if not z:
+        print("no zram0")
+        return
+    hdr("zram0")
+    rec = f" → recomp {z['recomp']} (idle pages)" if z.get("recomp") else ""
+    print(f"  {c.B}primary algo{c.R}   {c.gr}{z['primary']}{c.R}{rec}")
+    print(f"  {c.B}disksize{c.R}       {human(z['disksize'])}")
+    print(f"  {c.B}mem_limit{c.R}      {human(z['mem_limit']) if z['mem_limit'] else 'none'}")
+    if z.get("recomp_raw"):
+        print(f"  {c.B}recomp algo{c.R}    {c.D}{z['recomp_raw']}{c.R}")
+    if "orig" in z:
+        ratio = z["orig"] / z["compr"] if z["compr"] else 0
+        print(f"  {c.B}stored{c.R}         {human(z['orig'])} orig → {human(z['compr'])} compressed "
+              f"({c.cy}{ratio:.2f}x{c.R})")
+        print(f"  {c.B}RAM used{c.R}       {human(z['used'])} · peak {human(z.get('used_max',0))}")
+        print(f"  {c.B}incompr/dedup{c.R}  {human(z.get('huge',0)*4096)} raw in {z.get('huge',0)} huge "
+              f"· {human(z.get('same',0)*4096)} in {z.get('same',0)} same-pages")
+    bk = z.get("backing")
+    print(f"  {c.B}backing_dev{c.R}    {bk}")
+    if bk and bk != "none":
+        wb_state = writeback_state(z)
+        if wb_state == "cap-reached":
+            budget = f"4 GiB boot cap reached ({human(z.get('bd_writes',0)*4096)} written)"
+        elif wb_state == "pass-active":
+            budget = f"guarded pass active, {human(z.get('wb_limit',0)*4096)} left"
+        elif wb_state == "guarded":
+            remaining = max(0, WB_BOOT_CAP_PAGES - z.get("bd_writes", 0))
+            budget = f"locked, {human(remaining*4096)} boot quota remains"
+        else:
+            budget = "UNSAFE unlimited"
+        print(f"  {c.B}writeback{c.R}      {human(z['bd_pages']*4096)} on backing · "
+              f"{budget}")
+        print(f"  {c.B}wb traffic{c.R}     reads {z.get('bd_reads',0)} · writes {z.get('bd_writes',0)} "
+              f"{c.D}(4K pages, lifetime){c.R}")
+        if z.get("compressed_wb") is not None:
+            print(f"  {c.B}compressed_wb{c.R}  {z.get('compressed_wb')} · batch={z.get('wb_batch')}")
+        if wb_state == "cap-reached":
+            print(f"  {c.yl}  Boot quota complete: new pages remain compressed in RAM;"
+                  f" the existing backing pages remain readable.{c.R}")
+        elif wb_state == "guarded":
+            print(f"  {c.gr}  limit=0 is the intentional lock between 256 MiB guarded passes.{c.R}")
+        elif wb_state == "unlimited":
+            print(f"  {c.rd}  ⚠ writeback enforcement is disabled; a caller can write without a cap.{c.R}")
+    print(f"\n{c.D}  eviction chain + verdicts: vmatlas tiers · change settings: vmatlas guide{c.R}")
+
+
+def tiers_view():
+    z = zram_info()
+    if not z:
+        print("no zram0")
+        return
+    caps = z.get("caps", {})
+
+    def cap(flag):
+        v = caps.get(flag)
+        return f"{c.gr}✓{c.R}" if v else (f"{c.rd}✗{c.R}" if v is False else f"{c.yl}?{c.R}")
+
+    ratio = z["orig"] / z["compr"] if z.get("compr") else 0
+    huge_b = z.get("huge", 0) * 4096
+    same_b = z.get("same", 0) * 4096
+    bd_b = z.get("bd_pages", 0) * 4096
+    armed = z.get("recomp") is not None and caps.get("CONFIG_ZRAM_MULTI_COMP")
+    wb_on = z.get("backing") and z.get("backing") != "none"
+    demote_ran = z.get("bd_pages", 0) > 0
+    wb_state = writeback_state(z)
+
+    hdr("zram tiered eviction - does the chain work?")
+    print(f"  {c.B}[ Active RAM ]{c.R}")
+    print(f"  {c.D}     │  swap-out compresses every page through the primary algo{c.R}")
+    print(f"  {c.D}     ▼{c.R}")
+
+    # Tier 1
+    if z["primary"] == "zstd":
+        t1 = f"{c.gr}recommended primary ✓{c.R}"
+        t1_note = "best measured default on this Ryzen 5 2600"
+    elif z["primary"] in ("lz4", "lzo-rle"):
+        t1 = f"{c.yl}burst-biased primary{c.R}"
+        t1_note = "faster compression, weaker density"
+    elif z["primary"] == "lz4hc":
+        t1 = f"{c.yl}legacy dense primary{c.R}"
+        t1_note = "fast decompression, slow compression"
+    else:
+        t1 = f"{c.yl}primary = {z['primary']}{c.R}"
+        t1_note = "check workload fit"
+    print(f"  {c.B}[ Tier 1 · {z['primary']} ]{c.R}   {t1}  {c.D}{t1_note}{c.R}")
+    if z.get("compr"):
+        print(f"      stored {c.cy}{human(z['orig'])}{c.R} → {c.cy}{human(z['compr'])}{c.R} in RAM"
+              f"   blended {c.cy}{ratio:.2f}x{c.R}   (uses {human(z['used'])} real RAM)")
+    print(f"  {c.D}     │  policy: mark `idle` + write `recompress` — NOT automatic{c.R}")
+    print(f"  {c.D}     ▼{c.R}")
+
+    # Tier 2
+    t2 = f"{c.gr}recomp #1 armed ✓{c.R}" if armed else f"{c.rd}NOT armed{c.R}"
+    print(f"  {c.B}[ Tier 2 · zstd ]{c.R}   {t2}  {c.D}packs idle pages tighter{c.R}")
+    if z.get("recomp_raw"):
+        print(f"      recomp_algorithm: {c.D}{z['recomp_raw']}{c.R}")
+    if armed:
+        print(f"      {c.gr}configured{c.R}: available for explicit measured/manual passes;")
+        print(f"      scheduled recompression is off because the live 512 MiB pass saved ~0.01 MiB")
+        print(f"      {c.D}prove actual secondary pages via root-only debugfs block_state (`r`).{c.R}")
+    print(f"      {c.D}exact primary-vs-recompressed byte split is NOT exposed by the kernel.{c.R}")
+    print(f"      proxies: blended {c.cy}{ratio:.2f}x{c.R} (whole device) · "
+          f"raw/incompressible {c.yl}{human(huge_b)}{c.R} in {z.get('huge',0)} huge pages · "
+          f"{c.yl}{human(same_b)}{c.R} deduped same-pages")
+    print(f"      {c.D}definitive test is a write (out of scope here): see `vmatlas guide`.{c.R}")
+    print(f"  {c.D}     │  policy: mark `idle`/`huge` + write `writeback` - NOT automatic{c.R}")
+    print(f"  {c.D}     ▼{c.R}")
+
+    # Tier 3
+    if not wb_on:
+        print(f"  {c.B}[ Tier 3 · NVMe writeback ]{c.R}   {c.rd}no backing_dev — disabled{c.R}")
+    else:
+        v = f"{c.gr}alive ✓{c.R}" if demote_ran else f"{c.yl}configured, nothing evicted yet{c.R}"
+        print(f"  {c.B}[ Tier 3 · NVMe writeback ]{c.R}   {z['backing']}  {v}")
+        print(f"      {c.cy}{human(bd_b)}{c.R} on SSD ({z.get('bd_pages',0)} pages) · "
+              f"reads {z.get('bd_reads',0)} · writes {z.get('bd_writes',0)}")
+        if wb_state == "cap-reached":
+            print(f"      {c.yl}4 GiB boot quota reached after {human(z.get('bd_writes',0)*4096)} writes;"
+                  f" new pages stay in zram{c.R}")
+        elif wb_state == "guarded":
+            remaining = max(0, WB_BOOT_CAP_PAGES - z.get("bd_writes", 0))
+            print(f"      {c.gr}locked between guarded passes · {human(remaining*4096)} boot quota remains{c.R}")
+            print(f"      policy: max 256 MiB/pass, 24h idle, hourly low-pressure/GPU-idle check")
+        elif wb_state == "pass-active":
+            print(f"      {c.gr}guarded pass active · {human(z.get('wb_limit',0)*4096)} allowance remains{c.R}")
+        else:
+            print(f"      {c.rd}⚠ writeback enforcement disabled: budget is unlimited{c.R}")
+        print(f"      compressed_wb={z.get('compressed_wb')} batch={z.get('wb_batch')}")
+        if "loop" in (z.get("backing") or ""):
+            print(f"      {c.D}(loop file on fs — deadlock-prone under pressure){c.R}")
+
+    print()
+    print(f"  {c.B}kernel features{c.R}  "
+          f"MULTI_COMP {cap('CONFIG_ZRAM_MULTI_COMP')}  "
+          f"WRITEBACK {cap('CONFIG_ZRAM_WRITEBACK')}  "
+          f"ACTIME {cap('CONFIG_ZRAM_TRACK_ENTRY_ACTIME')}  "
+          f"MEM_TRACK {cap('CONFIG_ZRAM_MEMORY_TRACKING')}")
+    print(f"  {c.D}the kernel runs each algo and tracks page age, but never moves a page")
+    print(f"  between tiers on its own - the guarded timer only offers 24h-idle pages to NVMe.{c.R}")
+    print(f"\n{c.D}  verify a recompress/writeback pass yourself: vmatlas guide{c.R}")
+
+
+def main():
+    a = sys.argv[1:] or ["status"]
+    cmd = a[0]
+    if cmd in ("status", "snapshot"):
+        status()
+    elif cmd == "all":
+        show_all()
+    elif cmd == "zram":
+        zram_view()
+    elif cmd in ("tiers", "tier"):
+        tiers_view()
+    elif cmd == "explain" and len(a) > 1:
+        explain(a[1])
+    elif cmd == "pins":
+        show_pins()
+    elif cmd == "profiles":
+        show_profiles()
+    elif cmd == "guide":
+        guide()
+    elif cmd == "json":
+        as_json()
+    elif cmd in ("help", "-h", "--help"):
+        helpme()
+    else:
+        helpme()
+
+
+if __name__ == "__main__":
+    main()

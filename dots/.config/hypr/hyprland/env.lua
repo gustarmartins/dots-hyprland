@@ -1,11 +1,10 @@
 local home_dir = os.getenv("HOME")
 
 -- Wayland
-hl.env("ELECTRON_OZONE_PLATFORM_HINT", "auto")
+hl.env("ELECTRON_OZONE_PLATFORM_HINT", "wayland")
 
 -- Applications
-local xdg_data_dirs_old = os.getenv("XDG_DATA_DIRS") or ""
-hl.env("XDG_DATA_DIRS", home_dir .. "/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/local/share:/usr/share:" .. xdg_data_dirs_old)
+hl.env("XDG_DATA_DIRS", home_dir .. "/.local/share/flatpak/exports/share:/var/lib/flatpak/exports/share:/usr/local/share:/usr/share")
 
 -- Themes
 hl.env("QT_QPA_PLATFORM", "wayland;xcb")

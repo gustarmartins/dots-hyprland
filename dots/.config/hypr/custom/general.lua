@@ -22,6 +22,7 @@ hl.config({
     cursor = {
         no_break_fs_vrr = 0,
         min_refresh_rate = 48,
+        inactive_timeout = 3.0,
     },
 })
 

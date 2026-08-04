@@ -108,6 +108,22 @@ Singleton {
         updateWorkspaces();
     }
 
+    // Eden publishes both title-event formats every frame. Keep those events
+    // from launching full Hyprland refreshes continuously.
+    Timer {
+        id: eventRefreshThrottle
+        interval: 25
+        repeat: false
+        onTriggered: root.updateAll()
+    }
+
+    Timer {
+        id: titleRefreshThrottle
+        interval: 250
+        repeat: false
+        onTriggered: root.updateWindowList()
+    }
+
     function biggestWindowForWorkspace(workspaceId) {
         const windowsInThisWorkspace = HyprlandData.windowList.filter(w => w.workspace.id == workspaceId);
         return windowsInThisWorkspace.reduce((maxWin, win) => {
@@ -127,7 +143,15 @@ Singleton {
         function onRawEvent(event) {
             // console.log("Hyprland raw event:", event.name);
             if (["openlayer", "closelayer", "screencast"].includes(event.name)) return;
-            updateAll()
+
+            if (["windowtitle", "windowtitlev2"].includes(event.name)) {
+                if (!titleRefreshThrottle.running)
+                    titleRefreshThrottle.start();
+                return;
+            }
+
+            if (!eventRefreshThrottle.running)
+                eventRefreshThrottle.start();
         }
     }
 

@@ -1,1 +1,3 @@
 # One literal application class per line. Managed by custom/scripts/game-window.sh.
+osu!
+dev.eden_emu.eden

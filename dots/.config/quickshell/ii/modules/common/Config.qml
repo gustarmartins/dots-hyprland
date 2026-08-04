@@ -537,7 +537,11 @@ Singleton {
                             { "size": 2, "type": "nightLight" },
                             { "size": 2, "type": "memoryMode" },
                             { "size": 2, "type": "focusMode" },
-                            { "size": 2, "type": "zramAlgo" }
+                            { "size": 2, "type": "zramRecompress" },
+                            { "size": 2, "type": "zramWriteback" },
+                            { "size": 1, "type": "dropCaches" },
+                            { "size": 1, "type": "memoryCompact" },
+                            { "size": 2, "type": "gpuMemory" }
                         ]
                     }
                 }

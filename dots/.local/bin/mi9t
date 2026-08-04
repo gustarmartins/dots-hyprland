@@ -1,4 +1,5 @@
 #!/bin/bash
+# kate: mode syntax Bash;
 
 # You can pass the IP as an argument (e.g., `mi9t 192.168.0.171:5555`)
 # If you don't pass an IP, it will default to USB connection.

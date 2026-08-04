@@ -1,4 +1,5 @@
 -- Local application choices. Loaded after hyprland.variables.
+hl.env("GRADLE_USER_HOME", os.getenv("HOME") .. "/.devcache/gradle")
 hl.env("TERMINAL", "kitty -1")
 terminal = "kitty -1"
 browser = "firefox"

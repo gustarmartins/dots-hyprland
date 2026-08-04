@@ -36,14 +36,36 @@ toggle_tag() {
     fi
 }
 
+ensure_tag() {
+    local tag="$1" label="$2" win addr cls tags
+    win=$(active)
+    addr=$(jq -r '.address // empty' <<<"$win")
+    if [[ -z "$addr" ]]; then
+        notify "$label" "no active window"
+        return
+    fi
+    cls=$(jq -r '.class' <<<"$win")
+    if has_tag "$tag" <<<"$win"; then
+        tags=$(jq -r '.tags | join(" ") | if . == "" then "none" else . end' <<<"$win")
+        notify "$label already ON — $cls" "tags: $tags"
+        return
+    fi
+    hyprctl dispatch "hl.dsp.window.tag({ tag = \"+$tag\", window = \"address:$addr\" })" >/dev/null
+    win=$(active)
+    tags=$(jq -r '.tags | join(" ") | if . == "" then "none" else . end' <<<"$win")
+    notify "$label ON — $cls" "tags: $tags"
+}
+
 cmd_game() {
-    toggle_tag gamemode "Game mode" >/dev/null
+    # F5 is intentionally idempotent: pressing it repeatedly must never
+    # disable VRR eligibility for the focused game.
+    ensure_tag gamemode "Game mode"
 }
 
 cmd_tear() {
     local state
     state=$(toggle_tag tearing "Tearing")
-    if [[ "$state" == on && "$(hyprctl -j getoption general:allow_tearing | jq -r '.int')" != 1 ]]; then
+    if [[ "$state" == on && "$(hyprctl -j getoption general:allow_tearing | jq -r '.bool')" != true ]]; then
         notify "Tearing gate is OFF" "enable the QS tearing toggle (general:allow_tearing) for immediate mode to take effect"
     fi
 }
@@ -82,23 +104,30 @@ cmd_launch() {
 }
 
 cmd_status() {
-    local win mon fs
+    local win mon fs present pid
     win=$(active)
-    mon=$(hyprctl monitors -j | jq '[.[] | select(.focused)][0]')
+    mon=$(hyprctl monitors -j | jq --argjson id "$(jq -r '.monitor' <<<"$win")" '[.[] | select(.id == $id)][0]')
     case "$(jq -r '.fullscreen' <<<"$win")" in
         2) fs=fullscreen ;;
         1) fs=maximized ;;
         0) fs=windowed ;;
         *) fs=unknown ;;
     esac
+    pid=$(jq -r '.pid // empty' <<<"$win")
+    present=unknown
+    if [[ -n "$pid" && -r "/proc/$pid/environ" ]]; then
+        present=$(tr '\0' '\n' <"/proc/$pid/environ" |
+            sed -n 's/^MESA_VK_WSI_PRESENT_MODE=//p' | tail -1)
+        present=${present:-app-default}
+    fi
     notify "$(jq -r '.class' <<<"$win") — $fs" "$(printf '%s\n' \
         "tags: $(jq -r '.tags | join(" ") | if . == "" then "none" else . end' <<<"$win")" \
         "content: $(jq -r '.contentType' <<<"$win")   idle-inhibit: $(jq -r '.inhibitingIdle' <<<"$win")   xwayland: $(jq -r '.xwayland' <<<"$win")" \
         "$(jq -r '"[" + .name + "]  vrr: " + (.vrr|tostring) + "   tearing now: " + (.activelyTearing|tostring)' <<<"$mon")" \
-        "allow_tearing: $(hyprctl -j getoption general:allow_tearing | jq -r '.int')   misc:vrr: $(hyprctl -j getoption misc:vrr | jq -r '.int')" \
-        "tearing blocked: $(jq -r '.tearingBlockedBy | join(" ") | if . == "" then "clear" else . end' <<<"$mon")" \
-        "solitary blocked: $(jq -r '.solitaryBlockedBy | join(" ") | if . == "" then "clear" else . end' <<<"$mon")" \
-        "scanout blocked: $(jq -r '.directScanoutBlockedBy | join(" ") | if . == "" then "clear" else . end' <<<"$mon")")" 8000
+        "present: $present   allow_tearing: $(hyprctl -j getoption general:allow_tearing | jq -r '.bool')   misc:vrr: $(hyprctl -j getoption misc:vrr | jq -r '.int')" \
+        "tearing blocked: $(jq -r '(.tearingBlockedBy // []) | join(" ") | if . == "" then "clear" else . end' <<<"$mon")" \
+        "solitary blocked: $(jq -r '(.solitaryBlockedBy // []) | join(" ") | if . == "" then "clear" else . end' <<<"$mon")" \
+        "scanout blocked: $(jq -r '(.directScanoutBlockedBy // []) | join(" ") | if . == "" then "clear" else . end' <<<"$mon")")" 8000
 }
 
 case "${1:-status}" in

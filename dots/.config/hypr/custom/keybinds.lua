@@ -20,6 +20,18 @@ hl.bind("SUPER + F1", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/toggle-gpu-
     { description = "User: Toggle AMD GPU power mode" })
 hl.bind("SUPER + F2", hl.dsp.exec_cmd("~/.config/hypr/do.sh"))
 
+-- Use Eden's native fullscreen path instead of forcing compositor fullscreen.
+hl.unbind("SUPER + F")
+hl.bind("SUPER + F", function()
+    local window = hl.get_active_window()
+    if window and (window.class == "dev.eden_emu.eden" or window.class == "eden") then
+        hl.dispatch(hl.dsp.send_shortcut({ mods = "CTRL", key = "b", window = window }))
+        return
+    end
+
+    hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" }))
+end, { description = "Window: Fullscreen (Eden native)" })
+
 hl.bind("SUPER + ALT + A",
     hl.dsp.exec_cmd("pkill rofi; rofi -show animations -modi 'animations:~/.config/hypr/custom/scripts/hypr_anim.sh'"),
     { description = "User: Select animation profile" })
@@ -50,7 +62,7 @@ hl.bind("SUPER + ALT + C", hl.dsp.window.center())
 hl.bind("SUPER + Z", hl.dsp.window.alter_zorder({ mode = "top" }))
 hl.bind("SUPER + SHIFT + Z", hl.dsp.window.alter_zorder({ mode = "bottom" }))
 
-hl.bind("CTRL + SUPER + M", hl.dsp.exec_cmd("kitty --class vmscope-float /home/gus/.local/bin/vmscope watch"),
+hl.bind("CTRL + SUPER + M", hl.dsp.exec_cmd("kitty --class vmscope-float $HOME/.local/bin/vmscope watch"),
     { description = "User: VM sysctl scope" })
 hl.bind("SUPER + F5", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/game-window.sh game"),
     { description = "Game: Toggle game mode on focused window" })
@@ -60,3 +72,10 @@ hl.bind("SUPER + F7", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/game-window
     { description = "Game: Focused window VRR and tearing status" })
 hl.bind("SUPER + SHIFT + F5", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/game-window.sh persist"),
     { description = "Game: Persist game mode for this app class" })
+
+hl.bind("SUPER + F9", hl.dsp.exec_cmd("$HOME/.local/bin/obsctl toggle"),
+    { description = "OBS: Start/stop recording", locked = true })
+hl.bind("SUPER + SHIFT + F9", hl.dsp.exec_cmd("$HOME/.local/bin/obsctl pause"),
+    { description = "OBS: Pause/resume recording", locked = true })
+hl.bind("SUPER + ALT + F9", hl.dsp.exec_cmd("$HOME/.local/bin/obsctl split"),
+    { description = "OBS: Split recording file", locked = true })

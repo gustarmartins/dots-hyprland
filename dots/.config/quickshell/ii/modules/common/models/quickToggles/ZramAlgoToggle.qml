@@ -24,19 +24,19 @@ QuickToggleModel {
     toggled: algoState.indexOf("->") >= 0 || liveAlgo !== "zstd"
 
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "/home/gus/.local/bin/zram-algo-mode.sh next"])
+        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/zram-algo-mode.sh\" next"])
         refreshDelay.restart()
     }
 
     altAction: () => {
-        Quickshell.execDetached(["bash", "-c", "/home/gus/.local/bin/zram-algo-mode.sh live"])
+        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/zram-algo-mode.sh\" live"])
         refreshDelay.restart()
     }
 
     Process {
         id: fetchActiveState
         running: true
-        command: ["bash", "-c", "/home/gus/.local/bin/zram-algo-mode.sh status"]
+        command: ["bash", "-c", "exec \"$HOME/.local/bin/zram-algo-mode.sh\" status"]
         stdout: StdioCollector {
             onStreamFinished: {
                 const s = text.trim()

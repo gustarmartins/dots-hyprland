@@ -78,7 +78,9 @@ Singleton {
     property var filePath: Directories.notificationsPath
     property list<Notif> list: []
     property var popupList: list.filter((notif) => notif.popup);
-    property bool popupInhibited: (GlobalStates?.sidebarRightOpen ?? false) || silent
+    // Quick Settings has its own live notification preview, but opening it must
+    // not swallow the normal popup. Silent mode is the explicit popup gate.
+    property bool popupInhibited: silent
     property var latestTimeForApp: ({})
     Component {
         id: notifComponent

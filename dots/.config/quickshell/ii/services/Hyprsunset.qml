@@ -23,6 +23,8 @@ Singleton {
     property int colorTemperature: Config.options?.light?.night?.colorTemperature ?? 5000
     property int defaultColorTemperature: 6000
     property int gamma: 100
+    property int pendingGamma: 100
+    property int gammaInFlight: 100
     property bool shouldBeOn
     property bool firstEvaluation: true
     property bool temperatureActive: false
@@ -122,12 +124,75 @@ Singleton {
     }
 
     function setGamma(gamma) {
-        root.gamma = Math.max(root.gammaLowerLimit, Math.min(100, gamma));
+        root.gamma = Math.round(Math.max(root.gammaLowerLimit, Math.min(100, gamma)));
+        root.pendingGamma = root.gamma;
 
         root.gammaChangeAttempt();
 
         root.startHyprsunset();
-        Quickshell.execDetached(["bash", "-c", `hyprctl hyprsunset gamma ${root.gamma}`]);
+        gammaApplyTimer.restart();
+    }
+
+    // Slider drags can emit many values in a few milliseconds. Launching each
+    // hyprctl command detached lets an older value finish after the final one,
+    // leaving the UI at 100 while hyprsunset is still dimmed. Keep only the
+    // newest request, apply one command at a time, then read the real state back.
+    function applyPendingGamma() {
+        if (gammaSetProc.running) {
+            gammaApplyTimer.restart();
+            return;
+        }
+
+        root.gammaInFlight = root.pendingGamma;
+        gammaSetProc.command = ["hyprctl", "hyprsunset", "gamma", `${root.gammaInFlight}`];
+        gammaSetProc.running = true;
+    }
+
+    function fetchGammaState() {
+        if (gammaSetProc.running || gammaApplyTimer.running)
+            return;
+        gammaFetchProc.running = false;
+        gammaFetchProc.running = true;
+    }
+
+    Timer {
+        id: gammaApplyTimer
+        interval: 50
+        repeat: false
+        onTriggered: root.applyPendingGamma()
+    }
+
+    Timer {
+        id: gammaReconcileTimer
+        interval: 150
+        repeat: false
+        onTriggered: root.fetchGammaState()
+    }
+
+    Process {
+        id: gammaSetProc
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0 || root.pendingGamma !== root.gammaInFlight)
+                gammaApplyTimer.restart();
+            else
+                gammaReconcileTimer.restart();
+        }
+    }
+
+    Process {
+        id: gammaFetchProc
+        running: true
+        command: ["bash", "-c", "hyprctl hyprsunset gamma 2>/dev/null || echo 100"]
+        stdout: StdioCollector {
+            id: gammaCollector
+            onStreamFinished: {
+                const actualGamma = parseInt(gammaCollector.text.trim());
+                if (!isNaN(actualGamma) && !gammaSetProc.running && !gammaApplyTimer.running) {
+                    root.gamma = actualGamma;
+                    root.pendingGamma = actualGamma;
+                }
+            }
+        }
     }
 
     function fetchState() {

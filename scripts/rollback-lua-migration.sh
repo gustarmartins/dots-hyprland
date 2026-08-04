@@ -26,7 +26,7 @@ rsync -a -- "$backup_dir/hypr-mcp/" "$HOME/.local/share/hypr-mcp/"
 
 sudo install -m 755 "$backup_dir/system/fix-display-resume.sh" /usr/local/bin/fix-display-resume.sh
 sudo install -m 755 "$backup_dir/system/fix-dpms-resume.sh" /usr/local/bin/fix-dpms-resume.sh
-sudo install -m 644 "$backup_dir/system/display-resume-fix.service" /etc/systemd/system/display-resume-fix.service
+sudo install -m 644 "$backup_dir/system/display-resume-fix@.service" /etc/systemd/system/display-resume-fix@.service
 sudo systemctl daemon-reload
 
 echo "Legacy Hyprland configuration restored from $backup_dir"

@@ -12,7 +12,6 @@ rule({ match = { class = "^(osu!.exe)$" }, content = "game", immediate = true })
 rule({ match = { class = "^(osu!)$" }, content = "game" })
 rule({ match = { class = "^(dev.eden_emu.eden)$" }, content = "game" })
 rule({ match = { class = "^(google-chrome-unstable)$" }, immediate = true })
-rule({ match = { class = "^(chromium)$" }, immediate = true })
 
 -- Preserve the inherited JetBrains transient-window focus workaround.
 rule({

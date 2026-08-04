@@ -1,8 +1,9 @@
 #!/bin/bash
+# kate: mode syntax Bash;
 set -euo pipefail
 
 APPLY=/usr/local/bin/focus-mode-apply
-WATCH=/home/gus/.local/bin/focus-mode-watch
+WATCH="$HOME/.local/bin/focus-mode-watch"
 WATCH_UNIT=focus-mode-watch.service
 DMA_UNIT=focus-dma-latency
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/focus-mode"
@@ -43,7 +44,9 @@ start_watch() {
         kill "$(cat "$WATCH_PID" 2>/dev/null)" 2>/dev/null || true
     fi
     rm -f "$WATCH_PID"
-    systemctl --user start "$WATCH_UNIT"
+    # The user manager receives the current Hyprland socket variables after
+    # login. Restarting avoids reusing a watcher started before that import.
+    systemctl --user restart "$WATCH_UNIT"
 }
 
 stop_watch() {

@@ -1,12 +1,19 @@
 #!/bin/bash
+# kate: mode syntax Bash;
 
-DEVICE="192.168.0.170:6666"
+DEVICE="${1:-${S23_ADB_TARGET:-}}"
+TARGET_FLAG=(-d)
 
-echo "Connecting to S23 Ultra ($DEVICE)..."
-adb connect $DEVICE
+if [[ -n "$DEVICE" ]]; then
+    echo "Connecting to S23 Ultra ($DEVICE)..."
+    adb connect "$DEVICE"
+    TARGET_FLAG=(-s "$DEVICE")
+else
+    echo "Launching the USB-connected S23 Ultra..."
+fi
 
 echo "Launching scrcpy in 720p High-Bitrate mode for Hyprland..."
-scrcpy -s $DEVICE \
+scrcpy "${TARGET_FLAG[@]}" \
     --window-title="S23_Ultra" \
     --max-fps=120 \
     -m 1280 \

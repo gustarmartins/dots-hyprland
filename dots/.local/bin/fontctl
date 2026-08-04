@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# kate: mode syntax Bash;
 # fontctl — Unified font and rendering configuration for Linux desktops
 # Updates fontconfig, GTK2/3/4, KDE/Qt, GSettings, illogical-impulse,
 # Kitty, and Firefox in a single command.

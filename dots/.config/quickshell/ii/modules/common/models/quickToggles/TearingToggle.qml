@@ -24,7 +24,7 @@ QuickToggleModel {
     Process {
         id: fetchActiveState
         running: true
-        command: ["bash", "-c", `test "$(hyprctl getoption general:allow_tearing -j | jq ".int")" -eq 1`]
+        command: ["bash", "-c", `test "$(hyprctl getoption general:allow_tearing -j | jq -r ".bool")" = true`]
         onExited: (exitCode, exitStatus) => {
             root.toggled = exitCode === 0
         }

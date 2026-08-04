@@ -1,0 +1,3 @@
+#!/bin/bash
+# kate: mode syntax Bash;
+exec /usr/bin/cliphist -db-path "$HOME/.local/share/cliphist/db" "$@"

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# kate: mode syntax Bash;
+# Warm native osu!lazer's storage without streaming its 96 GiB beatmap payload.
+# This is intentionally opt-in and low priority: run it before launching lazer,
+# never while playing or during another latency-sensitive workload.
+set -Eeuo pipefail
+
+lazer_config="$HOME/.local/share/osu/storage.ini"
+lazer_dir="${OSU_LAZER_STORAGE:-}"
+if [[ -z "$lazer_dir" && -r "$lazer_config" ]]; then
+    lazer_dir="$(sed -n 's/^FullPath = //p' "$lazer_config" | head -n 1)"
+fi
+files_dir="$lazer_dir/files"
+warm_tree=1
+warm_core=0
+warm_shaders=0
+
+usage() {
+    cat <<'EOF'
+Usage: warm-osu-hotset [--tree] [--core] [--shaders] [--all]
+
+  --tree     warm only lazer's hashed beatmap-file hierarchy (default)
+  --core     also warm lazer's databases and AppImage (about 370 MiB)
+  --shaders  warm lazer, Mesa, and RADV disk shader-cache blobs
+  --all      enable tree, core, and shaders
+
+Storage is read from ~/.local/share/osu/storage.ini. Override it with
+OSU_LAZER_STORAGE=/absolute/path when necessary.
+EOF
+}
+
+while (($#)); do
+    case "$1" in
+        --tree) warm_tree=1 ;;
+        --core) warm_core=1 ;;
+        --shaders) warm_shaders=1 ;;
+        --all) warm_tree=1; warm_core=1; warm_shaders=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+if [[ ! -d "$files_dir" ]]; then
+    printf 'Native lazer files directory does not exist: %s\n' "$files_dir" >&2
+    exit 1
+fi
+
+idle() {
+    ionice -c3 nice -n 19 "$@"
+}
+
+if ((warm_tree)); then
+    printf 'Warming lazer file-tree metadata: %s\n' "$files_dir"
+    # Read directory entries only. Do not stream the 96 GiB of beatmap assets.
+    idle find "$files_dir" -xdev -type d -printf ''
+fi
+
+if ((warm_core)); then
+    printf 'Warming native lazer databases and AppImage\n'
+    core_files=("$lazer_dir/client.realm" "$lazer_dir/online.db" "$HOME/.local/bin/osu.AppImage")
+    for file in "${core_files[@]}"; do
+        [[ -r "$file" ]] || continue
+        idle cat -- "$file" >/dev/null
+    done
+fi
+
+if ((warm_shaders)); then
+    for shader_dir in "$HOME/.local/share/osu/cache/shaders" "$HOME/.cache/mesa_shader_cache" "$HOME/.cache/radv_builtin_shaders"; do
+        [[ -d "$shader_dir" ]] || continue
+        printf 'Warming shader-cache files: %s\n' "$shader_dir"
+        idle bash -c 'find "$1" -type f -size -16M -exec cat -- {} + >/dev/null' bash "$shader_dir"
+    done
+fi
+
+printf 'Done. Linux may reclaim these pages whenever other memory is needed.\n'

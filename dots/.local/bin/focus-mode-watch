@@ -1,4 +1,5 @@
 #!/bin/bash
+# kate: mode syntax Bash;
 set -uo pipefail
 
 APPLY=/usr/local/bin/focus-mode-apply

@@ -1,4 +1,5 @@
 #!/bin/bash
+# kate: mode syntax Bash;
 # Quick Lua monitor profile re-apply for DPMS on-resume (no sleep needed)
 runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export XDG_RUNTIME_DIR="$runtime_dir"

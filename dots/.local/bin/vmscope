@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# kate: mode syntax Bash;
+# vmscope — a smart lens over Linux VM (vm.*) sysctls.
+# Tells you, for every knob: live value, kernel default, and — the point —
+# whether your value survives reboot or is only a live override.
+#
+#   FATE of any knob you `sysctl -w`:
+#     ◆ PINNED   in /etc/sysctl.d/99-vmscope.conf → survives reboot AND wins
+#                after boot.
+#     ● MANAGED  reserved for an explicit actuator that owns the knob.
+#     ▲ OVERRIDE differs from that actuator's target.
+#     ✦ FREE     not owned by an actuator → sticks until reboot.
+#     ○ default  free knob still at the kernel default.
+#
+# Subcommands: status(default) json diff watch explain <knob> pin <k>[=v] unpin <k> apply-extras legend
+set -uo pipefail
+
+NVME=/dev/nvme0n1p1
+RAM_PLUS=/var/lib/ram-plus.swap
+STATE=/run/memory-profile.state
+EXTRAS=/etc/sysctl.d/99-vmscope.conf
+ZRAM=/sys/block/zram0
+
+# ── colours ──────────────────────────────────────────────────────────────────
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  B=$'\e[1m'; D=$'\e[2m'; R=$'\e[0m'
+  RED=$'\e[31m'; GRN=$'\e[32m'; YEL=$'\e[33m'; BLU=$'\e[34m'; MAG=$'\e[35m'; CYN=$'\e[36m'; GRY=$'\e[90m'
+else
+  B=""; D=""; R=""; RED=""; GRN=""; YEL=""; BLU=""; MAG=""; CYN=""; GRY=""
+fi
+
+# ── knob registry: order, group, default, unit, description ───────────────────
+# unit: raw | kb | bytes | pct | cs(centisec) | sec | pc(page-cluster) | wmark(0.01%)
+declare -a ORDER=(
+  swappiness vfs_cache_pressure page-cluster min_free_kbytes
+  watermark_scale_factor watermark_boost_factor zone_reclaim_mode
+  dirty_bytes dirty_background_bytes dirty_ratio dirty_background_ratio
+  dirty_expire_centisecs dirty_writeback_centisecs
+  compaction_proactiveness compact_unevictable_allowed defrag_mode extfrag_threshold
+  overcommit_memory overcommit_ratio max_map_count numa_stat stat_interval
+)
+declare -A GRP DEF UNIT DESC
+grp() { GRP[$1]=$2; DEF[$1]=$3; UNIT[$1]=$4; DESC[$1]=$5; }
+#    knob                       group           default     unit   description
+grp swappiness                "Swap & reclaim"   60         raw   "Bias to swap anon pages vs drop file cache (0-200). >100 only sane on zram-only."
+grp vfs_cache_pressure        "Swap & reclaim"   100        raw   "Eagerness to reclaim dentry/inode cache. <100 keeps FS metadata hot."
+grp page-cluster              "Swap & reclaim"   3          pc    "Swap read-ahead = 2^n pages. 0 = single page, best for zram."
+grp min_free_kbytes           "Swap & reclaim"   67584      kb    "Hard free reserve + kswapd floor. Too low = stalls/OOM (keep >=128M)."
+grp watermark_scale_factor    "Swap & reclaim"   10         wmark "Gap between kswapd wake/sleep marks. Higher = reclaim earlier, more headroom."
+grp watermark_boost_factor    "Swap & reclaim"   15000      wmark "Temp mark boost on fragmentation to reclaim proactively. 0 disables."
+grp zone_reclaim_mode         "Swap & reclaim"   0          raw   "NUMA-local reclaim. 0 = off, correct on a single-node desktop."
+grp dirty_bytes               "Dirty & writeback" 0         bytes "Dirty memory ceiling before WRITERS are throttled. Pairs with dirty_ratio (0 when set)."
+grp dirty_background_bytes    "Dirty & writeback" 0         bytes "Dirty level where the background flusher starts writing out."
+grp dirty_ratio               "Dirty & writeback" 20        pct   "% RAM variant of dirty_bytes. Reads 0 when dirty_bytes is set."
+grp dirty_background_ratio    "Dirty & writeback" 10        pct   "% RAM variant of dirty_background_bytes. Reads 0 when *_bytes set."
+grp dirty_expire_centisecs    "Dirty & writeback" 3000      cs    "Age before a dirty page is ELIGIBLE for writeback. Low = flush sooner."
+grp dirty_writeback_centisecs "Dirty & writeback" 500       cs    "Flusher wake interval — caps how fast dirty_expire can act. 0 disables."
+grp compaction_proactiveness  "Compaction & frag" 20        raw   "Background compaction effort 0-100. Higher = fewer frag stalls, more CPU."
+grp compact_unevictable_allowed "Compaction & frag" 1        raw   "Whether compaction may move mlocked/unevictable pages. 0 avoids their fault latency."
+grp defrag_mode              "Compaction & frag" 0          raw   "Proactive anti-fragmentation allocator behavior. 0 keeps it disabled."
+grp extfrag_threshold         "Compaction & frag" 500       raw   "Compact-vs-reclaim tipping point for high-order allocations."
+grp overcommit_memory         "Overcommit & maps" 0         raw   "0=heuristic 1=always 2=strict. Desktop wants 0."
+grp overcommit_ratio          "Overcommit & maps" 50        pct   "With mode 2 only: % RAM overcommittable. Ignored in mode 0/1."
+grp max_map_count             "Overcommit & maps" 65530     raw   "Max VMAs/process. Wine/ESync/games want it high (1M+)."
+grp numa_stat                "Overcommit & maps" 1          raw   "NUMA page-allocation accounting. 0 trims bookkeeping on this single-node host."
+grp stat_interval             "Overcommit & maps" 1         sec   "How often /proc VM stats refresh, in seconds."
+
+# VM values are either explicit persistent pins or ordinary live overrides.
+declare -A MANAGED=()
+
+# fallback presets (knob-order: swpns vfs pc minfree scale boost zreclaim dbytes dbg) if /run state absent
+declare -A FALLBACK=(
+  [ultra]="200 1 0 131072 10 15000 0 10737418240 5368709120"
+  [blazing]="150 10 0 262144 150 15000 0 536870912 134217728"
+  [optimized]="100 20 0 262144 125 15000 0 268435456 67108864"
+  [heavy]="60 70 0 524288 200 15000 0 134217728 33554432"
+  [anti-freeze]="90 50 0 524288 300 15000 0 201326592 50331648"
+)
+declare -a FB_KEYS=(swappiness vfs_cache_pressure page-cluster min_free_kbytes
+  watermark_scale_factor watermark_boost_factor zone_reclaim_mode dirty_bytes dirty_background_bytes)
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+live() { sysctl -n "vm.$1" 2>/dev/null; }
+nvme_on() { swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$NVME"; }
+ram_plus_on() { swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$RAM_PLUS"; }
+zram_backing_uses_nvme() {
+  local backing resolved
+  backing=$(cat "$ZRAM/backing_dev" 2>/dev/null || echo none)
+  [[ -n $backing && $backing != none ]] || return 1
+  resolved=$(readlink -f "$backing" 2>/dev/null || echo "$backing")
+  [[ $resolved == "$NVME" ]]
+}
+swap_label() {
+  if ram_plus_on && zram_backing_uses_nvme; then echo "zram + writeback + RAM Plus"
+  elif ram_plus_on; then echo "zram + RAM Plus"
+  elif nvme_on; then echo "zram + nvme"
+  elif zram_backing_uses_nvme; then echo "zram + writeback"
+  else echo "zram-only"; fi
+}
+swap_id() {
+  if ram_plus_on && zram_backing_uses_nvme; then echo "zram+writeback+ram-plus"
+  elif ram_plus_on; then echo "zram+ram-plus"
+  elif nvme_on; then echo "zram+nvme"
+  elif zram_backing_uses_nvme; then echo "zram+writeback"
+  else echo "zram-only"; fi
+}
+
+is_max_speed() {
+  local spec knob expected
+  for spec in \
+    swappiness=100 vfs_cache_pressure=1 page-cluster=0 \
+    min_free_kbytes=198546 watermark_scale_factor=180 \
+    watermark_boost_factor=0 zone_reclaim_mode=0 \
+    dirty_bytes=268435456 dirty_background_bytes=67108864 \
+    compaction_proactiveness=0 extfrag_threshold=1000 \
+    stat_interval=10; do
+    knob=${spec%%=*}; expected=${spec#*=}
+    [[ $(live "$knob") == "$expected" ]] || return 1
+  done
+  [[ $(live compact_unevictable_allowed) == 0 ]] || return 1
+  [[ $(live numa_stat) == 0 ]] || return 1
+}
+
+compute_profile() {
+  if is_max_speed; then echo max-speed; else echo manual; fi
+}
+
+last_applied() { [[ -f $STATE ]] && sed -n 's/^profile=//p' "$STATE" | head -1; }
+
+preset_of() {  # preset value for a managed knob, from /run state else fallback table
+  local knob=$1 val=""
+  if [[ -f $STATE ]]; then val=$(sed -n "s/^vm\.$knob=//p" "$STATE" | head -1); fi
+  if [[ -z $val ]]; then
+    local prof; prof=$(last_applied); [[ -z $prof || -z ${FALLBACK[$prof]:-} ]] && prof=$(compute_profile)
+    if [[ -n ${FALLBACK[$prof]:-} ]]; then
+      local i=0; for k in "${FB_KEYS[@]}"; do
+        if [[ $k == "$knob" ]]; then val=$(awk -v n=$((i+1)) '{print $n}' <<<"${FALLBACK[$prof]}"); break; fi
+        ((i++)); done
+    fi
+  fi
+  echo "$val"
+}
+
+is_pinned() { [[ -f $EXTRAS ]] && grep -qE "^[[:space:]]*vm\.$1[[:space:]]*=" "$EXTRAS"; }
+
+humanize() { # bytes -> human; arg2=unit(bytes|kb)
+  local v=$1 u=$2 b
+  [[ -z $v || ! $v =~ ^[0-9]+$ ]] && { echo "$v"; return; }
+  case $u in bytes) b=$v;; kb) b=$((v*1024));; *) echo "$v"; return;; esac
+  awk -v b="$b" 'BEGIN{s="B KiB MiB GiB TiB";split(s,a," ");i=1;while(b>=1024&&i<5){b/=1024;i++}printf (b==int(b)?"%d%s":"%.1f%s"),b,a[i]}'
+}
+
+fmt_val() { # pretty live value with unit context
+  local knob=$1 v=$2
+  case "${UNIT[$knob]}" in
+    bytes|kb) [[ $v =~ ^[0-9]+$ && $v -gt 0 ]] && echo "$(humanize "$v" "${UNIT[$knob]}")" || echo "$v";;
+    pc)  case $v in 0) echo "0 (1pg)";; *) echo "$v ($((1<<v))pg)";; esac;;
+    cs)  [[ $v =~ ^[0-9]+$ ]] && echo "$v (${D}$(awk -v c=$v 'BEGIN{printf "%.1fs",c/100}')${R})" || echo "$v";;
+    wmark) [[ $v =~ ^[0-9]+$ ]] && echo "$v (${D}$(awk -v w=$v 'BEGIN{printf "%.2f%%",w/100}')${R})" || echo "$v";;
+    pct) echo "$v%";;
+    sec) echo "${v}s";;
+    *) echo "$v";;
+  esac
+}
+
+classify() { # TAB-separated: colour <TAB> badge <TAB> note   (for knob $1, live $2)
+  local knob=$1 v=$2 preset
+  if is_pinned "$knob"; then printf '%s\x1f%s\x1f%s\n' "$CYN" "◆ PINNED" "reboot-proof, wins after toggle"; return; fi
+  if [[ ${MANAGED[$knob]:-} == 1 ]]; then
+    preset=$(preset_of "$knob")
+    if [[ -n $preset && $preset == "$v" ]]; then printf '%s\x1f%s\x1f%s\n' "$GRN" "● MANAGED" "set by profile";
+    else printf '%s\x1f%s\x1f%s\n' "$YEL" "▲ OVERRIDE" "resets on next toggle"; fi
+    return
+  fi
+  if [[ $v == "${DEF[$knob]}" ]]; then printf '%s\x1f%s\x1f%s\n' "$GRY" "○ default" "";
+  else printf '%s\x1f%s\x1f%s\n' "$MAG" "✦ FREE" "sticks till reboot"; fi
+}
+
+# ── readouts ─────────────────────────────────────────────────────────────────
+zram_stored_pct() {  # uncompressed data stored vs disksize
+  local ds orig; ds=$(cat "$ZRAM/disksize" 2>/dev/null) || return
+  orig=$(awk '{print $1}' "$ZRAM/mm_stat" 2>/dev/null) || return
+  [[ -z $ds || $ds -eq 0 ]] && return
+  awk -v o="$orig" -v d="$ds" 'BEGIN{printf "%.0f", o*100/d}'
+}
+zram_line() {
+  local ds orig used; ds=$(cat "$ZRAM/disksize" 2>/dev/null)
+  read -r orig _ used _ <<<"$(cat "$ZRAM/mm_stat" 2>/dev/null)"
+  [[ -z $ds ]] && { echo "n/a"; return; }
+  printf "%s stored / %s cap (%s%%), %s RAM used" \
+    "$(humanize "$orig" bytes)" "$(humanize "$ds" bytes)" "$(zram_stored_pct)" "$(humanize "$used" bytes)"
+}
+psi_line() {
+  local s f; s=$(awk '/^some/{for(i=1;i<=NF;i++)if($i~/avg10/){split($i,a,"=");print a[2]}}' /proc/pressure/memory 2>/dev/null)
+  f=$(awk '/^full/{for(i=1;i<=NF;i++)if($i~/avg60/){split($i,a,"=");print a[2]}}' /proc/pressure/memory 2>/dev/null)
+  echo "some10=${s:-?}  full60=${f:-?}"
+}
+
+# ── views ────────────────────────────────────────────────────────────────────
+banner() {
+  local sw zr psi mem
+  sw=$(swap_label)
+  zr=$(zram_line); psi=$(psi_line)
+  mem=$(free -h | awk '/^Mem:/{print $7" avail / "$2" total"}')
+  printf "%s╭─ vmscope ───────────────────────────────────────────────────╮%s\n" "$B" "$R"
+  printf "  ${B}mode${R}    %-30b ${B}swap${R} %s\n" "$(compute_profile) sysctl pins" "$sw"
+  printf "  ${B}zram${R}    %s\n" "$zr"
+  printf "  ${B}mem${R}     %s   ${B}PSI${R} %s\n" "$mem" "$psi"
+  printf "%s╰─────────────────────────────────────────────────────────────╯%s\n" "$B" "$R"
+}
+
+status() {
+  banner
+  local lastgrp="" knob v col txt note preset extra
+  for knob in "${ORDER[@]}"; do
+    v=$(live "$knob"); [[ -z $v ]] && continue
+    if [[ ${GRP[$knob]} != "$lastgrp" ]]; then
+      printf "\n %s%s%s\n" "$B$BLU" "${GRP[$knob]}" "$R"; lastgrp=${GRP[$knob]}
+    fi
+    IFS=$'\x1f' read -r col txt note <<<"$(classify "$knob" "$v")"
+    preset=$(preset_of "$knob"); extra=""
+    [[ ${MANAGED[$knob]:-} == 1 && -n $preset && $preset != "$v" ]] && extra="${D}→preset $preset${R}"
+    printf "  %-26s %-22b %s%-11s%s %b\n" \
+      "$knob" "$(fmt_val "$knob" "$v")" "$col" "$txt" "$R" "$extra"
+    printf "    %s└ %s%s\n" "$GRY" "${DESC[$knob]}" "$R"
+    [[ -n $note && ( $txt == "▲ OVERRIDE" ) ]] && printf "      %s%s⚠ %s%s\n" "$B" "$YEL" "$note" "$R"
+  done
+  printf "\n %slegend%s  %s◆PINNED%s reboot-proof  %s●MANAGED%s actuator  %s▲OVERRIDE%s differs  %s✦FREE%s till reboot  %s○%s default\n" \
+    "$D" "$R" "$CYN" "$R" "$GRN" "$R" "$YEL" "$R" "$MAG" "$R" "$GRY" "$R"
+}
+
+diffview() {
+  banner; printf "\n %sDeviations from default / profile%s\n" "$B$BLU" "$R"
+  local knob v col txt note preset hit=0
+  for knob in "${ORDER[@]}"; do
+    v=$(live "$knob"); [[ -z $v ]] && continue
+    IFS=$'\x1f' read -r col txt note <<<"$(classify "$knob" "$v")"
+    [[ $txt == "○ default" || $txt == "● MANAGED" ]] && continue
+    hit=1; preset=$(preset_of "$knob")
+    printf "  %-26s %-20b %s%-11s%s %s\n" "$knob" "$(fmt_val "$knob" "$v")" "$col" "$txt" "$R" \
+      "${note:+$D($note)$R}"
+  done
+  [[ $hit == 0 ]] && printf "  %severything matches its profile/default%s\n" "$GRN" "$R"
+}
+
+jsonview() {
+  local knob v col txt note preset first=1 zp s f
+  zp=$(zram_stored_pct); zp=${zp:-0}
+  s=$(awk '/^some/{for(i=1;i<=NF;i++)if($i~/avg10/){split($i,a,"=");print a[2]}}' /proc/pressure/memory); s=${s:-0}
+  f=$(awk '/^full/{for(i=1;i<=NF;i++)if($i~/avg60/){split($i,a,"=");print a[2]}}' /proc/pressure/memory); f=${f:-0}
+  printf '{"profile":"%s","last_applied":"%s","swap":"%s","zram_pct":%s,' \
+    "$(compute_profile)" "$(last_applied)" "$(swap_id)" "$zp"
+  printf '"psi_some10":%s,"psi_full60":%s,"knobs":[' "$s" "$f"
+  for knob in "${ORDER[@]}"; do
+    v=$(live "$knob"); [[ -z $v ]] && continue
+    IFS=$'\x1f' read -r col txt note <<<"$(classify "$knob" "$v")"
+    preset=$(preset_of "$knob")
+    [[ $first == 0 ]] && printf ','; first=0
+    printf '{"knob":"%s","value":"%s","default":"%s","preset":"%s","group":"%s","state":"%s","note":"%s"}' \
+      "$knob" "$v" "${DEF[$knob]}" "$preset" "${GRP[$knob]}" "${txt//[^A-Za-z]/}" "$note"
+  done
+  printf ']}\n'
+}
+
+watchview() {
+  trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
+  tput civis 2>/dev/null
+  while :; do
+    clear; status
+    printf "\n %slive — refresh 2s — q/Ctrl-C to quit%s\n" "$D" "$R"
+    read -rsn1 -t 2 key && [[ $key == q ]] && break
+  done
+  tput cnorm 2>/dev/null
+}
+
+explain() {
+  local knob=${1#vm.}
+  [[ -z ${GRP[$knob]:-} ]] && { echo "unknown knob: $knob"; echo "known: ${ORDER[*]}"; return 1; }
+  local v; v=$(live "$knob")
+  IFS=$'\x1f' read -r col txt note <<<"$(classify "$knob" "$v")"
+  printf "%s%s%s  %s%s%s\n" "$B" "vm.$knob" "$R" "$D" "${GRP[$knob]}" "$R"
+  printf "  %s\n\n" "${DESC[$knob]}"
+  printf "  live      %b\n" "$(fmt_val "$knob" "$v")"
+  printf "  default   %s\n" "$(fmt_val "$knob" "${DEF[$knob]}")"
+  [[ ${MANAGED[$knob]:-} == 1 ]] && printf "  preset    %s  %s(this knob is profile-managed)%s\n" "$(preset_of "$knob")" "$D" "$R"
+  printf "  state     %s%s%s  %s%s%s\n" "$col" "$txt" "$R" "$D" "${note:+— $note}" "$R"
+}
+
+# ── pin / persist ────────────────────────────────────────────────────────────
+pin() {
+  local arg=${1:-} knob val
+  [[ -z $arg ]] && { echo "usage: vmscope pin vm.<knob>[=value]"; return 1; }
+  knob=${arg%%=*}; knob=${knob#vm.}
+  [[ -z ${GRP[$knob]:-} ]] && { echo "unknown knob: $knob"; return 1; }
+  if [[ $arg == *=* ]]; then val=${arg#*=}; else val=$(live "$knob"); fi
+  [[ -f $EXTRAS ]] || sudo -n install -m644 -D /dev/null "$EXTRAS" 2>/dev/null
+  sudo -n sed -i "/^[[:space:]]*vm\.$knob[[:space:]]*=/d" "$EXTRAS"
+  echo "vm.$knob = $val" | sudo -n tee -a "$EXTRAS" >/dev/null
+  sudo -n sysctl -qw "vm.$knob=$val"
+  printf "%s◆ pinned%s vm.%s = %s  %s(reboot-proof; reapplied after every toggle)%s\n" "$CYN" "$R" "$knob" "$val" "$D" "$R"
+}
+unpin() {
+  local knob=${1#vm.}; [[ -z $knob ]] && { echo "usage: vmscope unpin vm.<knob>"; return 1; }
+  [[ -f $EXTRAS ]] || { echo "nothing pinned"; return 0; }
+  sudo -n sed -i "/^[[:space:]]*vm\.$knob[[:space:]]*=/d" "$EXTRAS"
+  printf "unpinned vm.%s %s(reverts to profile/default on next toggle or reboot)%s\n" "$knob" "$D" "$R"
+}
+apply_extras() { [[ -f $EXTRAS ]] && sudo -n sysctl -qp "$EXTRAS"; }
+show_extras() {
+  [[ -f $EXTRAS ]] || { echo "no pins yet ($EXTRAS absent)"; return; }
+  printf "%spinned (%s)%s\n" "$B" "$EXTRAS" "$R"; grep -vE '^\s*#|^\s*$' "$EXTRAS" | sed 's/^/  /'
+}
+
+legend() {
+  cat <<EOF
+${B}vmscope${R} — VM sysctl lens
+
+  ${CYN}◆ PINNED${R}    in $EXTRAS → survives reboot
+  ${GRN}● MANAGED${R}   owned by an explicit actuator, matches its target
+  ${YEL}▲ OVERRIDE${R}  actuator-owned but different from its target
+  ${MAG}✦ FREE${R}      not actuator-owned → sticks until reboot
+  ${GRY}○ default${R}   free knob still at kernel default
+
+usage: vmscope [status|diff|json|watch|explain <knob>|pin <k>[=v]|unpin <k>|extras|apply-extras]
+EOF
+}
+
+case "${1:-status}" in
+  status)      status ;;
+  diff)        diffview ;;
+  json)        jsonview ;;
+  watch)       watchview ;;
+  explain)     shift; explain "${1:-}" ;;
+  pin)         shift; pin "${1:-}" ;;
+  unpin)       shift; unpin "${1:-}" ;;
+  extras)      show_extras ;;
+  apply-extras) apply_extras ;;
+  legend|-h|--help) legend ;;
+  *) explain "$1" || legend ;;
+esac

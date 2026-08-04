@@ -1,0 +1,1457 @@
+#!/usr/bin/env python3
+"""vminfo - Live system performance dashboard.
+
+Shows memory, CPU, swap, pressure, and process data in a responsive,
+continuously updating TUI that adapts to terminal size.
+
+Keys:
+  1-4    Switch process view (RSS / CPU / Swap / Total)
+  +/-    Show more / fewer processes
+  f      Force-swap (evict) selected PIDs/names into swap
+  u      Unswap (fault back) selected PIDs/names into RAM
+  Space  Pause
+  q      Quit
+"""
+import sys
+import os
+import re
+import time
+import select
+import subprocess
+import signal
+
+# ── ANSI Escape Codes ──────────────────────────────────────────────────
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+ITALIC = "\033[3m"
+ERASE_EOL = "\033[K"
+ERASE_BELOW = "\033[J"
+
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
+MAGENTA = "\033[35m"
+CYAN = "\033[36m"
+GRAY = "\033[90m"
+WHITE = "\033[37m"
+
+BRED = "\033[91m"
+BGREEN = "\033[92m"
+BYELLOW = "\033[93m"
+BBLUE = "\033[94m"
+BMAGENTA = "\033[95m"
+BCYAN = "\033[96m"
+BWHITE = "\033[97m"
+
+
+# ── Layout helpers ─────────────────────────────────────────────────────
+
+_tw_cache = (0, 80)  # (timestamp, width) – avoid syscall every line
+
+def get_term_size():
+    """Get (columns, rows), cached for 0.25s."""
+    global _tw_cache
+    now = time.monotonic()
+    if now - _tw_cache[0] > 0.25:
+        try:
+            sz = os.get_terminal_size()
+            _tw_cache = (now, sz.columns)
+            return sz.columns, sz.lines
+        except Exception:
+            _tw_cache = (now, 80)
+            return 80, 24
+    try:
+        return _tw_cache[1], os.get_terminal_size().lines
+    except Exception:
+        return _tw_cache[1], 24
+
+
+def get_term_width():
+    return get_term_size()[0]
+
+
+def clamp_line(text, tw):
+    """Naively clamp visible length – strip ANSI for counting."""
+    import re
+    visible = re.sub(r'\033\[[0-9;]*m', '', text)
+    if len(visible) <= tw:
+        return text
+    # Truncate: walk chars, track visible count
+    out = []
+    vis = 0
+    i = 0
+    while i < len(text) and vis < tw - 1:
+        if text[i] == '\033':
+            j = i + 1
+            while j < len(text) and text[j] != 'm':
+                j += 1
+            out.append(text[i:j+1])
+            i = j + 1
+        else:
+            out.append(text[i])
+            vis += 1
+            i += 1
+    out.append(RESET)
+    return ''.join(out)
+
+
+def to_human(bytes_val):
+    """Convert bytes to human-readable string."""
+    val = float(bytes_val)
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if abs(val) < 1024.0:
+            if val >= 100:
+                return f"{val:.0f} {unit}"
+            elif val >= 10:
+                return f"{val:.1f} {unit}"
+            return f"{val:.2f} {unit}"
+        val /= 1024.0
+    return f"{val:.2f} PB"
+
+
+def fmt_duration(seconds):
+    """Format elapsed seconds into human-readable duration."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m{int(seconds % 60)}s"
+    if seconds < 86400:
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        return f"{h}h{m}m"
+    d = int(seconds // 86400)
+    h = int((seconds % 86400) // 3600)
+    return f"{d}d{h}h"
+
+
+def make_bar(pct, width=20):
+    """Create a colored progress bar that adapts to available width."""
+    width = max(5, width)
+    filled = int(round(pct * width / 100))
+    filled = max(0, min(width, filled))
+
+    if pct < 60:
+        fill_color = BGREEN
+    elif pct < 85:
+        fill_color = BYELLOW
+    else:
+        fill_color = BRED
+
+    return f"{fill_color}{'█' * filled}{GRAY}{'░' * (width - filled)}{RESET}"
+
+
+def make_separator(label="", width=None):
+    if width is None:
+        width = get_term_width()
+    if label:
+        visual_label_len = len(label) + 2
+        dash_len = max(1, width - visual_label_len - 2)
+        return f" {BOLD}{BCYAN}{label}{RESET} {CYAN}{'─' * dash_len}{RESET}"
+    return f" {CYAN}{'─' * (width - 2)}{RESET}"
+
+
+# ── Data Collection ────────────────────────────────────────────────────
+
+def get_meminfo():
+    data = {}
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                name = parts[0].rstrip(':')
+                if len(parts) == 3 and parts[2].lower() == 'kb':
+                    data[name] = int(parts[1]) * 1024
+                elif len(parts) == 2:
+                    data[name] = int(parts[1])
+    except Exception:
+        pass
+    return data
+
+
+def get_psi():
+    psi = {
+        'some': {'avg10': 0.0, 'avg60': 0.0, 'avg300': 0.0},
+        'full': {'avg10': 0.0, 'avg60': 0.0, 'avg300': 0.0},
+    }
+    try:
+        with open('/proc/pressure/memory', 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                kind = parts[0]
+                if kind in psi:
+                    for part in parts[1:]:
+                        if '=' in part:
+                            k, v = part.split('=')
+                            if k in psi[kind]:
+                                psi[kind][k] = float(v)
+    except Exception:
+        pass
+    return psi
+
+
+def get_zram_stats():
+    """Return the live zram tier state without spawning vmatlas.
+
+    vmatlas is the full read-only source of truth.  The small subset here is
+    deliberately syscall-light enough for a 2 Hz dashboard refresh.
+    """
+    stats = {
+        'orig': 0, 'compr': 0, 'mem_used': 0, 'primary': '?', 'recomp': None,
+        'backing': None, 'backing_bytes': 0, 'wb_enabled': None,
+        'wb_limit_bytes': 0,
+    }
+    base = '/sys/block/zram0'
+
+    def read(path):
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except Exception:
+            return ''
+
+    try:
+        parts = read(f'{base}/mm_stat').split()
+        if len(parts) >= 3:
+            stats['orig'] = int(parts[0])
+            stats['compr'] = int(parts[1])
+            stats['mem_used'] = int(parts[2])
+
+        def selected(value):
+            for item in value.split():
+                if item.startswith('[') and item.endswith(']'):
+                    return item[1:-1]
+            return value.split()[-1] if value.split() else '?'
+
+        stats['primary'] = selected(read(f'{base}/comp_algorithm'))
+        recomp = read(f'{base}/recomp_algorithm')
+        stats['recomp'] = selected(recomp) if '#' in recomp else None
+        backing = read(f'{base}/backing_dev')
+        stats['backing'] = backing if backing and backing != 'none' else None
+        bd = read(f'{base}/bd_stat').split()
+        if bd:
+            stats['backing_bytes'] = int(bd[0]) * 4096
+        enabled = read(f'{base}/writeback_limit_enable')
+        stats['wb_enabled'] = enabled == '1' if enabled else None
+        limit = read(f'{base}/writeback_limit')
+        if limit.isdigit():
+            stats['wb_limit_bytes'] = int(limit) * 4096
+    except Exception:
+        pass
+    return stats
+
+
+def get_vm_posture():
+    """Small vmscope-derived readout for roomy terminals; never mutates VM."""
+    keys = (
+        'swappiness', 'page-cluster', 'min_free_kbytes',
+        'dirty_background_bytes', 'dirty_bytes', 'compaction_proactiveness',
+    )
+    posture = {}
+    for key in keys:
+        try:
+            with open(f'/proc/sys/vm/{key}') as f:
+                posture[key] = int(f.read().strip())
+        except Exception:
+            posture[key] = None
+    return posture
+
+
+def get_watermark_snapshot():
+    """Read zone and reclaim counters from local /proc.
+
+    Zones use pages, exactly as /proc/zoneinfo exposes them.  The caller uses
+    counter deltas rather than kswapd's lifetime CPU percentage, matching the
+    Android Labs verdict: a low watermark plus real reclaim is an awakening.
+    """
+    zones = []
+    node = None
+    zone = None
+    fields = {}
+    try:
+        with open('/proc/zoneinfo') as f:
+            for raw in f:
+                line = raw.strip()
+                match = re.match(r'Node\s+(\d+),\s+zone\s+(\S+)', line)
+                if match:
+                    if zone and fields.get('managed', 0) > 0:
+                        zones.append({'node': node, 'name': zone, **fields})
+                    node, zone = int(match.group(1)), match.group(2)
+                    fields = {}
+                    continue
+                match = re.match(r'(pages free|min|low|high|managed)\s+(\d+)$', line)
+                if match and zone:
+                    key = 'free' if match.group(1) == 'pages free' else match.group(1)
+                    fields[key] = int(match.group(2))
+        if zone and fields.get('managed', 0) > 0:
+            zones.append({'node': node, 'name': zone, **fields})
+    except Exception:
+        pass
+
+    counters = {}
+    wanted = {
+        'pgscan_kswapd', 'pgscan_kswapd_normal', 'pgscan_direct',
+        'pgsteal_kswapd', 'kswapd_low_wmark_hit_quickly',
+        'allocstall', 'allocstall_normal', 'allocstall_movable',
+    }
+    try:
+        with open('/proc/vmstat') as f:
+            for line in f:
+                key, _, value = line.partition(' ')
+                if key in wanted and value.strip().isdigit():
+                    counters[key] = int(value.strip())
+    except Exception:
+        pass
+    return zones, counters
+
+
+def watermark_bar(zone, width=30):
+    """Terminal counterpart to the Labs free-meter with min/low markers."""
+    high = max(zone.get('high', 0), 1)
+    scale = max(high, zone.get('free', 0), 1)
+    free_at = min(width, int(round(zone.get('free', 0) * width / scale)))
+    min_at = min(width - 1, int(round(zone.get('min', 0) * width / scale)))
+    low_at = min(width - 1, int(round(zone.get('low', 0) * width / scale)))
+    color = BRED if zone.get('free', 0) <= zone.get('min', 0) else (
+        BYELLOW if zone.get('free', 0) <= zone.get('low', 0) else BGREEN
+    )
+    out = []
+    for index in range(width):
+        if index == min_at:
+            out.append(f"{BRED}│{RESET}")
+        elif index == low_at:
+            out.append(f"{BYELLOW}│{RESET}")
+        elif index < free_at:
+            out.append(f"{color}█{RESET}")
+        else:
+            out.append(f"{GRAY}░{RESET}")
+    return ''.join(out)
+
+
+def kswapd_verdict(zones, vmstat_deltas):
+    """Classify current zone-watermark and reclaim pressure."""
+    min_breached = any(z.get('free', 0) <= z.get('min', -1) for z in zones)
+    low_breached = any(z.get('free', 0) <= z.get('low', -1) for z in zones)
+    scan = vmstat_deltas.get('pgscan_kswapd')
+    if scan is None:
+        scan = vmstat_deltas.get('pgscan_kswapd_normal')
+    low_hit = vmstat_deltas.get('kswapd_low_wmark_hit_quickly')
+    if min_breached:
+        return f"{BRED}free below min — kswapd thrashing, kills likely{RESET}"
+    if low_breached and (scan or 0) > 0:
+        return f"{BYELLOW}below low watermark — kswapd reclaiming ({scan:.0f} scan/s){RESET}"
+    if (low_hit or 0) > 0:
+        return f"{BYELLOW}low watermark hit repeatedly — kswapd waking often ({low_hit:.0f}/s){RESET}"
+    return f"{BGREEN}free above low watermark — kswapd idle{RESET}"
+
+
+def get_loadavg():
+    """Read load average and running/total tasks."""
+    try:
+        with open('/proc/loadavg', 'r') as f:
+            parts = f.read().strip().split()
+            running, total = parts[3].split('/')
+            return {
+                'l1': float(parts[0]),
+                'l5': float(parts[1]),
+                'l15': float(parts[2]),
+                'running': int(running),
+                'total': int(total),
+            }
+    except Exception:
+        return {'l1': 0, 'l5': 0, 'l15': 0, 'running': 0, 'total': 0}
+
+
+def get_cpu_times():
+    """Read aggregate CPU times from /proc/stat."""
+    try:
+        with open('/proc/stat', 'r') as f:
+            line = f.readline().strip()
+        parts = line.split()
+        # user, nice, system, idle, iowait, irq, softirq, steal
+        vals = [int(x) for x in parts[1:9]]
+        return vals
+    except Exception:
+        return None
+
+
+def calc_cpu_pct(prev, cur):
+    """Calculate CPU usage percentage from two snapshots."""
+    if prev is None or cur is None:
+        return None
+    prev_idle = prev[3] + prev[4]  # idle + iowait
+    cur_idle = cur[3] + cur[4]
+    prev_total = sum(prev)
+    cur_total = sum(cur)
+    dtotal = cur_total - prev_total
+    didle = cur_idle - prev_idle
+    if dtotal == 0:
+        return 0.0
+    return ((dtotal - didle) / dtotal) * 100.0
+
+
+def get_temps():
+    """Read CPU and GPU temps from /sys or lm-sensors."""
+    temps = {}
+    # CPU: k10temp / coretemp
+    for base in ['/sys/class/hwmon']:
+        try:
+            for hwmon in os.listdir(base):
+                name_path = os.path.join(base, hwmon, 'name')
+                if not os.path.exists(name_path):
+                    continue
+                with open(name_path) as f:
+                    name = f.read().strip()
+                if name in ('k10temp', 'coretemp'):
+                    # Read Tctl / temp1
+                    for tfile in ('temp1_input', 'temp2_input'):
+                        tp = os.path.join(base, hwmon, tfile)
+                        if os.path.exists(tp):
+                            with open(tp) as f:
+                                temps['cpu'] = int(f.read().strip()) / 1000.0
+                            break
+                elif name == 'amdgpu':
+                    # GPU edge temp
+                    tp = os.path.join(base, hwmon, 'temp1_input')
+                    if os.path.exists(tp):
+                        with open(tp) as f:
+                            temps['gpu'] = int(f.read().strip()) / 1000.0
+        except Exception:
+            pass
+    return temps
+
+
+def get_uptime():
+    """System uptime in seconds."""
+    try:
+        with open('/proc/uptime') as f:
+            return float(f.read().strip().split()[0])
+    except Exception:
+        return 0
+
+
+def get_nproc():
+    try:
+        return os.cpu_count() or 1
+    except Exception:
+        return 1
+
+
+# ── Process collection ─────────────────────────────────────────────────
+
+def _read_proc_field(pid, field_path):
+    """Read a single value from /proc/PID/..."""
+    try:
+        with open(f'/proc/{pid}/{field_path}') as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def _display_comm(pid, comm):
+    """Give Firefox's otherwise ambiguous content processes useful labels."""
+    firefox_comms = {
+        'firefox', 'Isolated Web Content', 'Isolated Service Worker',
+        'Privileged Content', 'WebExtensions', 'RDD Process',
+        'Socket Process', 'Utility Process', 'forkserver',
+    }
+    # /proc/PID/comm is limited to 15 bytes, hence Firefox's content name is
+    # commonly the truncated "Isolated Web Co" rather than its full title.
+    firefox_like = comm in firefox_comms or comm.startswith(
+        ('Isolated ', 'Privileged ')
+    )
+    if not firefox_like:
+        return comm
+
+    cmdline = _read_proc_field(pid, 'cmdline')
+    if not cmdline or '/firefox/' not in cmdline:
+        return comm
+
+    if '-contentproc' not in cmdline:
+        return 'firefox'
+
+    # Firefox appends e.g. "203 tab" to its content-process command line.
+    # Preserve that identity in the table without parsing fragile full args.
+    child_match = re.search(r'(?:^|\s)(\d+)\s+(tab|rdd|socket|utility)\s*\0*$', cmdline)
+    if child_match:
+        child_id, role = child_match.groups()
+        return f"ff:{role}#{child_id}"
+    return 'ff:content'
+
+
+def get_enriched_processes(limit=10):
+    """Collect rich per-process data by reading ps numeric fields and /proc.
+
+    Returns list of dicts with keys:
+      pid, comm, rss, vsz, swap, pcpu, pmem, state, nice, threads,
+      oom_score, elapsed (seconds), total_mem (rss+swap)
+    """
+    try:
+        # Do not request ``comm`` here: Firefox names such as "Isolated Web
+        # Content" contain spaces.  Splitting that output used to make every
+        # content process look malformed and silently dropped it from vminfo.
+        out = subprocess.check_output(
+            ['ps', 'axo', 'pid,rss,vsz,pcpu,pmem,stat,nice,nlwp,etimes',
+             '--sort=-rss', '--no-headers'],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return []
+
+    processes = []
+    seen_pids = set()
+    for line in out.strip().split('\n'):
+        parts = line.split()
+        if len(parts) < 9:
+            continue
+        pid = parts[0]
+        if pid in seen_pids:
+            continue
+        seen_pids.add(pid)
+
+        try:
+            rss = int(parts[1]) * 1024
+            vsz = int(parts[2]) * 1024
+            pcpu = float(parts[3])
+            pmem = float(parts[4])
+            state = parts[5]
+            nice = parts[6]
+            threads = int(parts[7])
+            elapsed = int(parts[8])
+        except (ValueError, IndexError):
+            continue
+
+        comm = _read_proc_field(pid, 'comm') or '?'
+        comm = _display_comm(pid, comm)
+
+        # Use inexpensive status counters to separate anonymous resident RAM,
+        # file-backed mappings, and swapped pages. This avoids a full smaps
+        # walk for every process on each refresh.
+        swap = 0
+        rss_anon = 0
+        rss_file = 0
+        rss_shmem = 0
+        oom = 0
+        try:
+            status_text = _read_proc_field(pid, 'status')
+            if status_text:
+                for sline in status_text.split('\n'):
+                    if sline.startswith('VmSwap:'):
+                        swap = int(sline.split()[1]) * 1024
+                    elif sline.startswith('RssAnon:'):
+                        rss_anon = int(sline.split()[1]) * 1024
+                    elif sline.startswith('RssFile:'):
+                        rss_file = int(sline.split()[1]) * 1024
+                    elif sline.startswith('RssShmem:'):
+                        rss_shmem = int(sline.split()[1]) * 1024
+        except Exception:
+            pass
+
+        # OOM score
+        try:
+            oom_str = _read_proc_field(pid, 'oom_score')
+            if oom_str:
+                oom = int(oom_str)
+        except Exception:
+            pass
+
+        processes.append({
+            'pid': pid,
+            'comm': comm,
+            'rss': rss,
+            'vsz': vsz,
+            'swap': swap,
+            'rss_anon': rss_anon,
+            'rss_file': rss_file,
+            'rss_shmem': rss_shmem,
+            'pcpu': pcpu,
+            'pmem': pmem,
+            'state': state,
+            'nice': nice,
+            'threads': threads,
+            'oom_score': oom,
+            'elapsed': elapsed,
+            'total_mem': rss + swap,
+        })
+
+    return processes
+
+
+# Process state descriptions
+STATE_MAP = {
+    'R': ('RUN', BGREEN),
+    'S': ('SLP', GRAY),
+    'D': ('D/W', BRED),
+    'Z': ('ZMB', BRED),
+    'T': ('STP', BYELLOW),
+    't': ('TRC', BYELLOW),
+    'I': ('IDL', GRAY),
+}
+
+def fmt_state(raw):
+    """Format process state character with color and label."""
+    base = raw[0] if raw else '?'
+    label, color = STATE_MAP.get(base, (base, WHITE))
+    return f"{color}{label}{RESET}"
+
+
+# ── Delta Tracker ──────────────────────────────────────────────────────
+
+class DeltaTracker:
+    def __init__(self, alpha=0.3):
+        self.alpha = alpha
+        self._prev = {}
+        self._ema = {}
+        self._prev_time = time.time()
+
+    def tick(self, values):
+        now = time.time()
+        dt = now - self._prev_time
+        if dt < 0.05:
+            return {k: self._ema.get(k) for k in values}
+
+        deltas = {}
+        for key, current in values.items():
+            if key in self._prev:
+                raw_rate = (current - self._prev[key]) / dt
+                if key in self._ema:
+                    self._ema[key] = (self.alpha * raw_rate
+                                      + (1 - self.alpha) * self._ema[key])
+                else:
+                    self._ema[key] = raw_rate
+                deltas[key] = self._ema[key]
+            else:
+                deltas[key] = None
+            self._prev[key] = current
+
+        self._prev_time = now
+        return deltas
+
+
+# ── View modes ─────────────────────────────────────────────────────────
+
+VIEW_MODES = [
+    {'key': '1', 'sort': 'rss',       'label': 'Resident RAM', 'icon': '💾', 'color': BCYAN},
+    {'key': '2', 'sort': 'pcpu',      'label': 'CPU Hogs',     'icon': '🔥', 'color': BRED},
+    {'key': '3', 'sort': 'swap',      'label': 'Swap Hogs',    'icon': '🔄', 'color': BMAGENTA},
+    {'key': '4', 'sort': 'total_mem', 'label': 'RAM + Swap',   'icon': '📊', 'color': BYELLOW},
+]
+
+
+# ── Dashboard Rendering ───────────────────────────────────────────────
+
+def emit(lines_list, text):
+    lines_list.append(f"{text}{ERASE_EOL}")
+
+
+def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
+                   proc_limit, cpu_pct, temps, loadavg, uptime_s,
+                   zones=None, vmstat_deltas=None):
+    """Render the complete dashboard, adapting to terminal width AND height."""
+    lines = []
+    tw, th = get_term_size()
+    is_narrow = tw < 80
+    is_tiny = tw < 55
+    bar_w = max(8, min(25, tw - 55))
+    view = VIEW_MODES[view_idx]
+    zones = zones or []
+    vmstat_deltas = vmstat_deltas or {}
+
+    # Decide what sections to show based on terminal height.
+    # Minimum overhead without breakdown: header(2) + system bars(3-6) + tabs(3) + footer(2) + header_row(1) + safety(1)
+    has_zram = zr['orig'] > 0
+    base_overhead = 2 + (1 if has_zram else 0) + 1 + 3 + 2 + 1 + 1  # ~11
+    if is_tiny:
+        base_overhead += 6  # CPU(2) + RAM(2) + Swap(2)
+    else:
+        base_overhead += 3  # CPU(1) + RAM(1) + Swap(1)
+
+    # Show extended VM and reclaim context only when the terminal has room.
+    show_insights = not is_tiny and tw >= 100 and th >= 42
+    display_zones = sorted(zones, key=lambda z: z.get('managed', 0), reverse=True)[:3]
+
+    # Show breakdown only if terminal is tall enough (>= 30 rows and not tiny)
+    breakdown_lines = 0
+    show_breakdown = False
+    if not is_tiny and th >= 30:
+        show_breakdown = True
+        if is_narrow:
+            breakdown_lines = 2 + 12 + 1  # sep+blank + 12 single-col rows + blank
+        else:
+            breakdown_lines = 2 + 6 + 1  # sep+blank + 6 dual-col rows + blank
+
+    watermark_lines = (2 + len(display_zones)) if show_insights and display_zones else 0
+    insight_lines = (4 + (1 if has_zram else 0) + watermark_lines) if show_insights else 0
+    overhead = base_overhead + breakdown_lines + insight_lines
+    max_procs_by_height = max(1, th - overhead)
+    effective_limit = min(proc_limit, max_procs_by_height)
+
+    # ── Header ──────────────────────────────────────────────────────
+    status = (f"{BRED}⏸  PAUSED{RESET}" if paused
+              else f"{BGREEN}●  LIVE{RESET}")
+    if is_tiny:
+        emit(lines, f" {BOLD}{BCYAN}⚡vminfo{RESET} {status}")
+    else:
+        uptxt = fmt_duration(uptime_s) if uptime_s else ""
+        emit(lines, f" {BOLD}{BCYAN}⚡ vminfo{RESET}  {status}"
+                    f"  {DIM}up {uptxt}{RESET}")
+    emit(lines, f" {CYAN}{'━' * (tw - 2)}{RESET}")
+
+    # ── CPU, load, and temperatures ──────────────────────────────────
+    ncpu = get_nproc()
+    cpu_str = f"{cpu_pct:.0f}%" if cpu_pct is not None else "…"
+    load_color = BGREEN
+    if loadavg['l1'] > ncpu * 0.85:
+        load_color = BRED
+    elif loadavg['l1'] > ncpu * 0.5:
+        load_color = BYELLOW
+
+    cpu_bar_pct = min(cpu_pct or 0, 100)
+    if is_tiny:
+        emit(lines, f" {BOLD}🖥  CPU{RESET}  {make_bar(cpu_bar_pct, bar_w)} "
+                    f"{BWHITE}{cpu_str}{RESET}")
+        emit(lines, f"        {DIM}load{RESET} {load_color}{loadavg['l1']:.1f}{RESET}"
+                    f" {DIM}{loadavg['l5']:.1f} {loadavg['l15']:.1f}{RESET}"
+                    f" {DIM}({ncpu}c){RESET}")
+    else:
+        temp_parts = []
+        if 'cpu' in temps:
+            t = temps['cpu']
+            tc = BRED if t > 80 else (BYELLOW if t > 65 else BGREEN)
+            temp_parts.append(f"{DIM}cpu{RESET} {tc}{t:.0f}°C{RESET}")
+        if 'gpu' in temps:
+            t = temps['gpu']
+            tc = BRED if t > 85 else (BYELLOW if t > 70 else BGREEN)
+            temp_parts.append(f"{DIM}gpu{RESET} {tc}{t:.0f}°C{RESET}")
+        temp_str = f"  {'  '.join(temp_parts)}" if temp_parts else ""
+
+        emit(lines, f" {BOLD}🖥  CPU{RESET}   {make_bar(cpu_bar_pct, bar_w)}  "
+                    f"{BWHITE}{cpu_str:>5}{RESET}  "
+                    f"{DIM}load{RESET} {load_color}{loadavg['l1']:.2f}{RESET}"
+                    f"/{loadavg['l5']:.2f}/{loadavg['l15']:.2f}"
+                    f" {DIM}({ncpu}c, {loadavg['running']}/{loadavg['total']}){RESET}"
+                    f"{temp_str}")
+
+    # ── RAM ─────────────────────────────────────────────────────────
+    total_ram = mem.get('MemTotal', 1)
+    avail_ram = mem.get('MemAvailable', 0)
+    used_ram = total_ram - avail_ram
+    ram_pct = (used_ram / total_ram) * 100 if total_ram else 0
+
+    avail_ratio = avail_ram / total_ram if total_ram > 0 else 0
+    if avail_ratio > 0.30:
+        ram_tag = f"{BGREEN}▲ Healthy{RESET}"
+    elif avail_ratio > 0.12:
+        ram_tag = f"{BYELLOW}▶ Warning{RESET}"
+    else:
+        ram_tag = f"{BRED}▼ Critical{RESET}"
+
+    ram_delta_str = f"{GRAY}→ stable{RESET}"
+    d = deltas.get('avail_ram')
+    if d is not None:
+        if d > 512 * 1024:
+            ram_delta_str = f"{BGREEN}↗ +{to_human(d)}/s{RESET}"
+        elif d < -512 * 1024:
+            ram_delta_str = f"{BRED}↘ {to_human(abs(d))}/s{RESET}"
+
+    if is_tiny:
+        emit(lines, f" {BOLD}💾 RAM{RESET}  {make_bar(ram_pct, bar_w)} "
+                    f"{BWHITE}{ram_pct:.0f}%{RESET}")
+        emit(lines, f"        {DIM}{to_human(used_ram)}/{to_human(total_ram)}{RESET}"
+                    f" {ram_tag}")
+    else:
+        emit(lines, f" {BOLD}💾 RAM{RESET}   {make_bar(ram_pct, bar_w)}  "
+                    f"{BWHITE}{ram_pct:5.1f}%{RESET}  "
+                    f"{DIM}{to_human(used_ram)} / {to_human(total_ram)}{RESET}  "
+                    f"{ram_tag}  {ram_delta_str}")
+
+    # ── Swap ────────────────────────────────────────────────────────
+    total_swap = mem.get('SwapTotal', 0)
+    free_swap = mem.get('SwapFree', 0)
+    used_swap = total_swap - free_swap
+    swap_pct = (used_swap / total_swap) * 100 if total_swap > 0 else 0
+
+    if swap_pct < 50:
+        swap_tag = f"{BGREEN}▲ Good{RESET}"
+    elif swap_pct < 85:
+        swap_tag = f"{BYELLOW}▶ Caution{RESET}"
+    else:
+        swap_tag = f"{BRED}▼ Low{RESET}"
+
+    swap_delta_str = f"{GRAY}→ stable{RESET}"
+    d = deltas.get('used_swap')
+    if d is not None:
+        if d > 512 * 1024:
+            swap_delta_str = f"{BRED}↗ +{to_human(d)}/s{RESET}"
+        elif d < -512 * 1024:
+            swap_delta_str = f"{BGREEN}↘ {to_human(abs(d))}/s{RESET}"
+
+    swap_bar = make_bar(swap_pct, bar_w) if total_swap > 0 else f"{GRAY}{'░' * bar_w}{RESET}"
+    if is_tiny:
+        emit(lines, f" {BOLD}🔄 Swp{RESET}  {swap_bar} "
+                    f"{BWHITE}{swap_pct:.0f}%{RESET}")
+        emit(lines, f"        {DIM}{to_human(used_swap)}/{to_human(total_swap)}{RESET}"
+                    f" {swap_tag}")
+    else:
+        emit(lines, f" {BOLD}🔄 Swap{RESET}  {swap_bar}  "
+                    f"{BWHITE}{swap_pct:5.1f}%{RESET}  "
+                    f"{DIM}{to_human(used_swap)} / {to_human(total_swap)}{RESET}  "
+                    f"{swap_tag}  {swap_delta_str}")
+
+    # ── ZRAM ────────────────────────────────────────────────────────
+    if zr['orig'] > 0:
+        ratio = zr['orig'] / zr['compr'] if zr['compr'] > 0 else 1.0
+        if ratio >= 2.5:
+            zr_tag = f"{BGREEN}▲ Efficient{RESET}"
+        elif ratio >= 1.5:
+            zr_tag = f"{BYELLOW}▶ Moderate{RESET}"
+        else:
+            zr_tag = f"{BRED}▼ Inefficient{RESET}"
+        emit(lines, f" {BOLD}🗜  ZRAM{RESET}  "
+                    f"{BWHITE}{ratio:.2f}x{RESET}  "
+                    f"{DIM}{to_human(zr['orig'])} → {to_human(zr['compr'])}{RESET}"
+                    f"  {zr_tag}")
+        if show_insights:
+            chain = zr['primary']
+            if zr['recomp']:
+                chain += f" → {zr['recomp']}"
+            if zr['backing']:
+                backing_name = os.path.basename(zr['backing'])
+                wb = (f"{to_human(zr['backing_bytes'])} on {backing_name}"
+                      if zr['backing_bytes'] else backing_name)
+                if zr['wb_enabled'] and zr['wb_limit_bytes']:
+                    wb += f" · {to_human(zr['wb_limit_bytes'])} budget"
+                wb_text = f"writeback {wb}"
+            else:
+                wb_text = "no writeback tier"
+            emit(lines, f" {DIM}     chain {chain} · {wb_text}{RESET}")
+
+    # ── PSI ─────────────────────────────────────────────────────────
+    s10 = psi['some']['avg10']
+    s60 = psi['some']['avg60']
+    s300 = psi['some']['avg300']
+    f10 = psi['full']['avg10']
+
+    if s10 > 5.0 or f10 > 2.0:
+        psi_tag = f"{BRED}▼ Stalling!{RESET}"
+    elif s10 > 0.0:
+        psi_tag = f"{BYELLOW}▶ Mild{RESET}"
+    else:
+        psi_tag = f"{BGREEN}▲ Smooth{RESET}"
+
+    if is_tiny:
+        emit(lines, f" {BOLD}⏱  PSI{RESET}  {BWHITE}{s10:.1f}{RESET}/{s60:.1f}/{s300:.1f}%"
+                    f"  {psi_tag}")
+    else:
+        emit(lines, f" {BOLD}⏱  PSI{RESET}   "
+                    f"avg10/60/300: {BWHITE}{s10:.2f}{RESET}/{s60:.2f}/{s300:.2f}%"
+                    f"  {psi_tag}")
+
+    # ── Memory Breakdown ────────────────────────────────────────────
+    if show_breakdown:
+        emit(lines, "")
+        emit(lines, make_separator("📊 Memory Breakdown", tw))
+        emit(lines, "")
+
+        free_mem = mem.get('MemFree', 0)
+        cached = mem.get('Cached', 0)
+        buffers = mem.get('Buffers', 0)
+        active = mem.get('Active', 0)
+        inactive = mem.get('Inactive', 0)
+        dirty = mem.get('Dirty', 0)
+        writeback = mem.get('Writeback', 0)
+        mapped = mem.get('Mapped', 0)
+        sreclaim = mem.get('SReclaimable', 0)
+        sunreclaim = mem.get('SUnreclaim', 0)
+
+        cache_total = buffers + cached + sreclaim
+        anon = mem.get('Active(anon)', 0) + mem.get('Inactive(anon)', 0)
+
+        if dirty > 512 * 1024 * 1024:
+            dirty_c = BRED
+        elif dirty > 256 * 1024 * 1024:
+            dirty_c = BYELLOW
+        else:
+            dirty_c = BWHITE
+
+        rows = [
+            ("Available", avail_ram, BGREEN, "Free", free_mem, BGREEN),
+            ("Cache tot", cache_total, BGREEN, "Anon", anon, BWHITE),
+            ("Cached", cached, WHITE, "Buffers", buffers, WHITE),
+            ("Slab recl", sreclaim, BGREEN, "Slab pin", sunreclaim, BYELLOW),
+            ("Active", active, BWHITE, "Inactive", inactive, BWHITE),
+            ("Dirty", dirty, dirty_c, "Mapped", mapped, BWHITE),
+        ]
+
+        LW = 12; VW = 12
+        def mem_cell(l, v, c):
+            return f"{CYAN}{l:<{LW}}{RESET} {c}{to_human(v):>{VW}}{RESET}"
+
+        if is_narrow:
+            for l1, v1, c1, l2, v2, c2 in rows:
+                emit(lines, f"   {mem_cell(l1, v1, c1)}")
+                emit(lines, f"   {mem_cell(l2, v2, c2)}")
+        else:
+            GAP = "     "
+            for l1, v1, c1, l2, v2, c2 in rows:
+                emit(lines, f"   {mem_cell(l1, v1, c1)}{GAP}"
+                            f"{mem_cell(l2, v2, c2)}")
+
+    # ── Zone watermarks ───────────────────────────────────────────────
+    if show_insights and display_zones:
+        emit(lines, make_separator("🛟 Zones & watermarks", tw))
+        emit(lines, f" {kswapd_verdict(display_zones, vmstat_deltas)}")
+        for zone in display_zones:
+            free = zone.get('free', 0)
+            minimum = zone.get('min', 0)
+            low = zone.get('low', 0)
+            high = zone.get('high', 0)
+            if free <= minimum:
+                state = f"{BRED}min breached{RESET}"
+            elif free <= low:
+                state = f"{BYELLOW}below low (kswapd awake){RESET}"
+            else:
+                state = f"{BGREEN}comfortable{RESET}"
+            pages_to_bytes = 4096
+            line = (f" {CYAN}N{zone.get('node', '?')} {zone.get('name', '?'):<7}{RESET} "
+                    f"{watermark_bar(zone)} "
+                    f"F {to_human(free * pages_to_bytes)} · "
+                    f"min {to_human(minimum * pages_to_bytes)} · "
+                    f"low {to_human(low * pages_to_bytes)} · "
+                    f"high {to_human(high * pages_to_bytes)}  {state}")
+            emit(lines, clamp_line(line, tw))
+
+    # ── Roomy-terminal VM posture + app anatomy ─────────────────────
+    if show_insights:
+        posture = get_vm_posture()
+        min_free = posture.get('min_free_kbytes')
+        min_free_text = to_human(min_free * 1024) if min_free is not None else '?'
+        dirty_bg = posture.get('dirty_background_bytes')
+        dirty_limit = posture.get('dirty_bytes')
+        if dirty_bg or dirty_limit:
+            dirty_policy = f"{to_human(dirty_bg or 0)}/{to_human(dirty_limit or 0)}"
+        else:
+            dirty_policy = "ratio mode"
+
+        emit(lines, make_separator("🧭 VM posture & app anatomy", tw))
+        emit(lines, f" {DIM}vmscope{RESET}  swappiness {BWHITE}{posture.get('swappiness', '?')}{RESET}"
+                    f" · cluster {BWHITE}{posture.get('page-cluster', '?')}{RESET}"
+                    f" · min-free {BWHITE}{min_free_text}{RESET}"
+                    f" · dirty bg/limit {BWHITE}{dirty_policy}{RESET}"
+                    f" · compaction {BWHITE}{posture.get('compaction_proactiveness', '?')}{RESET}")
+
+        leaders = sorted(processes, key=lambda p: p.get('total_mem', 0), reverse=True)[:2]
+        leader_parts = []
+        for proc in leaders:
+            resident = (proc.get('rss_anon', 0) + proc.get('rss_file', 0)
+                        + proc.get('rss_shmem', 0))
+            anatomy = (f"{to_human(resident)} RAM "
+                       f"({to_human(proc.get('rss_anon', 0))} anon"
+                       f"/{to_human(proc.get('rss_file', 0))} file)"
+                       f" + {to_human(proc.get('swap', 0))} swap")
+            leader_parts.append(
+                f"{CYAN}{proc['pid']}{RESET} {proc['comm'][:18]} "
+                f"{BWHITE}{to_human(proc['total_mem'])}{RESET} [{anatomy}]"
+            )
+        if leader_parts:
+            emit(lines, clamp_line(f" {BOLD}Footprint{RESET}  " + "  ·  ".join(leader_parts), tw))
+        else:
+            emit(lines, f" {DIM}Footprint  no process accounting available{RESET}")
+        emit(lines, f" {DIM}RSS is resident only; RAM + Swap ranks full per-PID footprint. "
+                    f"Use [4] to inspect parked pages.{RESET}")
+
+    # ── Process Table ───────────────────────────────────────────────
+    emit(lines, "")
+
+    # View tabs
+    tabs = []
+    for i, vm in enumerate(VIEW_MODES):
+        if i == view_idx:
+            tabs.append(f"{BOLD}{vm['color']}[{vm['key']}]{vm['icon']} {vm['label']}{RESET}")
+        else:
+            tabs.append(f"{DIM}[{vm['key']}]{RESET}")
+    tab_line = " ".join(tabs)
+    emit(lines, f" {tab_line}")
+    emit(lines, f" {CYAN}{'─' * (tw - 2)}{RESET}")
+
+    # Sort processes
+    sort_key = view['sort']
+    if sort_key == 'pcpu':
+        sorted_procs = sorted(processes, key=lambda p: p.get('pcpu', 0), reverse=True)
+    elif sort_key == 'swap':
+        sorted_procs = sorted(processes, key=lambda p: p.get('swap', 0), reverse=True)
+    elif sort_key == 'total_mem':
+        sorted_procs = sorted(processes, key=lambda p: p.get('total_mem', 0), reverse=True)
+    else:
+        sorted_procs = sorted(processes, key=lambda p: p.get('rss', 0), reverse=True)
+
+    display_procs = sorted_procs[:effective_limit]
+    total_procs = len(sorted_procs)
+
+    # Adaptive column layout
+    if is_tiny:
+        # Minimal: PID COMMAND VALUE
+        sort_label = sort_key.upper()
+        if sort_label == 'TOTAL_MEM':
+            sort_label = 'TOTAL'
+        emit(lines, f"   {DIM}{'PID':<8}{'CMD':<12}{sort_label:>10}{RESET}")
+        for p in display_procs:
+            if sort_key == 'pcpu':
+                val = f"{p['pcpu']:.1f}%"
+            elif sort_key == 'swap':
+                val = to_human(p['swap'])
+            elif sort_key == 'total_mem':
+                val = to_human(p['total_mem'])
+            else:
+                val = to_human(p['rss'])
+            emit(lines, f"   {CYAN}{p['pid']:<8}{RESET}"
+                        f"{p['comm'][:11]:<12}"
+                        f"{BWHITE}{val:>10}{RESET}")
+    elif is_narrow:
+        # Medium: PID COMMAND RSS CPU% STATE
+        emit(lines, f"   {DIM}{'PID':<8}{'COMMAND':<16}{'RSS':>10}{'CPU%':>7}{'ST':>4}{RESET}")
+        for p in display_procs:
+            emit(lines, f"   {CYAN}{p['pid']:<8}{RESET}"
+                        f"{p['comm'][:15]:<16}"
+                        f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
+                        f"{BWHITE}{p['pcpu']:>6.1f}{RESET}%"
+                        f" {fmt_state(p['state'])}")
+    else:
+        # Full: PID COMMAND RSS SWAP CPU% MEM% THR STATE OOM AGE
+        emit(lines, f"   {DIM}{'PID':<8}{'COMMAND':<18}{'RSS':>10}{'SWAP':>10}"
+                    f"{'CPU%':>7}{'MEM%':>7}{'THR':>5}{'ST':>5}"
+                    f"{'OOM':>5}{'AGE':>8}{RESET}")
+        for p in display_procs:
+            oom = p['oom_score']
+            if oom > 800:
+                oom_c = BRED
+            elif oom > 400:
+                oom_c = BYELLOW
+            else:
+                oom_c = GRAY
+
+            swap_c = BMAGENTA if p['swap'] > 0 else DIM
+
+            emit(lines, f"   {CYAN}{p['pid']:<8}{RESET}"
+                        f"{p['comm'][:17]:<18}"
+                        f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
+                        f"{swap_c}{to_human(p['swap']):>10}{RESET}"
+                        f"{BWHITE}{p['pcpu']:>6.1f}{RESET}%"
+                        f"{DIM}{p['pmem']:>6.1f}{RESET}%"
+                        f"{DIM}{p['threads']:>5}{RESET}"
+                        f" {fmt_state(p['state'])}"
+                        f"  {oom_c}{oom:>4}{RESET}"
+                        f"{DIM}{fmt_duration(p['elapsed']):>8}{RESET}")
+
+    if not display_procs:
+        emit(lines, f"   {GRAY}(no processes found){RESET}")
+
+    # ── Footer ──────────────────────────────────────────────────────
+    emit(lines, "")
+    shown = len(display_procs)
+    count_info = f"{shown}"
+    if shown < total_procs:
+        count_info += f"/{total_procs}"
+    if is_tiny:
+        emit(lines, f" {DIM}q{RESET}Quit {DIM}1-4{RESET}View {DIM}+/-{RESET}{count_info} "
+                    f"{BMAGENTA}f{RESET}swap {BGREEN}u{RESET}nsw {DIM}⎵{RESET}Pse")
+    else:
+        emit(lines, f" {DIM}[q]{RESET} Quit  "
+                    f"{DIM}[1-4]{RESET} View  "
+                    f"{DIM}[+/-]{RESET} Showing {count_info}  "
+                    f"{BMAGENTA}[f]{RESET} Force-swap  "
+                    f"{BGREEN}[u]{RESET} Unswap  "
+                    f"{DIM}[Space]{RESET} Pause")
+
+    return "\n".join(lines)
+
+
+# ── Terminal Raw Mode ─────────────────────────────────────────────────
+
+MOUSE_INPUT_ON = '\033[?1000h\033[?1006h\033[?2004h'
+MOUSE_INPUT_OFF = '\033[?2004l\033[?1006l\033[?1000l'
+PASTE_START = b'\033[200~'
+PASTE_END = b'\033[201~'
+
+
+def _partial_suffix(data, marker):
+    """Keep only a trailing fragment that may complete marker next read."""
+    for size in range(min(len(data), len(marker) - 1), 0, -1):
+        if data.endswith(marker[:size]):
+            return data[-size:]
+    return b''
+
+
+def parse_terminal_input(data, in_paste=False):
+    """Return command keys while consuming terminal control/mouse events.
+
+    Kitty sends scroll actions as cursor-key escape sequences on the alternate
+    screen. Mouse tracking sends SGR mouse events instead. Consume either form
+    as a complete event so neither can leave bytes queued ahead of real
+    keyboard commands. Bracketed paste is ignored as well, preventing a
+    middle-click paste from accidentally invoking dashboard actions.
+    """
+    keys = []
+    pos = 0
+
+    while pos < len(data):
+        if in_paste:
+            end = data.find(PASTE_END, pos)
+            if end < 0:
+                return keys, _partial_suffix(data[pos:], PASTE_END), True
+            pos = end + len(PASTE_END)
+            in_paste = False
+            continue
+
+        byte = data[pos]
+        if byte != 0x1b:
+            # Dashboard commands are ASCII. Ignore other UTF-8 bytes rather
+            # than treating part of a multibyte character as a command.
+            if byte < 0x80:
+                keys.append(chr(byte))
+            pos += 1
+            continue
+
+        if data.startswith(PASTE_START, pos):
+            pos += len(PASTE_START)
+            in_paste = True
+            continue
+
+        if pos + 1 >= len(data):
+            break
+
+        introducer = data[pos + 1]
+        if introducer == ord('['):
+            # CSI: arrows, focus reports, SGR mouse, and extended keys all end
+            # with a final byte in the 0x40..0x7e range.
+            end = pos + 2
+            while end < len(data) and not 0x40 <= data[end] <= 0x7e:
+                end += 1
+            if end >= len(data):
+                break
+            pos = end + 1
+        elif introducer == ord('O'):
+            # SS3 cursor/function-key form, e.g. ESC O A.
+            if pos + 2 >= len(data):
+                break
+            pos += 3
+        elif introducer == ord(']'):
+            # OSC replies end in BEL or ST (ESC backslash).
+            end = pos + 2
+            while end < len(data):
+                if data[end] == 0x07:
+                    end += 1
+                    break
+                if data[end:end + 2] == b'\033\\':
+                    end += 2
+                    break
+                end += 1
+            else:
+                break
+            pos = end
+        else:
+            # Discard an unrecognized ESC prefix but leave the following byte
+            # available, preserving commands such as Alt+q as q.
+            pos += 1
+
+    return keys, data[pos:], in_paste
+
+
+class RawTerminal:
+    def __init__(self):
+        self.fd = sys.stdin.fileno()
+        self.old_settings = None
+        self.input_buffer = b''
+        self.in_paste = False
+
+    def __enter__(self):
+        if sys.stdin.isatty():
+            import termios
+            import tty
+            self.old_settings = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+            sys.stdout.write(f'\033[?25l{MOUSE_INPUT_ON}')
+            sys.stdout.flush()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.old_settings is not None:
+            import termios
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+            sys.stdout.write(f'{MOUSE_INPUT_OFF}\033[?25h\033[?1049l')
+            sys.stdout.flush()
+
+    def get_chars(self):
+        if not sys.stdin.isatty():
+            return []
+
+        chunks = []
+        while True:
+            readable, _, _ = select.select([self.fd], [], [], 0.0)
+            if not readable:
+                break
+            chunk = os.read(self.fd, 4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+
+        if not chunks:
+            return []
+
+        data = self.input_buffer + b''.join(chunks)
+        keys, self.input_buffer, self.in_paste = parse_terminal_input(
+            data, self.in_paste)
+        return keys
+
+    def suspend(self):
+        if self.old_settings is not None:
+            import termios
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+            sys.stdout.write(f'{MOUSE_INPUT_OFF}\033[?25h\033[?1049l')
+            sys.stdout.flush()
+
+    def resume(self):
+        if self.old_settings is not None:
+            import tty
+            tty.setcbreak(self.fd)
+            sys.stdout.write(
+                f'\033[?1049h\033[2J\033[H\033[?25l{MOUSE_INPUT_ON}')
+            sys.stdout.flush()
+
+
+# ── Actions: drive forceswap / unswap from the live table ─────────────
+
+def sort_processes(processes, view_idx):
+    key = VIEW_MODES[view_idx]['sort']
+    return sorted(processes, key=lambda p: p.get(key, 0), reverse=True)
+
+
+def resolve_selection(raw, shown):
+    """Map a typed selection to PIDs against the currently shown rows.
+
+    Accepts raw PIDs, comm substrings, and 'all' (= everything on screen).
+    """
+    raw = raw.strip()
+    if not raw:
+        return []
+    pids = []
+    seen = set()
+
+    def add(pid):
+        if pid > 0 and pid not in seen:
+            seen.add(pid)
+            pids.append(pid)
+
+    for tok in re.split(r'[,\s]+', raw):
+        if not tok:
+            continue
+        if tok.lower() == 'all':
+            for p in shown:
+                add(int(p['pid']))
+        elif tok.isdigit():
+            add(int(tok))
+        else:
+            for p in shown:
+                if tok.lower() in p['comm'].lower():
+                    add(int(p['pid']))
+    return pids
+
+
+def run_swap_action(op, processes, view_idx, proc_limit, term):
+    """Suspend the TUI, run `sudo <op> <pids>`, then resume."""
+    exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), op)
+    shown = sort_processes(processes, view_idx)[:proc_limit]
+
+    term.suspend()
+    try:
+        verb = "Force-swap (evict)" if op == 'forceswap' else "Unswap (fault back)"
+        print(f"\n{BOLD}{BCYAN}== {verb} =={RESET}")
+        print(f"{DIM}Type PIDs and/or names from the table, or 'all'. "
+              f"Empty to cancel.{RESET}")
+        for p in shown[:proc_limit]:
+            print(f"  {CYAN}{p['pid']:>8}{RESET}  {p['comm'][:24]:<24}"
+                  f"  {DIM}rss {to_human(p['rss'])}  swap {to_human(p['swap'])}{RESET}")
+        try:
+            raw = input(f"\n{op} which? ")
+        except (EOFError, KeyboardInterrupt):
+            raw = ""
+
+        pids = resolve_selection(raw, shown)
+        if not pids:
+            print("Cancelled.")
+        else:
+            print(f"{BOLD}-> sudo {op} {' '.join(str(p) for p in pids)}{RESET}")
+            try:
+                subprocess.run(["sudo", exe, "-y"] + [str(p) for p in pids])
+            except Exception as e:
+                print(f"[-] Failed to run {op}: {e}")
+
+        try:
+            input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+    finally:
+        term.resume()
+
+
+def preferred_proc_limit():
+    """Use spare rows by default, while preserving the compact first view."""
+    width, height = get_term_size()
+    return 30 if width >= 100 and height >= 42 else 10
+
+
+# ── Main ──────────────────────────────────────────────────────────────
+
+def main():
+    # Static / non-interactive mode
+    if not sys.stdout.isatty() or '--static' in sys.argv or '-s' in sys.argv:
+        mem = get_meminfo()
+        psi = get_psi()
+        zr = get_zram_stats()
+        procs = get_enriched_processes(10)
+        cpu_pct = 0.0
+        temps = get_temps()
+        la = get_loadavg()
+        up = get_uptime()
+        zones, _ = get_watermark_snapshot()
+        print(draw_dashboard(mem, psi, zr, 0, False, {}, procs, 10,
+                             cpu_pct, temps, la, up, zones, {}))
+        return
+
+    # Interactive live mode
+    view_idx = 0
+    paused = False
+    proc_limit = preferred_proc_limit()
+    auto_proc_limit = True
+    tracker = DeltaTracker(alpha=0.3)
+
+    # Initialise data BEFORE the loop
+    mem = get_meminfo()
+    psi = get_psi()
+    zr = get_zram_stats()
+    deltas = {}
+    processes = get_enriched_processes(50)
+    zones, vmstat = get_watermark_snapshot()
+    vmstat_deltas = {}
+    prev_cpu = get_cpu_times()
+    cpu_pct = 0.0
+    temps = get_temps()
+    loadavg = get_loadavg()
+    uptime_s = get_uptime()
+
+    # Handle SIGWINCH for immediate resize response
+    resized = [False]
+    def on_resize(signum, frame):
+        resized[0] = True
+    try:
+        signal.signal(signal.SIGWINCH, on_resize)
+    except Exception:
+        pass
+
+    # Use alternate screen buffer to keep shell clean
+    sys.stdout.write("\033[?1049h")  # enter alt screen
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+    tick_count = 0
+
+    with RawTerminal() as term:
+        try:
+            while True:
+                # Handle input
+                quit_requested = False
+                for ch in term.get_chars():
+                    if ch in ('q', 'Q'):
+                        quit_requested = True
+                        break
+                    elif ch == '1':
+                        view_idx = 0
+                    elif ch == '2':
+                        view_idx = 1
+                    elif ch == '3':
+                        view_idx = 2
+                    elif ch == '4':
+                        view_idx = 3
+                    elif ch in ('+', '='):
+                        auto_proc_limit = False
+                        proc_limit = min(30, proc_limit + 5)
+                    elif ch in ('-', '_'):
+                        auto_proc_limit = False
+                        proc_limit = max(3, proc_limit - 5)
+                    elif ch in ('f', 'F'):
+                        run_swap_action('forceswap', processes, view_idx, proc_limit, term)
+                        processes = get_enriched_processes(50)
+                    elif ch in ('u', 'U'):
+                        run_swap_action('unswap', processes, view_idx, proc_limit, term)
+                        processes = get_enriched_processes(50)
+                    elif ch == ' ':
+                        paused = not paused
+
+                if quit_requested:
+                    break
+
+                if not paused:
+                    if auto_proc_limit:
+                        proc_limit = preferred_proc_limit()
+                    mem = get_meminfo()
+                    psi = get_psi()
+                    zr = get_zram_stats()
+                    loadavg = get_loadavg()
+                    uptime_s = get_uptime()
+                    zones, vmstat = get_watermark_snapshot()
+
+                    # CPU %
+                    cur_cpu = get_cpu_times()
+                    cpu_pct = calc_cpu_pct(prev_cpu, cur_cpu) or 0.0
+                    prev_cpu = cur_cpu
+
+                    # Temps less frequently (every ~5s)
+                    if tick_count % 10 == 0:
+                        temps = get_temps()
+
+                    # Processes (slightly less often to reduce load)
+                    if tick_count % 2 == 0 or resized[0]:
+                        processes = get_enriched_processes(50)
+
+                    avail = mem.get('MemAvailable', 0)
+                    total_swap = mem.get('SwapTotal', 0)
+                    free_swap = mem.get('SwapFree', 0)
+                    delta_values = {
+                        'avail_ram': avail,
+                        'used_swap': total_swap - free_swap,
+                    }
+                    delta_values.update(vmstat)
+                    deltas = tracker.tick(delta_values)
+                    vmstat_deltas = deltas
+
+                    tick_count += 1
+
+                resized[0] = False
+
+                # Redraw
+                sys.stdout.write("\033[H")
+                output = draw_dashboard(mem, psi, zr, view_idx, paused, deltas,
+                                        processes, proc_limit, cpu_pct, temps,
+                                        loadavg, uptime_s, zones, vmstat_deltas)
+                sys.stdout.write(output)
+                sys.stdout.write(f"\n{ERASE_BELOW}")
+                sys.stdout.flush()
+
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    # Restore terminal on exit
+    sys.stdout.write('\033[?1049l\033[?25h')
+    sys.stdout.flush()

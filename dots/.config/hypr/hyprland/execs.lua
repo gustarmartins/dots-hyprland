@@ -8,7 +8,7 @@ hl.on("hyprland.start", function ()
 
     -- Core components (authentication, lock screen, notification daemon)
     hl.exec_cmd("gnome-keyring-daemon --start --components=secrets")
-    hl.exec_cmd("hypridle")
+    -- Automatic idle lock/DPMS is intentionally disabled; keep manual Super+L.
     hl.exec_cmd("dbus-update-activation-environment --all")
     hl.exec_cmd("sleep 1 && dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP") -- Some fix idk
     hl.exec_cmd("hyprpm reload")
@@ -18,8 +18,8 @@ hl.on("hyprland.start", function ()
 
     -- Clipboard: history
     --hl.exec_cmd("wl-paste --watch cliphist store")
-    hl.exec_cmd("wl-paste --type text --watch bash -c '/home/gus/.local/bin/cliphist store && qs -c $qsConfig ipc call cliphistService update'")
-    hl.exec_cmd("wl-paste --type image --watch bash -c '/home/gus/.local/bin/cliphist store && qs -c $qsConfig ipc call cliphistService update'")
+    hl.exec_cmd("wl-paste --type text --watch bash -c '$HOME/.local/bin/cliphist store && qs -c $qsConfig ipc call cliphistService update'")
+    hl.exec_cmd("wl-paste --type image --watch bash -c '$HOME/.local/bin/cliphist store && qs -c $qsConfig ipc call cliphistService update'")
 
     -- Cursor
     hl.exec_cmd("hyprctl setcursor Bibata-Modern-Classic 24")

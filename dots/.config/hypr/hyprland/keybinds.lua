@@ -62,7 +62,7 @@ hl.bind("CTRL + SUPER + P", hl.dsp.global("quickshell:panelFamilyCycle"), { desc
 --##! Utilities
 --# Screenshot, Record, OCR, Color picker, Clipboard history
 hl.bind("SUPER + V", hl.dsp.exec_cmd(
-        qsIsAlive .. " || pkill fuzzel || /home/gus/.local/bin/cliphist list | fuzzel --match-mode fzf --dmenu | /home/gus/.local/bin/cliphist decode | wl-copy"),
+        qsIsAlive .. " || pkill fuzzel || $HOME/.local/bin/cliphist list | fuzzel --match-mode fzf --dmenu | $HOME/.local/bin/cliphist decode | wl-copy"),
     { description = "Utilities: Clipboard history >> clipboard" })
 hl.bind("SUPER + Period", hl.dsp.exec_cmd(
         qsIsAlive .. " || pkill fuzzel || " .. hyprScripts .. "/fuzzel-emoji.sh copy"),
@@ -343,7 +343,7 @@ hl.bind("SUPER + ALT + Equal",
     hl.dsp.exec_cmd("notify-send 'Urgent notification' 'Ah hell no' -u critical -a 'Hyprland keybind'")) -- # [hidden]
 
 --##! Session
-hl.bind("SUPER + L", hl.dsp.exec_cmd("loginctl lock-session"), { description = "Session: Lock" })
+hl.bind("SUPER + L", hl.dsp.global("quickshell:lock"), { description = "Session: Lock" })
 hl.bind("SUPER + SHIFT + L", hl.dsp.exec_cmd("systemctl suspend || loginctl suspend"),
     { locked = true, description = "Session: Sleep" }) -- Sleep
 -- hl.bind("switch:on:Lid Switch", hl.dsp.exec_cmd("systemctl suspend || loginctl suspend"), {locked = true} ) -- # [hidden] Suspend when laptop lid is closed, uncomment if for whatever reason it's not the default behavior

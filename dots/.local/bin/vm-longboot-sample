@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# One low-overhead VM/ZRAM sample for long-lived workstation boots.
+set -euo pipefail
+
+state_root=${XDG_STATE_HOME:-"$HOME/.local/state"}/vm-longboot
+mkdir -p "$state_root"
+
+boot_id=$(tr -d '\n' </proc/sys/kernel/random/boot_id)
+log_file="$state_root/boot-$boot_id.tsv"
+lock_file="$state_root/.sample.lock"
+
+exec 9>"$lock_file"
+flock -n 9 || exit 0
+
+if [ ! -s "$log_file" ]; then
+    printf '%b\n' 'epoch\tuptime_s\tmem_available_kib\tmem_free_kib\tanon_kib\tfile_cache_kib\tsreclaimable_kib\tswap_used_kib\tpsi_mem_some10\tpsi_mem_full10\tpsi_mem_some_total_us\tpsi_mem_full_total_us\tpsi_io_full10\tpsi_io_full_total_us\tpswpin\tpswpout\tpgmajfault\trefault_anon\trefault_file\tallocstall_normal\tallocstall_movable\tcompact_daemon_wake\tcompact_daemon_migrate_scanned\tcompact_daemon_free_scanned\tcompact_stall\tcompact_fail\tcompact_success\toom_kill\tzram_orig_bytes\tzram_compr_bytes\tzram_mem_used_bytes\tzram_mem_limit_bytes\tzram_mem_peak_bytes\tzram_pages_compacted\tzram_huge_pages\tzram_failed_writes\tzram_backing_pages\tzram_backing_reads\tzram_backing_writes\tzram_write_budget_pages\tnvme_read_sectors\tnvme_write_sectors\tnvme_io_ticks_ms\tcompaction_proactiveness\textfrag_threshold\tmin_free_kbytes\twatermark_scale_factor\tswappiness\tvfs_cache_pressure\tmglru_min_ttl_ms' >"$log_file"
+fi
+
+epoch=$(date +%s)
+uptime_s=$(awk '{printf "%.0f", $1}' /proc/uptime)
+
+read -r mem_available mem_free anon file_cache sreclaimable swap_total swap_free < <(
+    awk '
+        /^MemAvailable:/ {available=$2}
+        /^MemFree:/ {free=$2}
+        /^AnonPages:/ {anon=$2}
+        /^Cached:/ {cached=$2}
+        /^Buffers:/ {buffers=$2}
+        /^SReclaimable:/ {sreclaimable=$2}
+        /^SwapTotal:/ {swap_total=$2}
+        /^SwapFree:/ {swap_free=$2}
+        END {print available, free, anon, cached+buffers, sreclaimable, swap_total, swap_free}
+    ' /proc/meminfo
+)
+swap_used=$((swap_total - swap_free))
+
+read -r psi_mem_some10 psi_mem_some_total psi_mem_full10 psi_mem_full_total < <(
+    awk '
+        $1=="some" {split($2,a,"="); split($5,b,"="); some10=a[2]; some_total=b[2]}
+        $1=="full" {split($2,a,"="); split($5,b,"="); full10=a[2]; full_total=b[2]}
+        END {print some10, some_total, full10, full_total}
+    ' /proc/pressure/memory
+)
+read -r psi_io_full10 psi_io_full_total < <(
+    awk '$1=="full" {split($2,a,"="); split($5,b,"="); print a[2], b[2]}' /proc/pressure/io
+)
+
+read -r pswpin pswpout pgmajfault refault_anon refault_file allocstall_normal allocstall_movable compact_daemon_wake compact_daemon_migrate compact_daemon_free compact_stall compact_fail compact_success oom_kill < <(
+    awk '
+        {v[$1]=$2}
+        END {print v["pswpin"], v["pswpout"], v["pgmajfault"],
+                   v["workingset_refault_anon"], v["workingset_refault_file"],
+                   v["allocstall_normal"], v["allocstall_movable"],
+                   v["compact_daemon_wake"], v["compact_daemon_migrate_scanned"],
+                   v["compact_daemon_free_scanned"], v["compact_stall"],
+                   v["compact_fail"], v["compact_success"], v["oom_kill"]}
+    ' /proc/vmstat
+)
+
+zram=/sys/block/zram0
+read -r z_orig z_compr z_used z_limit z_peak _same z_compacted z_huge _huge_since <"$zram/mm_stat"
+read -r z_backing z_backing_reads z_backing_writes <"$zram/bd_stat"
+read -r _failed_reads z_failed_writes _invalid_io _notify_free <"$zram/io_stat"
+z_write_budget=$(cat "$zram/writeback_limit")
+
+read -r _nr _nrm nvme_read_sectors _read_ms _nw _nwm nvme_write_sectors _write_ms _inflight nvme_io_ticks _weighted_ms _discarded < /sys/block/nvme0n1/stat
+
+compaction=$(cat /proc/sys/vm/compaction_proactiveness)
+extfrag=$(cat /proc/sys/vm/extfrag_threshold)
+min_free=$(cat /proc/sys/vm/min_free_kbytes)
+watermark_scale=$(cat /proc/sys/vm/watermark_scale_factor)
+swappiness=$(cat /proc/sys/vm/swappiness)
+vfs_cache=$(cat /proc/sys/vm/vfs_cache_pressure)
+mglru_ttl=$(cat /sys/kernel/mm/lru_gen/min_ttl_ms 2>/dev/null || printf '?')
+
+printf '%b\n' "$epoch\t$uptime_s\t$mem_available\t$mem_free\t$anon\t$file_cache\t$sreclaimable\t$swap_used\t$psi_mem_some10\t$psi_mem_full10\t$psi_mem_some_total\t$psi_mem_full_total\t$psi_io_full10\t$psi_io_full_total\t$pswpin\t$pswpout\t$pgmajfault\t$refault_anon\t$refault_file\t$allocstall_normal\t$allocstall_movable\t$compact_daemon_wake\t$compact_daemon_migrate\t$compact_daemon_free\t$compact_stall\t$compact_fail\t$compact_success\t$oom_kill\t$z_orig\t$z_compr\t$z_used\t$z_limit\t$z_peak\t$z_compacted\t$z_huge\t$z_failed_writes\t$z_backing\t$z_backing_reads\t$z_backing_writes\t$z_write_budget\t$nvme_read_sectors\t$nvme_write_sectors\t$nvme_io_ticks\t$compaction\t$extfrag\t$min_free\t$watermark_scale\t$swappiness\t$vfs_cache\t$mglru_ttl" >>"$log_file"

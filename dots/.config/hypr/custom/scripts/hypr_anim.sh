@@ -69,6 +69,9 @@ if [[ "${1:-}" == "--current" ]]; then
         if [[ "$saved_anim" == *.conf ]]; then
             saved_anim="${saved_anim%.conf}.lua"
         fi
+        if [[ "$saved_anim" != */* ]]; then
+            saved_anim="$ANIM_DIR/$saved_anim"
+        fi
         if [[ -n "$saved_anim" && -f "$saved_anim" ]]; then
             target_anim="$saved_anim"
         fi
@@ -90,7 +93,7 @@ if [[ "${1:-}" == "--current" ]]; then
     if cp -- "$target_anim" "$DEST_FILE"; then
         # Ensure state directory exists and write current state
         mkdir -p -- "${STATE_FILE%/*}" 2>/dev/null
-        printf '%s\n' "$target_anim" > "$STATE_FILE"
+        printf '%s\n' "${target_anim##*/}" > "$STATE_FILE"
 
         reload_hyprland
         exit 0
@@ -127,7 +130,7 @@ if [[ -n "$selection" ]]; then
     if cp -- "$selection" "$DEST_FILE"; then
         # Save state for the --current flag
         mkdir -p -- "${STATE_FILE%/*}" 2>/dev/null
-        printf '%s\n' "$selection" > "$STATE_FILE"
+        printf '%s\n' "${selection##*/}" > "$STATE_FILE"
 
         # Use parameter expansion for basename (faster than subshell)
         filename="${selection##*/}"

@@ -12,6 +12,13 @@
 
 </div>
 
+> [!IMPORTANT]
+> This fork tracks the current desktop profile used by `gustarmartins`, including
+> the Hyprland Lua configuration, Quickshell layout, and the small helper scripts
+> they call. Clone this fork and run `./setup install`; the generic End-4 package
+> installation remains intact. Hardware-specific privileged memory tuning is
+> deliberately not applied automatically. See [PROFILE.md](../PROFILE.md).
+
 <div align="center">
     <h2>• overview •</h2>
     <h3></h3>
@@ -37,6 +44,7 @@
   - **AI**: Gemini, Ollama, and more
   - **QoL**: screen translation, anti-flashbang, Google Lens
   - **Material themes**: Choose your wallpaper, done, enjoy
+  - **Unified fonts**: `fontctl` is this fork's official font/rendering utility
   - **Transparent installation**: Every command is shown before it's run
 </details>
 

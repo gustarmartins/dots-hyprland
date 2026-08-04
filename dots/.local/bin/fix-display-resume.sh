@@ -1,4 +1,5 @@
 #!/bin/bash
+# kate: mode syntax Bash;
 # Fix display state after sleep/suspend/DPMS-off by re-applying the
 # declarative Lua monitor profiles.
 

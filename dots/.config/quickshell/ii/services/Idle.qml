@@ -36,12 +36,13 @@ Singleton {
     IdleInhibitor {
         id: idleInhibitor
         window: PanelWindow {
-            // Inhibitor requires a "visible" surface
-            // Actually not lol
+            // Keep the protocol surface mapped only while inhibition is active.
+            visible: idleInhibitor.enabled
             implicitWidth: 0
             implicitHeight: 0
             color: "transparent"
-            // Just in case...
+            WlrLayershell.namespace: "quickshell:idleInhibitor"
+
             anchors {
                 right: true
                 bottom: true

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# kate: mode syntax Bash;
 # vmscope-watch — quiet sentinel for your real workflow:
 #   "stay on Blazing/Ultra until ZRAM fills, then maybe switch to Heavy."
 # Watches zram fill % + PSI memory pressure; when you're on a zram-only profile

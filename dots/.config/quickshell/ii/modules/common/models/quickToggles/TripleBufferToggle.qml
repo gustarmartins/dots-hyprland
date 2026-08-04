@@ -13,21 +13,16 @@ QuickToggleModel {
     toggled: toggled
     icon: "filter_3"
 
-    mainAction: () => {
-        root.toggled = !root.toggled
-        if (root.toggled) {
-            HyprlandConfig.set("render:new_render_scheduling", 1)
-        } else {
-            HyprlandConfig.set("render:new_render_scheduling", 0)
-        }
-    }
+    // Disabled locally: enabling new render scheduling reproducibly causes a
+    // DP-1 KMS modeset storm and stalls both outputs on this RX 6600 setup.
+    mainAction: () => {}
     Process {
         id: fetchActiveState
         running: true
-        command: ["bash", "-c", `test "$(hyprctl getoption render:new_render_scheduling -j | jq ".int")" -eq 1`]
+        command: ["bash", "-c", `test "$(hyprctl getoption render:new_render_scheduling -j | jq -r ".bool")" = true`]
         onExited: (exitCode, exitStatus) => {
             root.toggled = exitCode === 0
         }
     }
-    tooltipText: Translation.tr("Triple buffering for smoother frames")
+    tooltipText: Translation.tr("Disabled: freezes both displays on this system")
 }

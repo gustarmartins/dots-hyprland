@@ -10,7 +10,7 @@ import Quickshell.Io
 Singleton {
     id: root
     // property string cliphistBinary: FileUtils.trimFileProtocol(`${Directories.home}/.cargo/bin/stash`)
-    property string cliphistBinary: "/home/gus/.local/bin/cliphist"
+    property string cliphistBinary: FileUtils.trimFileProtocol(`${Directories.home}/.local/bin/cliphist`)
     property real pasteDelay: 0.05
     property string pressPasteCommand: "ydotool key -d 1 29:1 47:1 47:0 29:0"
     property bool sloppySearch: Config.options?.search.sloppy ?? false
