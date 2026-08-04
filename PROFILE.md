@@ -46,6 +46,13 @@ fontctl fix-rendering
 System-wide Fontconfig changes request elevation through `pkexec`. Quickshell
 is restarted after an applied change; Hyprland is intentionally left running.
 
+## Original animation profiles
+
+This profile distributes only animation presets authored by
+[@gustarmartins](https://github.com/gustarmartins) for this fork:
+`Aether Fusion`, `Horizontal Signature`, and `Vertical Signature`. Use
+`Super+Alt+A` to switch between them. The active default is Aether Fusion.
+
 ## What is intentionally not automatic
 
 - Monitor declarations and wallpaper files are machine-local.

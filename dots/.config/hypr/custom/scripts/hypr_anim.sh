@@ -17,7 +17,7 @@ readonly ANIM_DIR="$CONFIG_DIR/hypr/custom/animations"
 readonly LINK_DIR="$ANIM_DIR/active"
 readonly DEST_FILE="$LINK_DIR/active.lua"
 readonly STATE_FILE="$CONFIG_DIR/hypr/custom/animations/state"
-readonly FALLBACK_ANIM="horizontal_dusky.lua"
+readonly FALLBACK_ANIM="horizontal_signature.lua"
 
 # Visual Assets (Nerd Fonts)
 readonly ICON_ACTIVE=""   # Checkmark

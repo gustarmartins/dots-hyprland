@@ -45,6 +45,7 @@
   - **QoL**: screen translation, anti-flashbang, Google Lens
   - **Material themes**: Choose your wallpaper, done, enjoy
   - **Unified fonts**: `fontctl` is this fork's official font/rendering utility
+  - **Original motion profiles**: Aether Fusion and the horizontal/vertical Signature presets
   - **Transparent installation**: Every command is shown before it's run
 </details>
 

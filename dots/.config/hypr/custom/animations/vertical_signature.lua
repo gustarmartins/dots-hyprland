@@ -1,3 +1,4 @@
+-- Author: @gustarmartins
 -- Generated from vertical_signature.conf. Keep the legacy profile as migration provenance.
 hl.config({ animations = { enabled = true } })
 hl.curve("pop", { type = "bezier", points = {{ 0.26, 1.12 }, { 0.32, 1.0 }} })

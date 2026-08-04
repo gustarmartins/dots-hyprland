@@ -1,3 +1,4 @@
+-- Author: @gustarmartins
 -- Aether Fusion: a physically coherent flagship profile inspired by the
 -- spatial springs of iOS/macOS, One UI's decisive exits, and Material's
 -- emphasized motion. Spatial movement uses real springs; opacity does not
