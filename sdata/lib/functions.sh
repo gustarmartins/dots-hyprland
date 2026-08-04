@@ -132,6 +132,14 @@ function sudo_init_keepalive(){
 # Stop the sudo keepalive background process
 function sudo_stop_keepalive(){
   if [[ -n "$SUDO_KEEPALIVE_PID" ]] && kill -0 "$SUDO_KEEPALIVE_PID" 2>/dev/null; then
+    # Bash may defer the keepalive shell's TERM trap while it waits for the
+    # timer. Stop that exact child first so wait returns immediately.
+    if command -v pgrep >/dev/null 2>&1; then
+      local keepalive_child
+      while IFS= read -r keepalive_child; do
+        [[ -n "$keepalive_child" ]] && kill "$keepalive_child" 2>/dev/null || true
+      done < <(pgrep -P "$SUDO_KEEPALIVE_PID" 2>/dev/null || true)
+    fi
     kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
     wait "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
     SUDO_KEEPALIVE_PID=""
