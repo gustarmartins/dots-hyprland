@@ -128,3 +128,8 @@ case ${SUBCMD_NAME} in
     exit
     ;;
 esac
+
+# Do not rely on Bash's EXIT trap for the normal path: a non-interactive shell
+# can wait for its background keepalive job before running that trap.
+sudo_stop_keepalive
+trap - EXIT INT TERM
