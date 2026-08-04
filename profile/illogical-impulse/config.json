@@ -24,7 +24,7 @@
       "expressive": "Space Grotesk",
       "iconNerd": "SF Mono",
       "main": "Readex Pro",
-      "monospace": "RobotoMono Nerd Font [GOOG]",
+      "monospace": "JetBrainsMono Nerd Font Mono",
       "numbers": "Readex Pro",
       "reading": "Readex Pro",
       "title": "Readex Pro"
@@ -308,7 +308,7 @@
     "timeout": 1000
   },
   "osk": {
-    "layout": "Portuguese",
+    "layout": "English",
     "pinnedOnStartup": false
   },
   "overlay": {

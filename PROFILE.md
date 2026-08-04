@@ -38,13 +38,14 @@ Fontconfig, GTK, KDE, Quickshell, Kitty, and Firefox.
 ```bash
 fontctl status
 fontctl preset list
-fontctl preset apple
+fontctl preset profile
 fontctl set --ui "SF Pro" --mono "SF Mono" --mono-size 13
 fontctl fix-rendering
 ```
 
 System-wide Fontconfig changes request elevation through `pkexec`. Quickshell
 is restarted after an applied change; Hyprland is intentionally left running.
+For an SSH/headless update, use `fontctl preset profile --user-only`.
 
 ## Original animation profiles
 

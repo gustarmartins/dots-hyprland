@@ -217,6 +217,24 @@ XMLEOF
     log_ok "fontconfig (selected): UI=${ui_font}, mono=${mono_font}"
 }
 
+fontconfig_family() {
+    fc-match -f '%{family[0]}\n' "$1" 2>/dev/null | head -n1
+}
+
+verify_fontconfig_selection() {
+    local expected_ui="$1" expected_mono="$2"
+    local resolved_ui resolved_mono
+    resolved_ui=$(fontconfig_family sans-serif || true)
+    resolved_mono=$(fontconfig_family monospace || true)
+
+    if [[ -n "$resolved_ui" && "${resolved_ui,,}" != "${expected_ui,,}" ]]; then
+        log_warn "fontconfig resolves UI to '${resolved_ui}', not '${expected_ui}'"
+    fi
+    if [[ -n "$resolved_mono" && "${resolved_mono,,}" != "${expected_mono,,}" ]]; then
+        log_warn "fontconfig resolves monospace to '${resolved_mono}', not '${expected_mono}'"
+    fi
+}
+
 # 2. /etc/fonts/local.conf (system — needs privilege escalation)
 update_fontconfig_system() {
     local ui_font="$1" mono_font="$2" hintstyle="$3" subpixel="$4" lcdfilter="$5"
@@ -535,10 +553,11 @@ cmd_status() {
     printf "%-24s %-26s %-14s %-10s\n" "────────────────────────" "──────────────────────────" "──────────────" "──────────"
     
     # 1. Fontconfig
-    local fc_hint fc_rgba fc_family
+    local fc_hint fc_rgba fc_family fc_mono_family
     fc_hint=$(fc-match -v sans-serif 2>/dev/null | awk '/hintstyle:/{print $2}' | head -1)
     fc_rgba=$(fc-match -v sans-serif 2>/dev/null | awk '/rgba:/{print $2}' | head -1)
-    fc_family=$(fc-match sans-serif 2>/dev/null | sed 's/.*: "\(.*\)" ".*/\1/')
+    fc_family=$(fontconfig_family sans-serif || true)
+    fc_mono_family=$(fontconfig_family monospace || true)
     # Map numeric values
     case "$fc_hint" in
         0*) fc_hint="hintnone" ;; 1*) fc_hint="hintslight" ;; 2*) fc_hint="hintmedium" ;; 3*) fc_hint="hintfull" ;;
@@ -547,13 +566,19 @@ cmd_status() {
         0*) fc_rgba="unknown" ;; 1*) fc_rgba="rgb" ;; 2*) fc_rgba="bgr" ;; 3*) fc_rgba="vrgb" ;; 4*) fc_rgba="vbgr" ;;
     esac
     printf "%-24s %-26s %-14s %-10s\n" "fontconfig (match)" "$fc_family" "$fc_hint" "$fc_rgba"
+    printf "%-24s %-26s %-14s %-10s\n" "fontconfig (mono match)" "$fc_mono_family" "—" "—"
 
     if [[ -f "$FONTCONFIG_SELECTED_USER" ]]; then
-        local selected_ui
+        local selected_ui selected_mono
         selected_ui=$(xmlstarlet sel -t -v "(//match[test/string='system-ui']/edit/string)[1]" "$FONTCONFIG_SELECTED_USER" 2>/dev/null)
+        selected_mono=$(xmlstarlet sel -t -v "(//match[test/string='monospace']/edit/string)[1]" "$FONTCONFIG_SELECTED_USER" 2>/dev/null)
         printf "%-24s %-26s %-14s %-10s\n" "fontconfig (selected)" "${selected_ui:-?}" "—" "—"
+        printf "%-24s %-26s %-14s %-10s\n" "fontconfig (mono selected)" "${selected_mono:-?}" "—" "—"
         if [[ -n "$selected_ui" && "${fc_family,,}" != "${selected_ui,,}" ]]; then
             log_warn "fontconfig resolves '${fc_family}', not selected '${selected_ui}'"
+        fi
+        if [[ -n "$selected_mono" && "${fc_mono_family,,}" != "${selected_mono,,}" ]]; then
+            log_warn "fontconfig resolves monospace to '${fc_mono_family}', not selected '${selected_mono}'"
         fi
     fi
     
@@ -665,7 +690,7 @@ cmd_set() {
     local title_font="" title_size="12"
     local numbers_font="" reading_font="" expressive_font=""
     local hintstyle="hintfull" subpixel="rgb" lcdfilter="lcddefault"
-    local dpi="" rendering_only=false
+    local dpi="" rendering_only=false user_only=false
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -683,6 +708,7 @@ cmd_set() {
             --lcdfilter)   lcdfilter="$2"; shift 2 ;;
             --dpi)         dpi="$2"; shift 2 ;;
             --rendering-only) rendering_only=true; shift ;;
+            --user-only)   user_only=true; shift ;;
             *) die "Unknown option: $1" ;;
         esac
     done
@@ -734,7 +760,12 @@ cmd_set() {
     # Apply to all targets
     update_fontconfig "$ui_font" "$hintstyle" "$subpixel" "$lcdfilter"
     update_fontconfig_selected "$ui_font" "$mono_font"
-    update_fontconfig_system "$ui_font" "$mono_font" "$hintstyle" "$subpixel" "$lcdfilter"
+    if [[ "$user_only" == true ]]; then
+        log_warn "fontconfig (system): skipped (--user-only)"
+    else
+        update_fontconfig_system "$ui_font" "$mono_font" "$hintstyle" "$subpixel" "$lcdfilter"
+    fi
+    verify_fontconfig_selection "$ui_font" "$mono_font"
     update_gtk3 "$ui_font" "$ui_size" "$hintstyle" "$subpixel" "$dpi"
     update_gtk4 "$ui_font" "$ui_size" "$dpi"
     update_gtk2 "$ui_font" "$ui_size" "$hintstyle" "$subpixel"
@@ -762,15 +793,26 @@ cmd_set() {
 # ── Preset Command ─────────────────────────────────────────────────────────────
 cmd_preset() {
     local name="${1:-}"
+    shift || true
     
     case "$name" in
+        profile)
+            echo -e "${BOLD}Preset: Profile${NC} — Readex Pro + JetBrains Mono Nerd Font"
+            cmd_set --ui "Readex Pro" --ui-size 13 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 12 \
+                    --title "Readex Pro" --title-size 12 \
+                    --numbers "Readex Pro" \
+                    --reading "Readex Pro" \
+                    --expressive "Space Grotesk" \
+                    --hintstyle hintfull --subpixel rgb "$@"
+            ;;
         apple)
             echo -e "${BOLD}Preset: Apple${NC} — SF Pro + SF Mono"
             cmd_set --ui "SF Pro" --ui-size 11 \
                     --mono "SF Mono" --mono-size 13 \
                     --title "SF Pro Display" --title-size 12 \
                     --numbers "SF Pro" \
-                    --hintstyle hintslight --subpixel rgb
+                    --hintstyle hintslight --subpixel rgb "$@"
             ;;
         google)
             echo -e "${BOLD}Preset: Google${NC} — Google Sans Flex + JetBrains Mono NF"
@@ -778,7 +820,7 @@ cmd_preset() {
                     --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 \
                     --title "Google Sans Flex" --title-size 12 \
                     --numbers "Fira Sans Heavy" \
-                    --hintstyle hintslight --subpixel rgb
+                    --hintstyle hintslight --subpixel rgb "$@"
             ;;
         inter)
             echo -e "${BOLD}Preset: Inter${NC} — Inter + JetBrains Mono NF"
@@ -786,7 +828,7 @@ cmd_preset() {
                     --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 \
                     --title "Inter Variable" --title-size 12 \
                     --numbers "Inter Variable" \
-                    --hintstyle hintslight --subpixel rgb
+                    --hintstyle hintslight --subpixel rgb "$@"
             ;;
         noto)
             echo -e "${BOLD}Preset: Noto${NC} — Noto Sans + Noto Sans Mono"
@@ -794,10 +836,11 @@ cmd_preset() {
                     --mono "Noto Sans Mono" --mono-size 13 \
                     --title "Noto Sans" --title-size 12 \
                     --numbers "Noto Sans" \
-                    --hintstyle hintslight --subpixel rgb
+                    --hintstyle hintslight --subpixel rgb "$@"
             ;;
         list)
             echo -e "${BOLD}Available presets:${NC}"
+            echo -e "  ${CYAN}profile${NC} — This fork: Readex Pro + JetBrains Mono Nerd Font"
             echo -e "  ${CYAN}apple${NC}   — SF Pro + SF Mono"
             echo -e "  ${CYAN}google${NC}  — Google Sans Flex + JetBrains Mono NF"
             echo -e "  ${CYAN}inter${NC}   — Inter Variable + JetBrains Mono NF"
@@ -848,6 +891,7 @@ cmd_help() {
     --lcdfilter <filter>           lcdnone|lcddefault|lcdlight|lcdlegacy
     --dpi <value×1024>             GTK DPI (e.g. 98304 for 96dpi)
     --rendering-only               Only change rendering, keep current fonts
+    --user-only                    Skip system Fontconfig and pkexec
 
   TARGETS UPDATED
     1.  ~/.config/fontconfig/fonts.conf + selected-family override
@@ -865,6 +909,8 @@ cmd_help() {
   Quickshell is restarted when running; Hyprland is intentionally not reloaded.
 
   EXAMPLES
+    fontctl preset profile
+    fontctl preset profile --user-only
     fontctl set --ui "SF Pro" --mono "SF Mono" --mono-size 13
     fontctl preset apple
     fontctl preset list
