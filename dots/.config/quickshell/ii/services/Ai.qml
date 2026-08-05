@@ -271,13 +271,13 @@ Singleton {
             "key_get_description": Translation.tr("**Pricing**: free. Data used for training.\n\n**Instructions**: Log into Google account, allow AI Studio to create Google Cloud project or whatever it asks, go back and click Get API key"),
 	            "api_format": "gemini",
 	        }),
-	        "gemini-3.5-flash": aiModelComponent.createObject(this, {
-	            "name": "Gemini 3.5 Flash",
+	        "gemini-3.6-flash": aiModelComponent.createObject(this, {
+	            "name": "Gemini 3.6 Flash",
 	            "icon": "google-gemini-symbolic",
 	            "description": Translation.tr("Online | Google's latest stable Flash model\nBest default for fast coding, agentic tasks, long context, Search grounding, URL context, structured outputs, and function calling."),
-	            "homepage": "https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash",
-	            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
-	            "model": "gemini-3.5-flash",
+	            "homepage": "https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash",
+	            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse",
+	            "model": "gemini-3.6-flash",
 	            "requires_key": true,
 	            "key_id": "gemini",
 	            "key_get_link": "https://aistudio.google.com/app/apikey",
@@ -650,10 +650,12 @@ Singleton {
         property list<string> baseCommand: ["bash"]
         property AiMessageData message
         property ApiStrategy currentStrategy
+        property bool continuationQueued: false
 
         function markDone() {
+            if (!requester.message || requester.message.done) return;
             requester.message.done = true;
-            if (root.postResponseHook) {
+            if (!requester.continuationQueued && root.postResponseHook) {
                 root.postResponseHook();
                 root.postResponseHook = null; // Reset hook after use
             }
@@ -661,7 +663,19 @@ Singleton {
             root.responseFinished()
         }
 
+        function queueContinuation() {
+            if (requester.running) {
+                requester.continuationQueued = true;
+            } else {
+                Qt.callLater(requester.makeRequest);
+            }
+        }
+
         function makeRequest() {
+            if (requester.running) {
+                requester.continuationQueued = true;
+                return;
+            }
             const model = models[currentModelId];
 
             // Fetch API keys if needed
@@ -677,6 +691,11 @@ Singleton {
             const endpoint = root.currentApiStrategy.buildEndpoint(model);
             const messageArray = root.messageIDs.map(id => root.messageByID[id]);
             const filteredMessageArray = messageArray.filter(message => message.role !== Ai.interfaceRole);
+            if (filteredMessageArray.length === 0 || filteredMessageArray[filteredMessageArray.length - 1].role === "assistant") {
+                console.error("[AI] Refusing request with no user/tool-result turn after the last assistant turn");
+                root.addMessage(Translation.tr("Could not continue safely because the request history ends with an assistant turn."), root.interfaceRole);
+                return;
+            }
             const data = root.currentApiStrategy.buildRequestData(model, filteredMessageArray, root.systemPrompt, root.temperature, root.tools[model.api_format][root.currentTool], root.pendingFilePath);
             // console.log("[Ai] Request data: ", JSON.stringify(data, null, 2));
 
@@ -782,6 +801,11 @@ Singleton {
             if (requester.message.content.includes("API key not valid")) {
                 root.addApiKeyAdvice(models[requester.message.model]);
             }
+
+            if (requester.continuationQueued) {
+                requester.continuationQueued = false;
+                Qt.callLater(requester.makeRequest);
+            }
         }
     }
 
@@ -831,7 +855,14 @@ Singleton {
 	    function rejectCommand(message: AiMessageData) {
 	        if (!message.functionPending) return;
 	        message.functionPending = false; // User decided, no more "thinking"
-	        addFunctionOutputMessage(message.functionName, Translation.tr("Command rejected by user"), message.functionCall)
+	        addFunctionOutputMessage(message.functionName, JSON.stringify({
+	            "ok": false,
+	            "error": {
+	                "code": "USER_REJECTED",
+	                "message": Translation.tr("Command rejected by user")
+	            }
+	        }), message.functionCall)
+	        requester.queueContinuation();
 	    }
 
     function approveCommand(message: AiMessageData) {
@@ -846,55 +877,89 @@ Singleton {
         commandExecutionProc.message = responseMessage;
         commandExecutionProc.baseMessageContent = responseMessage.content;
         commandExecutionProc.shellCommand = message.functionCall.args.command;
+        commandExecutionProc.output = "";
+        commandExecutionProc.timedOut = false;
         commandExecutionProc.running = true; // Start the command execution
     }
 
     Process {
         id: commandExecutionProc
         property string shellCommand: ""
+        property string output: ""
+        property bool timedOut: false
         property AiMessageData message
         property string baseMessageContent: ""
-        command: ["bash", "-c", shellCommand]
+        command: ["timeout", "--signal=TERM", "--kill-after=2s", "30s", "bash", "-c", shellCommand]
+
+        function appendOutput(data) {
+            commandExecutionProc.output += data;
+            const updatedContent = commandExecutionProc.baseMessageContent + `\n\n<think>\n<tt>${commandExecutionProc.output}</tt>\n</think>`;
+            commandExecutionProc.message.rawContent = updatedContent;
+            commandExecutionProc.message.content = updatedContent;
+        }
+
         stdout: SplitParser {
             onRead: (output) => {
-                commandExecutionProc.message.functionResponse += output + "\n\n";
-                const updatedContent = commandExecutionProc.baseMessageContent + `\n\n<think>\n<tt>${commandExecutionProc.message.functionResponse}</tt>\n</think>`;
-                commandExecutionProc.message.rawContent = updatedContent;
-                commandExecutionProc.message.content = updatedContent;
+                commandExecutionProc.appendOutput(output + "\n");
             }
         }
+        stderr: SplitParser {
+            onRead: (output) => commandExecutionProc.appendOutput(output + "\n")
+        }
         onExited: (exitCode, exitStatus) => {
-            commandExecutionProc.message.functionResponse += `[[ Command exited with code ${exitCode} (${exitStatus}) ]]\n`;
-            requester.makeRequest(); // Continue
+            commandExecutionProc.timedOut = exitCode === 124 || exitCode === 137;
+            const result = {
+                "ok": !commandExecutionProc.timedOut && exitCode === 0,
+                "command": commandExecutionProc.shellCommand,
+                "exitCode": exitCode,
+                "exitStatus": String(exitStatus),
+                "timedOut": commandExecutionProc.timedOut,
+                "output": commandExecutionProc.output
+            };
+            if (commandExecutionProc.timedOut) {
+                result.error = {
+                    "code": "TIMEOUT",
+                    "message": "Command exceeded the 30 second tool timeout"
+                };
+            } else if (exitCode !== 0) {
+                result.error = {
+                    "code": "NON_ZERO_EXIT",
+                    "message": `Command exited with code ${exitCode}`
+                };
+            }
+            commandExecutionProc.message.functionResponse = JSON.stringify(result);
+            commandExecutionProc.appendOutput(`[[ Command exited with code ${exitCode} (${exitStatus}) ]]\n`);
+            requester.queueContinuation();
         }
     }
 
     function handleFunctionCall(name, args: var, message: AiMessageData) {
+	    try {
 	        if (name === "switch_to_search_mode") {
 	            const modelId = root.currentModelId;
 	            root.currentTool = "search"
 	            root.postResponseHook = () => { root.currentTool = "functions" }
-	            addFunctionOutputMessage(name, Translation.tr("Switched to search mode. Continue with the user's request."), message.functionCall)
-	            requester.makeRequest();
+	            addFunctionOutputMessage(name, JSON.stringify({ "ok": true, "message": Translation.tr("Switched to search mode. Continue with the user's request.") }), message.functionCall)
+	            requester.queueContinuation();
 	        } else if (name === "get_shell_config") {
 	            const configJson = CF.ObjectUtils.toPlainObject(Config.options)
-	            addFunctionOutputMessage(name, JSON.stringify(configJson), message.functionCall);
-	            requester.makeRequest();
+	            addFunctionOutputMessage(name, JSON.stringify({ "ok": true, "config": configJson }), message.functionCall);
+	            requester.queueContinuation();
 	        } else if (name === "set_shell_config") {
-	            if (!args.key || !args.value) {
-	                addFunctionOutputMessage(name, Translation.tr("Invalid arguments. Must provide `key` and `value`."), message.functionCall);
-	                requester.makeRequest();
+	            if (!args.key || args.value === undefined || args.value === null) {
+	                addFunctionOutputMessage(name, JSON.stringify({ "ok": false, "error": { "code": "INVALID_ARGUMENTS", "message": Translation.tr("Must provide `key` and `value`.") } }), message.functionCall);
+	                requester.queueContinuation();
 	                return;
 	            }
 	            const key = args.key;
 	            const value = args.value;
 	            Config.setNestedValue(key, value);
-	            addFunctionOutputMessage(name, Translation.tr("Set `%1` to `%2`.").arg(key).arg(value), message.functionCall);
-	            requester.makeRequest();
+	            addFunctionOutputMessage(name, JSON.stringify({ "ok": true, "key": key, "value": value }), message.functionCall);
+	            requester.queueContinuation();
 	        } else if (name === "run_shell_command") {
 		            if (!args.command || args.command.length === 0) {
-		                addFunctionOutputMessage(name, Translation.tr("Invalid arguments. Must provide `command`."), message.functionCall);
-		                requester.makeRequest();
+		                addFunctionOutputMessage(name, JSON.stringify({ "ok": false, "error": { "code": "INVALID_ARGUMENTS", "message": Translation.tr("Must provide `command`.") } }), message.functionCall);
+		                requester.queueContinuation();
 		                return;
 		            }
             const contentToAppend = `\n\n**Command execution request**\n\n\`\`\`command\n${args.command}\n\`\`\``;
@@ -902,7 +967,20 @@ Singleton {
             message.content += contentToAppend;
             message.functionPending = true; // Use thinking to indicate the command is waiting for approval
         }
-        else root.addMessage(Translation.tr("Unknown function call: %1").arg(name), "assistant");
+        else {
+            addFunctionOutputMessage(name, JSON.stringify({ "ok": false, "error": { "code": "UNKNOWN_TOOL", "message": Translation.tr("Unknown function call: %1").arg(name) } }), message.functionCall);
+            requester.queueContinuation();
+        }
+	    } catch (e) {
+	        addFunctionOutputMessage(name, JSON.stringify({
+	            "ok": false,
+	            "error": {
+	                "code": "TOOL_EXECUTION_ERROR",
+	                "message": String(e)
+	            }
+	        }), message.functionCall);
+	        requester.queueContinuation();
+	    }
     }
 
     function chatToJson() {

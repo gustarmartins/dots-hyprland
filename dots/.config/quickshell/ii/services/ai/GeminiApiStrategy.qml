@@ -20,14 +20,28 @@ ApiStrategy {
         let contents = messages.map(message => {
             // console.log("[AI] Building request data for message:", JSON.stringify(message, null, 2));
             const geminiApiRoleName = (message.role === "assistant") ? "model" : message.role;
-            const usingSearch = tools[0]?.google_search !== undefined
+            // A function result message also retains the originating functionCall
+            // for its call id. It must be serialized as a functionResponse first.
+            if (message.functionResponse != undefined && message.functionName.length > 0) {
+                const functionResponse = {
+                    "name": message.functionName,
+                    "response": { "content": message.functionResponse }
+                };
+                if (message.functionCall?.id) functionResponse.id = message.functionCall.id;
+                return {
+                    "role": "user",
+                    "parts": [{
+                        functionResponse: functionResponse
+                    }]
+                }
+            }
             if (message.role === "assistant" && message.providerParts && message.providerParts.length > 0) {
                 return {
                     "role": geminiApiRoleName,
                     "parts": message.providerParts,
                 }
             }
-            if (!usingSearch && message.functionCall != undefined && message.functionName.length > 0) {
+            if (message.role === "assistant" && message.functionCall != undefined && message.functionName.length > 0) {
                 const functionCall = (typeof message.functionCall === "object")
                     ? message.functionCall
                     : { "name": message.functionName };
@@ -35,19 +49,6 @@ ApiStrategy {
                     "role": geminiApiRoleName,
                     "parts": [{
                         functionCall: functionCall
-                    }]
-                }
-            }
-            if (!usingSearch && message.functionResponse != undefined && message.functionName.length > 0) {
-                const functionResponse = {
-                    "name": message.functionName,
-                    "response": { "content": message.functionResponse }
-                };
-                if (message.functionCall?.id) functionResponse.id = message.functionCall.id;
-                return {
-                    "role": geminiApiRoleName,
-                    "parts": [{ 
-                        functionResponse: functionResponse
                     }]
                 }
             }
@@ -64,6 +65,12 @@ ApiStrategy {
                 ]
             }
         })
+        // generateContent requests must end in user input (including a
+        // functionResponse), never an unpaired model turn.
+        while (contents.length > 0 && contents[contents.length - 1].role === "model") {
+            console.warn("[AI] Gemini: Dropping trailing model turn from request history");
+            contents.pop();
+        }
         if (filePath && filePath.length > 0) {
             const trimmedFilePath = CF.FileUtils.trimFileProtocol(filePath);
             // Add file_data part to the last message's parts array

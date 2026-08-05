@@ -212,8 +212,8 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
             Ai.sendUserMessage(inputText);
         }
 
-        // Always scroll to bottom when user sends a message
-        messageListView.positionViewAtEnd();
+        // Wait for large pasted messages to finish affecting delegate height.
+        messageListView.scrollToEndAfterLayout();
     }
 
     Process {
@@ -364,6 +364,29 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                 mouseScrollFactor: Config.options.interactions.scrolling.mouseScrollFactor * 1.4
 
                 property int lastResponseLength: 0
+                property bool scrollToEndPending: false
+
+                function scrollToEndAfterLayout() {
+                    scrollToEndPending = true;
+                    Qt.callLater(() => messageListView.positionViewAtEnd());
+                    scrollToEndSettleTimer.restart();
+                }
+
+                onContentHeightChanged: {
+                    if (!scrollToEndPending) return;
+                    Qt.callLater(() => messageListView.positionViewAtEnd());
+                    scrollToEndSettleTimer.restart();
+                }
+
+                Timer {
+                    id: scrollToEndSettleTimer
+                    interval: 200
+                    repeat: false
+                    onTriggered: {
+                        messageListView.positionViewAtEnd();
+                        messageListView.scrollToEndPending = false;
+                    }
+                }
                 // onContentHeightChanged: {
                 //     if (atYEnd)
                 //         Qt.callLater(positionViewAtEnd);
@@ -507,14 +530,15 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                 ScrollView {
                     id: inputScrollView
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.min(root.height * 3/5, messageInputField.height)
+                    Layout.preferredHeight: Math.min(root.height * 3/5, Math.max(40, messageInputField.implicitHeight))
                     clip: true
                     ScrollBar.vertical.policy: ScrollBar.AsNeeded
 
                     StyledTextArea { // The actual TextArea (inside ScrollView to enable scrolling)
                         id: messageInputField
-                        anchors.fill: parent
+                        width: inputScrollView.availableWidth
                         wrapMode: TextArea.Wrap
+                        textFormat: TextEdit.PlainText
                         padding: 10
                         color: activeFocus ? Appearance.m3colors.m3onSurface : Appearance.m3colors.m3onSurfaceVariant
                         placeholderText: Translation.tr('Message the model... "%1" for commands').arg(root.commandPrefix)
@@ -661,8 +685,8 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                             } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) {
                                 // Intercept Ctrl+V to handle image/file pasting
                                 if (event.modifiers & Qt.ShiftModifier) {
-                                    // Let Shift+Ctrl+V = plain paste
-                                    messageInputField.text += Quickshell.clipboardText;
+                                    // Shift+Ctrl+V = explicit plain-text paste.
+                                    messageInputField.insert(messageInputField.cursorPosition, Quickshell.clipboardText);
                                     event.accepted = true;
                                     return;
                                 }
@@ -681,7 +705,10 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                                     event.accepted = true;
                                     return;
                                 }
-                                event.accepted = false; // No image, let text pasting proceed
+                                // Always use the clipboard's text/plain representation.
+                                // Browser HTML tables otherwise become rich-text table objects.
+                                messageInputField.insert(messageInputField.cursorPosition, Quickshell.clipboardText);
+                                event.accepted = true;
                             } else if (event.key === Qt.Key_Escape) {
                                 // Esc to detach file
                                 if (Ai.pendingFilePath.length > 0) {
