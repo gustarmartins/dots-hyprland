@@ -20,6 +20,34 @@ hl.bind("SUPER + F1", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/toggle-gpu-
     { description = "User: Toggle AMD GPU power mode" })
 hl.bind("SUPER + F2", hl.dsp.exec_cmd("~/.config/hypr/do.sh"))
 
+-- Never close a stale active window left behind on a hidden special workspace.
+-- This happens when the special workspace is hidden over an empty workspace.
+hl.unbind("SUPER + Q")
+hl.bind("SUPER + Q", function()
+    local monitor = hl.get_active_monitor()
+    local window = hl.get_active_window()
+    if not monitor or not window or not window.workspace then
+        return
+    end
+
+    local workspace = hl.get_active_workspace(monitor)
+    local special_workspace = hl.get_active_special_workspace(monitor)
+    local window_workspace_id = window.workspace.id
+    local window_is_visible =
+        (workspace and window_workspace_id == workspace.id) or
+        (special_workspace and window_workspace_id == special_workspace.id)
+
+    if not window_is_visible then
+        hl.notification.create({
+            text = "Close blocked: no focused window on the visible workspace",
+            timeout = 2500,
+        })
+        return
+    end
+
+    hl.dispatch(hl.dsp.window.close())
+end, { description = "Window: Close visible focused window" })
+
 -- Use Eden's native fullscreen path instead of forcing compositor fullscreen.
 hl.unbind("SUPER + F")
 hl.bind("SUPER + F", function()
