@@ -127,14 +127,14 @@ Singleton {
                     property bool enableQtApps: true
                     property bool enableTerminal: true
                     property JsonObject terminalGenerationProps: JsonObject {
-                        property real harmony: 0.6
-                        property real harmonizeThreshold: 100
-                        property real termFgBoost: 0.35
+                        property real harmony: 0.15
+                        property real harmonizeThreshold: 15
+                        property real termFgBoost: 0.50
                         property bool forceDarkMode: false
                     }
                 }
                 property JsonObject palette: JsonObject {
-                    property string type: "auto" // Allowed: auto, scheme-content, scheme-expressive, scheme-fidelity, scheme-fruit-salad, scheme-monochrome, scheme-neutral, scheme-rainbow, scheme-tonal-spot
+                    property string type: "auto" // Allowed: auto, scheme-content, scheme-expressive, scheme-fidelity, scheme-fruit-salad, scheme-monochrome, scheme-neutral, scheme-rainbow, scheme-tonal-spot, scheme-vibrant
                     property string accentColor: ""
                 }
             }

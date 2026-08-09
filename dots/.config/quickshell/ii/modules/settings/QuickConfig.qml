@@ -198,6 +198,10 @@ ContentPage {
                     "displayName": Translation.tr("Fruit Salad")
                 },
                 {
+                    "value": "scheme-vibrant",
+                    "displayName": Translation.tr("Vibrant")
+                },
+                {
                     "value": "scheme-monochrome",
                     "displayName": Translation.tr("Monochrome")
                 },

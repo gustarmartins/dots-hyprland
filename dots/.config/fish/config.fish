@@ -4,6 +4,15 @@ if status is-interactive
     set fish_greeting
 
     # Use starship
+    set -l ii_terminal_dir "$XDG_STATE_HOME/quickshell/user/generated/terminal"
+    if test -z "$XDG_STATE_HOME"
+        set ii_terminal_dir "$HOME/.local/state/quickshell/user/generated/terminal"
+    end
+    if test -r "$ii_terminal_dir/enabled"; and test (string trim < "$ii_terminal_dir/enabled") = true
+        set -gx STARSHIP_CONFIG "$ii_terminal_dir/starship.toml"
+    else if set -q STARSHIP_CONFIG; and test "$STARSHIP_CONFIG" = "$ii_terminal_dir/starship.toml"
+        set -e STARSHIP_CONFIG
+    end
     function starship_transient_prompt_func
         starship module character
     end
@@ -13,8 +22,8 @@ if status is-interactive
     end
     
     # Colors
-    if test -f ~/.local/state/quickshell/user/generated/terminal/sequences.txt
-        cat ~/.local/state/quickshell/user/generated/terminal/sequences.txt
+    if test -r "$ii_terminal_dir/enabled"; and test (string trim < "$ii_terminal_dir/enabled") = true; and test -r "$ii_terminal_dir/sequences.txt"
+        cat "$ii_terminal_dir/sequences.txt"
     end
 
     # Aliases

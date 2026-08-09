@@ -1,37 +1,27 @@
-# Don't print a new line at the start of the prompt
+# Generated truecolor Starship template. Rendered by render_terminal_theme.py.
 add_newline = false
-# Pipes ╰─ ╭─
-# Powerline symbols                                     
-# Wedges 🭧🭒 🭣🭧🭓
-# Random noise 🬖🬥🬔🬗
-# Cool stuff 󰜥   
 
-# format = """
-# $directory $fill $git_branch $cmd_duration
-#  $character"""
 format = """
 $cmd_duration $directory$git_branch
   $character"""
 
 [fill]
 symbol = '-'
-style = 'fg:#6C7086'
+style = 'fg:#$outlineVariant #'
 
-# Replace the "❯" symbol in the prompt with "➜"
-[character]                            # The name of the module we are configuring is "character"
-success_symbol = "[ ](bold fg:#89B4FA)"
-error_symbol = "[ ](bold fg:#F38BA8)"
+[character]
+success_symbol = "[ ](bold fg:#$primary #)"
+error_symbol = "[ ](bold fg:#$error #)"
 
-# Disable the package module, hiding it from the prompt completely
 [package]
 disabled = true
 
 [git_branch]
-style = "bg:#45475A"
+style = "bg:#$secondaryContainer #"
 symbol = "󰘬"
 truncation_length = 12
 truncation_symbol = ""
-format = " 󰜥 [](bold fg:#45475A)[$symbol $branch(:$remote_branch)](fg:#CDD6F4 bg:#45475A)[ ](bold fg:#45475A)"
+format = " 󰜥 [](bold fg:#$secondaryContainer #)[$symbol $branch(:$remote_branch)](fg:#$onSecondaryContainer # bg:#$secondaryContainer #)[ ](bold fg:#$secondaryContainer #)"
 
 [git_commit]
 commit_hash_length = 4
@@ -55,7 +45,7 @@ deleted = " 🗑 "
 
 [hostname]
 ssh_only = false
-format =  "[•$hostname](bg:#45475A bold fg:#CDD6F4)[](bold fg:#45475A)"
+format = "[•$hostname](bg:#$secondaryContainer # bold fg:#$onSecondaryContainer #)[](bold fg:#$secondaryContainer #)"
 trim_at = ".companyname.com"
 disabled = false
 
@@ -74,20 +64,19 @@ format = '🕙[\[ $time \]]($style) '
 time_format = "%T"
 
 [username]
-style_user = "bold bg:#45475A fg:#CDD6F4"
+style_user = "bold bg:#$secondaryContainer # fg:#$onSecondaryContainer #"
 style_root = "red bold"
-format = "[](bold fg:#45475A)[$user]($style)"
+format = "[](bold fg:#$secondaryContainer #)[$user]($style)"
 disabled = false
 show_always = true
 
 [directory]
 home_symbol = " "
 read_only = "  "
-style = "bg:#89B4FA fg:#11111B"
+style = "bg:#$primary # fg:#$onPrimary #"
 truncation_length = 2
 truncation_symbol = ".../"
-format = '[](bold fg:#89B4FA)[󰉋 → $path]($style)[](bold fg:#89B4FA)'
-
+format = '[](bold fg:#$primary #)[󰉋 → $path]($style)[](bold fg:#$primary #)'
 
 [directory.substitutions]
 "Desktop" = "  "
@@ -100,4 +89,4 @@ format = '[](bold fg:#89B4FA)[󰉋 → $path]($style)[](bold fg:#89B4FA)'
 
 [cmd_duration]
 min_time = 0
-format = '[](bold fg:#45475A)[󰪢 $duration](bold bg:#45475A fg:#CDD6F4)[](bold fg:#45475A)'
+format = '[](bold fg:#$secondaryContainer #)[󰪢 $duration](bold bg:#$secondaryContainer # fg:#$onSecondaryContainer #)[](bold fg:#$secondaryContainer #)'

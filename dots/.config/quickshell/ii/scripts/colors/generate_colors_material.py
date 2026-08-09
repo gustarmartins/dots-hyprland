@@ -1,181 +1,440 @@
 #!/usr/bin/env -S\_/bin/sh\_-c\_"source\_\$(eval\_echo\_\$ILLOGICAL_IMPULSE_VIRTUAL_ENV)/bin/activate&&exec\_python\_-E\_"\$0"\_"\$@""
+"""Generate Material compatibility variables and a color-safe ANSI palette.
+
+Matugen owns wallpaper extraction and the desktop Material palette.  This
+script consumes Matugen's exact source/material colors and derives terminal
+colors without repurposing the xterm 256-color cube.
+"""
+
+from __future__ import annotations
+
 import argparse
-import math
 import json
+import math
+import re
+from pathlib import Path
+
 from PIL import Image
+from materialyoucolor.dynamiccolor.material_dynamic_colors import MaterialDynamicColors
+from materialyoucolor.hct import Hct
 from materialyoucolor.quantize import QuantizeCelebi
 from materialyoucolor.score.score import Score
-from materialyoucolor.hct import Hct
-from materialyoucolor.dynamiccolor.material_dynamic_colors import MaterialDynamicColors
-from materialyoucolor.utils.color_utils import (rgba_from_argb, argb_from_rgb, argb_from_rgba)
-from materialyoucolor.utils.math_utils import (sanitize_degrees_double, difference_degrees, rotation_direction)
+from materialyoucolor.utils.color_utils import argb_from_rgb, rgba_from_argb
+from materialyoucolor.utils.math_utils import (
+    difference_degrees,
+    rotation_direction,
+    sanitize_degrees_double,
+)
 
-parser = argparse.ArgumentParser(description='Color generation script')
-parser.add_argument('--path', type=str, default=None, help='generate colorscheme from image')
-parser.add_argument('--size', type=int , default=128 , help='bitmap image size')
-parser.add_argument('--color', type=str, default=None, help='generate colorscheme from color')
-parser.add_argument('--mode', type=str, choices=['dark', 'light'], default='dark', help='dark or light mode')
-parser.add_argument('--scheme', type=str, default='vibrant', help='material scheme to use')
-parser.add_argument('--smart', action='store_true', default=False, help='decide scheme type based on image color')
-parser.add_argument('--transparency', type=str, choices=['opaque', 'transparent'], default='opaque', help='enable transparency')
-parser.add_argument('--termscheme', type=str, default=None, help='JSON file containg the terminal scheme for generating term colors')
-parser.add_argument('--harmony', type=float , default=0.8, help='(0-1) Color hue shift towards accent')
-parser.add_argument('--harmonize_threshold', type=float , default=100, help='(0-180) Max threshold angle to limit color hue shift')
-parser.add_argument('--term_fg_boost', type=float , default=0.35, help='Make terminal foreground more different from the background')
-parser.add_argument('--blend_bg_fg', action='store_true', default=False, help='Shift terminal background or foreground towards accent')
-parser.add_argument('--cache', type=str, default=None, help='file path to store the generated color')
-parser.add_argument('--debug', action='store_true', default=False, help='debug mode')
-args = parser.parse_args()
 
-rgba_to_hex = lambda rgba: "#{:02X}{:02X}{:02X}".format(rgba[0], rgba[1], rgba[2])
-argb_to_hex = lambda argb: "#{:02X}{:02X}{:02X}".format(*map(round, rgba_from_argb(argb)))
-hex_to_argb = lambda hex_code: argb_from_rgb(int(hex_code[1:3], 16), int(hex_code[3:5], 16), int(hex_code[5:], 16))
-display_color = lambda rgba : "\x1B[38;2;{};{};{}m{}\x1B[0m".format(rgba[0], rgba[1], rgba[2], "\x1b[7m   \x1b[7m")
+HEX_COLOR_RE = re.compile(r"^#?[0-9A-Fa-f]{6}$")
+TERM_KEYS = tuple(f"term{index}" for index in range(16))
+CHROMATIC_TERM_INDEXES = (*range(1, 7), *range(9, 15))
 
-def calculate_optimal_size (width: int, height: int, bitmap_size: int) -> (int, int):
-    image_area = width * height;
-    bitmap_area = bitmap_size ** 2
-    scale = math.sqrt(bitmap_area/image_area) if image_area > bitmap_area else 1
-    new_width = round(width * scale)
-    new_height = round(height * scale)
-    if new_width == 0:
-        new_width = 1
-    if new_height == 0:
-        new_height = 1
-    return new_width, new_height
 
-def harmonize (design_color: int, source_color: int, threshold: float = 35, harmony: float = 0.5) -> int:
-    from_hct = Hct.from_int(design_color)
-    to_hct = Hct.from_int(source_color)
-    difference_degrees_ = difference_degrees(from_hct.hue, to_hct.hue)
-    rotation_degrees = min(difference_degrees_ * harmony, threshold)
-    output_hue = sanitize_degrees_double(
-        from_hct.hue + rotation_degrees * rotation_direction(from_hct.hue, to_hct.hue)
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def normalize_hex(value: str) -> str:
+    value = value.strip()
+    if not HEX_COLOR_RE.fullmatch(value):
+        raise ValueError(f"invalid RGB color: {value!r}")
+    return f"#{value.lstrip('#').upper()}"
+
+
+def rgba_to_hex(rgba) -> str:
+    return "#{:02X}{:02X}{:02X}".format(*map(round, rgba[:3]))
+
+
+def argb_to_hex(argb: int) -> str:
+    return rgba_to_hex(rgba_from_argb(argb))
+
+
+def hex_to_argb(hex_code: str) -> int:
+    value = normalize_hex(hex_code)
+    return argb_from_rgb(
+        int(value[1:3], 16),
+        int(value[3:5], 16),
+        int(value[5:7], 16),
     )
-    return Hct.from_hct(output_hue, from_hct.chroma, from_hct.tone).to_int()
 
-def boost_chroma_tone (argb: int, chroma: float = 1, tone: float = 1) -> int:
-    hct = Hct.from_int(argb)
-    return Hct.from_hct(hct.hue, hct.chroma * chroma, hct.tone * tone).to_int()
 
-darkmode = (args.mode == 'dark')
-transparent = (args.transparency == 'transparent')
+def display_color(argb: int) -> str:
+    red, green, blue, _ = rgba_from_argb(argb)
+    return f"\x1b[48;2;{round(red)};{round(green)};{round(blue)}m   \x1b[0m"
 
-if args.path is not None:
-    image = Image.open(args.path)
 
-    if image.format == "GIF":
-        image.seek(1)
+def calculate_optimal_size(
+    width: int, height: int, bitmap_size: int
+) -> tuple[int, int]:
+    image_area = width * height
+    bitmap_area = bitmap_size**2
+    scale = math.sqrt(bitmap_area / image_area) if image_area > bitmap_area else 1
+    return max(1, round(width * scale)), max(1, round(height * scale))
 
-    if image.mode in ["L", "P"]:
-        image = image.convert('RGB')
-    wsize, hsize = image.size
-    wsize_new, hsize_new = calculate_optimal_size(wsize, hsize, args.size)
-    if wsize_new < wsize or hsize_new < hsize:
-        image = image.resize((wsize_new, hsize_new), Image.Resampling.BICUBIC)
-    colors = QuantizeCelebi(list(image.getdata()), 128)
-    argb = Score.score(colors)[0]
 
-    if args.cache is not None:
-        with open(args.cache, 'w') as file:
-            file.write(argb_to_hex(argb))
-    hct = Hct.from_int(argb)
-    if(args.smart):
-        if(hct.chroma < 20):
-            args.scheme = 'neutral'
-elif args.color is not None:
-    argb = hex_to_argb(args.color)
-    hct = Hct.from_int(argb)
+def source_color_from_image(path: str, bitmap_size: int) -> tuple[int, tuple[int, int], tuple[int, int]]:
+    with Image.open(path) as source_image:
+        if source_image.format == "GIF" and getattr(source_image, "n_frames", 1) > 1:
+            source_image.seek(1)
+        image = source_image.convert("RGB")
+    original_size = image.size
+    resized_size = calculate_optimal_size(*original_size, bitmap_size)
+    if resized_size != original_size:
+        image = image.resize(resized_size, Image.Resampling.BICUBIC)
+    quantized = QuantizeCelebi(list(image.getdata()), 128)
+    return Score.score(quantized)[0], original_size, resized_size
 
-if args.scheme == 'scheme-fruit-salad':
-    from materialyoucolor.scheme.scheme_fruit_salad import SchemeFruitSalad as Scheme
-elif args.scheme == 'scheme-expressive':
-    from materialyoucolor.scheme.scheme_expressive import SchemeExpressive as Scheme
-elif args.scheme == 'scheme-monochrome':
-    from materialyoucolor.scheme.scheme_monochrome import SchemeMonochrome as Scheme
-elif args.scheme == 'scheme-rainbow':
-    from materialyoucolor.scheme.scheme_rainbow import SchemeRainbow as Scheme
-elif args.scheme == 'scheme-tonal-spot':
-    from materialyoucolor.scheme.scheme_tonal_spot import SchemeTonalSpot as Scheme
-elif args.scheme == 'scheme-neutral':
-    from materialyoucolor.scheme.scheme_neutral import SchemeNeutral as Scheme
-elif args.scheme == 'scheme-fidelity':
-    from materialyoucolor.scheme.scheme_fidelity import SchemeFidelity as Scheme
-elif args.scheme == 'scheme-content':
-    from materialyoucolor.scheme.scheme_content import SchemeContent as Scheme
-elif args.scheme == 'scheme-vibrant':
-    from materialyoucolor.scheme.scheme_vibrant import SchemeVibrant as Scheme
-else:
-    from materialyoucolor.scheme.scheme_tonal_spot import SchemeTonalSpot as Scheme
-# Generate
-scheme = Scheme(hct, darkmode, 0.0)
 
-material_colors = {}
-term_colors = {}
+def harmonize(
+    design_color: int,
+    source_color: int,
+    threshold: float = 15,
+    harmony: float = 0.15,
+) -> int:
+    """Shift hue toward the wallpaper while preserving source tone/chroma."""
+    design_hct = Hct.from_int(design_color)
+    source_hct = Hct.from_int(source_color)
+    hue_difference = difference_degrees(design_hct.hue, source_hct.hue)
+    rotation_degrees = min(
+        hue_difference * clamp(harmony, 0.0, 1.0),
+        clamp(threshold, 0.0, 180.0),
+    )
+    output_hue = sanitize_degrees_double(
+        design_hct.hue
+        + rotation_degrees
+        * rotation_direction(design_hct.hue, source_hct.hue)
+    )
+    return Hct.from_hct(output_hue, design_hct.chroma, design_hct.tone).to_int()
 
-for color in vars(MaterialDynamicColors).keys():
-    color_name = getattr(MaterialDynamicColors, color)
-    if hasattr(color_name, "get_hct"):
-        rgba = color_name.get_hct(scheme).to_rgba()
-        material_colors[color] = rgba_to_hex(rgba)
 
-# Extended material
-if darkmode == True:
-    material_colors['success'] = '#B5CCBA'
-    material_colors['onSuccess'] = '#213528'
-    material_colors['successContainer'] = '#374B3E'
-    material_colors['onSuccessContainer'] = '#D1E9D6'
-else:
-    material_colors['success'] = '#4F6354'
-    material_colors['onSuccess'] = '#FFFFFF'
-    material_colors['successContainer'] = '#D1E8D5'
-    material_colors['onSuccessContainer'] = '#0C1F13'
+def adjust_contrast_tone(
+    argb: int,
+    strength: float,
+    darkmode: bool,
+    bright: bool,
+) -> int:
+    """Move tone toward a safe target instead of multiplying it to white."""
+    color = Hct.from_int(argb)
+    strength = clamp(strength, 0.0, 1.0)
+    target_tone = (82.0 if bright else 70.0) if darkmode else (30.0 if bright else 38.0)
 
-# Terminal Colors
-if args.termscheme is not None:
-    with open(args.termscheme, 'r') as f:
-        json_termscheme = f.read()
-    term_source_colors = json.loads(json_termscheme)['dark' if darkmode else 'light']
+    needs_more_contrast = (
+        color.tone < target_tone if darkmode else color.tone > target_tone
+    )
+    if not needs_more_contrast or strength == 0:
+        return argb
 
-    primary_color_argb = hex_to_argb(material_colors['primary_paletteKeyColor'])
-    for color, val in term_source_colors.items():
-        if(args.scheme == 'monochrome') :
-            term_colors[color] = val
-            continue
-        if args.blend_bg_fg and color == "term0":
-            harmonized = boost_chroma_tone(hex_to_argb(material_colors['surfaceContainerLow']), 1.2, 0.95)
-        elif args.blend_bg_fg and color == "term15":
-            harmonized = boost_chroma_tone(hex_to_argb(material_colors['onSurface']), 3, 1)
-        else:
-            harmonized = harmonize(hex_to_argb(val), primary_color_argb, args.harmonize_threshold, args.harmony)
-            harmonized = boost_chroma_tone(harmonized, 1, 1 + (args.term_fg_boost * (1 if darkmode else -1)))
-        term_colors[color] = argb_to_hex(harmonized)
+    output_tone = color.tone + (target_tone - color.tone) * strength
+    return Hct.from_hct(color.hue, color.chroma, output_tone).to_int()
 
-if args.debug == False:
-    print(f"$darkmode: {darkmode};")
-    print(f"$transparent: {transparent};")
-    for color, code in material_colors.items():
-        print(f"${color}: {code};")
-    for color, code in term_colors.items():
-        print(f"${color}: {code};")
-else:
-    if args.path is not None:
-        print('\n--------------Image properties-----------------')
-        print(f"Image size: {wsize} x {hsize}")
-        print(f"Resized image: {wsize_new} x {hsize_new}")
-    print('\n---------------Selected color------------------')
+
+def monochromize(argb: int) -> int:
+    color = Hct.from_int(argb)
+    return Hct.from_hct(color.hue, 0.0, color.tone).to_int()
+
+
+def scheme_class(scheme_name: str):
+    if scheme_name == "scheme-fruit-salad":
+        from materialyoucolor.scheme.scheme_fruit_salad import SchemeFruitSalad
+
+        return SchemeFruitSalad
+    if scheme_name == "scheme-expressive":
+        from materialyoucolor.scheme.scheme_expressive import SchemeExpressive
+
+        return SchemeExpressive
+    if scheme_name == "scheme-monochrome":
+        from materialyoucolor.scheme.scheme_monochrome import SchemeMonochrome
+
+        return SchemeMonochrome
+    if scheme_name == "scheme-rainbow":
+        from materialyoucolor.scheme.scheme_rainbow import SchemeRainbow
+
+        return SchemeRainbow
+    if scheme_name == "scheme-tonal-spot":
+        from materialyoucolor.scheme.scheme_tonal_spot import SchemeTonalSpot
+
+        return SchemeTonalSpot
+    if scheme_name == "scheme-neutral":
+        from materialyoucolor.scheme.scheme_neutral import SchemeNeutral
+
+        return SchemeNeutral
+    if scheme_name == "scheme-fidelity":
+        from materialyoucolor.scheme.scheme_fidelity import SchemeFidelity
+
+        return SchemeFidelity
+    if scheme_name == "scheme-content":
+        from materialyoucolor.scheme.scheme_content import SchemeContent
+
+        return SchemeContent
+
+    from materialyoucolor.scheme.scheme_vibrant import SchemeVibrant
+
+    return SchemeVibrant
+
+
+def generate_material_colors(
+    source_hct: Hct, scheme_name: str, darkmode: bool
+) -> dict[str, str]:
+    scheme = scheme_class(scheme_name)(source_hct, darkmode, 0.0)
+    colors: dict[str, str] = {}
+    for attribute in vars(MaterialDynamicColors):
+        dynamic_color = getattr(MaterialDynamicColors, attribute)
+        if hasattr(dynamic_color, "get_hct"):
+            colors[attribute] = rgba_to_hex(dynamic_color.get_hct(scheme).to_rgba())
+
+    if darkmode:
+        colors.update(
+            success="#B5CCBA",
+            onSuccess="#213528",
+            successContainer="#374B3E",
+            onSuccessContainer="#D1E9D6",
+        )
+    else:
+        colors.update(
+            success="#4F6354",
+            onSuccess="#FFFFFF",
+            successContainer="#D1E8D5",
+            onSuccessContainer="#0C1F13",
+        )
+    return colors
+
+
+def snake_to_lower_camel(name: str) -> str:
+    first, *rest = name.split("_")
+    return first + "".join(part[:1].upper() + part[1:] for part in rest)
+
+
+def load_matugen_material_colors(path: str) -> dict[str, str]:
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("Matugen color output must be a JSON object")
+
+    colors: dict[str, str] = {}
+    for name, value in raw.items():
+        if isinstance(value, str) and HEX_COLOR_RE.fullmatch(value):
+            colors[snake_to_lower_camel(name)] = normalize_hex(value)
+    if "surface" not in colors or "onSurface" not in colors or "primary" not in colors:
+        raise ValueError("Matugen color output is missing required Material roles")
+    return colors
+
+
+def load_terminal_scheme(path: str, darkmode: bool) -> dict[str, str]:
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    palette = raw["dark" if darkmode else "light"]
+    missing = set(TERM_KEYS) - set(palette)
+    if missing:
+        raise ValueError(f"terminal scheme is missing: {', '.join(sorted(missing))}")
+    return {key: normalize_hex(palette[key]) for key in TERM_KEYS}
+
+
+def material_color(material: dict[str, str], *roles: str) -> str:
+    for role in roles:
+        if role in material:
+            return material[role]
+    raise KeyError(f"none of the Material roles are available: {', '.join(roles)}")
+
+
+def generate_terminal_colors(
+    source_color: int,
+    source_palette: dict[str, str],
+    material_colors: dict[str, str],
+    *,
+    darkmode: bool,
+    monochrome: bool,
+    harmony: float,
+    harmonize_threshold: float,
+    contrast_boost: float,
+    blend_background_foreground: bool,
+) -> dict[str, str]:
+    terminal: dict[str, str] = {}
+
+    for index in range(16):
+        key = f"term{index}"
+        color = hex_to_argb(source_palette[key])
+        if index in CHROMATIC_TERM_INDEXES:
+            if monochrome:
+                color = monochromize(color)
+            else:
+                color = harmonize(
+                    color,
+                    source_color,
+                    threshold=harmonize_threshold,
+                    harmony=harmony,
+                )
+            color = adjust_contrast_tone(
+                color,
+                contrast_boost,
+                darkmode,
+                bright=index >= 9,
+            )
+        elif monochrome:
+            color = monochromize(color)
+        terminal[key] = argb_to_hex(color)
+
+    if blend_background_foreground:
+        terminal["termBackground"] = material_color(
+            material_colors, "surfaceContainerLow", "surface", "background"
+        )
+        terminal["termForeground"] = material_color(
+            material_colors, "onSurface", "onBackground"
+        )
+        terminal["termCursor"] = material_color(material_colors, "primary")
+    else:
+        terminal["termBackground"] = terminal["term0"]
+        terminal["termForeground"] = terminal["term7"]
+        terminal["termCursor"] = terminal["termForeground"]
+
+    return terminal
+
+
+def scss_output(
+    material_colors: dict[str, str],
+    terminal_colors: dict[str, str],
+    *,
+    darkmode: bool,
+    transparent: bool,
+) -> str:
+    lines = [
+        f"$darkmode: {darkmode};",
+        f"$transparent: {transparent};",
+    ]
+    lines.extend(f"${name}: {value};" for name, value in material_colors.items())
+    lines.extend(f"${name}: {value};" for name, value in terminal_colors.items())
+    return "\n".join(lines) + "\n"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Material and terminal color generation")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--path", help="generate the source color from an image")
+    source.add_argument("--color", help="generate from a #RRGGBB source color")
+    parser.add_argument("--size", type=int, default=128, help="image sampling size")
+    parser.add_argument("--mode", choices=("dark", "light"), default="dark")
+    parser.add_argument("--scheme", default="scheme-vibrant", help="Material scheme")
+    parser.add_argument("--smart", action="store_true", help="use neutral for gray images")
+    parser.add_argument(
+        "--transparency",
+        choices=("opaque", "transparent"),
+        default="opaque",
+    )
+    parser.add_argument("--termscheme", help="JSON containing dark/light ANSI anchors")
+    parser.add_argument(
+        "--material-colors",
+        help="Matugen colors.json; its roles override locally generated Material roles",
+    )
+    parser.add_argument(
+        "--harmony",
+        type=float,
+        default=0.15,
+        help="0-1 fraction of ANSI hue distance shifted toward the source color",
+    )
+    parser.add_argument(
+        "--harmonize_threshold",
+        type=float,
+        default=15,
+        help="0-180 maximum ANSI hue rotation in degrees",
+    )
+    parser.add_argument(
+        "--term_fg_boost",
+        type=float,
+        default=0.50,
+        help="0-1 bounded ANSI contrast adjustment (legacy option name)",
+    )
+    parser.add_argument(
+        "--blend_bg_fg",
+        action="store_true",
+        help="derive terminal background/foreground/cursor from Material roles",
+    )
+    parser.add_argument("--cache", help="compatibility path for the selected source color")
+    parser.add_argument("--debug", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    darkmode = args.mode == "dark"
+    transparent = args.transparency == "transparent"
+    original_size = resized_size = None
+
+    if args.path:
+        source_color, original_size, resized_size = source_color_from_image(
+            args.path, args.size
+        )
+    else:
+        source_color = hex_to_argb(args.color)
+
+    source_hct = Hct.from_int(source_color)
+    if args.smart and source_hct.chroma < 20:
+        args.scheme = "scheme-neutral"
+
+    if args.cache:
+        Path(args.cache).write_text(argb_to_hex(source_color), encoding="utf-8")
+
+    material_colors = generate_material_colors(source_hct, args.scheme, darkmode)
+    if args.material_colors:
+        material_colors.update(load_matugen_material_colors(args.material_colors))
+    material_colors["primary_paletteKeyColor"] = argb_to_hex(source_color)
+
+    terminal_colors: dict[str, str] = {}
+    source_terminal_palette: dict[str, str] = {}
+    if args.termscheme:
+        source_terminal_palette = load_terminal_scheme(args.termscheme, darkmode)
+        terminal_colors = generate_terminal_colors(
+            source_color,
+            source_terminal_palette,
+            material_colors,
+            darkmode=darkmode,
+            monochrome=args.scheme == "scheme-monochrome",
+            harmony=args.harmony,
+            harmonize_threshold=args.harmonize_threshold,
+            contrast_boost=args.term_fg_boost,
+            blend_background_foreground=args.blend_bg_fg,
+        )
+
+    if not args.debug:
+        print(
+            scss_output(
+                material_colors,
+                terminal_colors,
+                darkmode=darkmode,
+                transparent=transparent,
+            ),
+            end="",
+        )
+        return 0
+
+    if args.path:
+        print("\n--------------Image properties-----------------")
+        print(f"Image size: {original_size[0]} x {original_size[1]}")
+        print(f"Resized image: {resized_size[0]} x {resized_size[1]}")
+    print("\n---------------Selected color------------------")
     print(f"Dark mode: {darkmode}")
     print(f"Scheme: {args.scheme}")
-    print(f"Accent color: {display_color(rgba_from_argb(argb))} {argb_to_hex(argb)}")
-    print(f"HCT: {hct.hue:.2f}  {hct.chroma:.2f}  {hct.tone:.2f}")
-    print('\n---------------Material colors-----------------')
-    for color, code in material_colors.items():
-        rgba = rgba_from_argb(hex_to_argb(code))
-        print(f"{color.ljust(32)} : {display_color(rgba)}  {code}")
-    print('\n----------Harmonize terminal colors------------')
-    for color, code in term_colors.items():
-        rgba = rgba_from_argb(hex_to_argb(code))
-        code_source = term_source_colors[color]
-        rgba_source = rgba_from_argb(hex_to_argb(code_source))
-        print(f"{color.ljust(6)} : {display_color(rgba_source)} {code_source} --> {display_color(rgba)} {code}")
-    print('-----------------------------------------------')
+    print(f"Accent color: {display_color(source_color)} {argb_to_hex(source_color)}")
+    print(
+        f"HCT: {source_hct.hue:.2f}  {source_hct.chroma:.2f}  "
+        f"{source_hct.tone:.2f}"
+    )
+    print("\n---------------Material colors-----------------")
+    for name, value in material_colors.items():
+        print(f"{name.ljust(32)} : {display_color(hex_to_argb(value))}  {value}")
+    if terminal_colors:
+        print("\n-------------Terminal ANSI colors--------------")
+        for name in TERM_KEYS:
+            source_value = source_terminal_palette[name]
+            output_value = terminal_colors[name]
+            print(
+                f"{name.ljust(6)} : {display_color(hex_to_argb(source_value))} "
+                f"{source_value} -> {display_color(hex_to_argb(output_value))} "
+                f"{output_value}"
+            )
+        print(f"background: {terminal_colors['termBackground']}")
+        print(f"foreground: {terminal_colors['termForeground']}")
+    print("-----------------------------------------------")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -11,6 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHELL_CONFIG_FILE="$XDG_CONFIG_HOME/illogical-impulse/config.json"
 MATUGEN_DIR="$XDG_CONFIG_HOME/matugen"
 terminalscheme="$SCRIPT_DIR/terminal/scheme-base.json"
+VIRTUAL_ENV_DIR="${ILLOGICAL_IMPULSE_VIRTUAL_ENV:-$STATE_DIR/.venv}"
+VIRTUAL_ENV_DIR="${VIRTUAL_ENV_DIR/#\~/$HOME}"
 
 handle_kde_material_you_colors() {
     # Check if Qt app theming is enabled in config
@@ -24,7 +26,7 @@ handle_kde_material_you_colors() {
     # Map $type_flag to allowed scheme variants for kde-material-you-colors-wrapper.sh
     local kde_scheme_variant=""
     case "$type_flag" in
-        scheme-content|scheme-expressive|scheme-fidelity|scheme-fruit-salad|scheme-monochrome|scheme-neutral|scheme-rainbow|scheme-tonal-spot)
+        scheme-content|scheme-expressive|scheme-fidelity|scheme-fruit-salad|scheme-monochrome|scheme-neutral|scheme-rainbow|scheme-tonal-spot|scheme-vibrant)
             kde_scheme_variant="$type_flag"
             ;;
         *)
@@ -47,6 +49,9 @@ pre_process() {
 
     if [ ! -d "$CACHE_DIR"/user/generated ]; then
         mkdir -p "$CACHE_DIR"/user/generated
+    fi
+    if [ ! -d "$STATE_DIR"/user/generated ]; then
+        mkdir -p "$STATE_DIR"/user/generated
     fi
 }
 
@@ -181,9 +186,10 @@ switch() {
     cursorposy=$(bc <<< "scale=0; ($cursorposy - $screeny) * $scale / 1")
     cursorposy_inverted=$((screensizey - cursorposy))
 
+    matugen_args=(--source-color-index 0)
+
     if [[ "$color_flag" == "1" ]]; then
-        matugen_args=(color hex "$color")
-        generate_colors_material_args=(--color "$color")
+        matugen_args+=(color hex "$color")
     else
         if [[ -z "$imgpath" ]]; then
             echo 'Aborted'
@@ -240,8 +246,7 @@ switch() {
             set_thumbnail_path "$thumbnail"
 
             if [ -f "$thumbnail" ]; then
-                matugen_args=(image "$thumbnail" "--source-color-index" "0")
-                generate_colors_material_args=(--path "$thumbnail")
+                matugen_args+=(image "$thumbnail")
                 create_restore_script "$video_path"
             else
                 echo "Cannot create image to colorgen"
@@ -249,8 +254,7 @@ switch() {
                 exit 1
             fi
         else
-            matugen_args=(image "$imgpath" "--source-color-index" "0")
-            generate_colors_material_args=(--path "$imgpath")
+            matugen_args+=(image "$imgpath")
             # Update wallpaper path in config
             set_wallpaper_path "$imgpath"
             remove_restore
@@ -267,18 +271,22 @@ switch() {
         fi
     fi
 
-    # enforce dark mode for terminal
+    terminal_mode="$mode_flag"
+
+    # Enforce dark mode for the terminal only. Apps and shell still follow the
+    # selected desktop mode.
     if [[ -n "$mode_flag" ]]; then
         matugen_args+=(--mode "$mode_flag")
         if [[ $(jq -r '.appearance.wallpaperTheming.terminalGenerationProps.forceDarkMode' "$SHELL_CONFIG_FILE") == "true" ]]; then
-            generate_colors_material_args+=(--mode "dark")
-        else
-            generate_colors_material_args+=(--mode "$mode_flag")
+            terminal_mode="dark"
         fi
     fi
-    [[ -n "$type_flag" ]] && matugen_args+=(--type "$type_flag") && generate_colors_material_args+=(--scheme "$type_flag")
+    generate_colors_material_args=(--mode "$terminal_mode")
+    if [[ -n "$type_flag" ]]; then
+        matugen_args+=(--type "$type_flag")
+        generate_colors_material_args+=(--scheme "$type_flag")
+    fi
     generate_colors_material_args+=(--termscheme "$terminalscheme" --blend_bg_fg)
-    generate_colors_material_args+=(--cache "$STATE_DIR/user/generated/color.txt")
 
     pre_process "$mode_flag"
 
@@ -287,9 +295,26 @@ switch() {
         enable_apps_shell=$(jq -r '.appearance.wallpaperTheming.enableAppsAndShell' "$SHELL_CONFIG_FILE")
         if [ "$enable_apps_shell" == "false" ]; then
             echo "App and shell theming disabled, skipping matugen and color generation"
+            if [[ -s "$STATE_DIR/user/generated/material_colors.scss" ]]; then
+                "$SCRIPT_DIR"/applycolor.sh
+            fi
             return
         fi
     fi
+
+    # Serialize generation and rendering. The previous backgrounded renderer
+    # could read a half-written SCSS file and leave random placeholders behind.
+    exec {color_lock_fd}>"$STATE_DIR/user/generated/.color-generation.lock"
+    flock "$color_lock_fd"
+
+    runtime_matugen_config="$STATE_DIR/user/generated/matugen-config.toml"
+    if ! python3 "$SCRIPT_DIR/prepare_matugen_config.py" \
+        --input "$MATUGEN_DIR/config.toml" \
+        --output "$runtime_matugen_config"; then
+        echo "[switchwall] Could not prepare a writable Matugen configuration" >&2
+        return 1
+    fi
+    matugen_args=(--config "$runtime_matugen_config" "${matugen_args[@]}")
 
     # Set harmony and related properties
     if [ -f "$SHELL_CONFIG_FILE" ]; then
@@ -301,11 +326,35 @@ switch() {
         [[ "$term_fg_boost" != "null" && -n "$term_fg_boost" ]] && generate_colors_material_args+=(--term_fg_boost "$term_fg_boost")
     fi
 
-    matugen "${matugen_args[@]}"
-    source "$(eval echo $ILLOGICAL_IMPULSE_VIRTUAL_ENV)/bin/activate"
-    python3 "$SCRIPT_DIR/generate_colors_material.py" "${generate_colors_material_args[@]}" \
-        > "$STATE_DIR"/user/generated/material_colors.scss
-    deactivate
+    if ! matugen "${matugen_args[@]}"; then
+        echo "[switchwall] Matugen failed; keeping the previous generated theme" >&2
+        return 1
+    fi
+
+    generated_source_color="$(tr -d '[:space:]' < "$STATE_DIR/user/generated/color.txt")"
+    if [[ ! "$generated_source_color" =~ ^#[A-Fa-f0-9]{6}$ ]]; then
+        echo "[switchwall] Invalid Matugen source color: '$generated_source_color'" >&2
+        return 1
+    fi
+    generate_colors_material_args+=(--color "$generated_source_color")
+
+    # When terminal and desktop modes match, consume Matugen's exact Material
+    # roles. A forced-dark terminal intentionally generates its own dark roles.
+    if [[ "$terminal_mode" == "$mode_flag" ]]; then
+        generate_colors_material_args+=(--material-colors "$STATE_DIR/user/generated/colors.json")
+    fi
+
+    material_colors_tmp="$(mktemp "$STATE_DIR/user/generated/.material_colors.XXXXXX")"
+    "$VIRTUAL_ENV_DIR/bin/python" "$SCRIPT_DIR/generate_colors_material.py" \
+        "${generate_colors_material_args[@]}" > "$material_colors_tmp"
+    generation_status=$?
+    if (( generation_status != 0 )); then
+        rm -f "$material_colors_tmp"
+        echo "[switchwall] Terminal color generation failed; keeping the previous palette" >&2
+        return "$generation_status"
+    fi
+    chmod 644 "$material_colors_tmp"
+    mv -f "$material_colors_tmp" "$STATE_DIR/user/generated/material_colors.scss"
     "$SCRIPT_DIR"/applycolor.sh
 
     # Pass screen width, height, and wallpaper path to post_process
@@ -335,9 +384,7 @@ main() {
 
     detect_scheme_type_from_image() {
         local img="$1"
-        source "$(eval echo $ILLOGICAL_IMPULSE_VIRTUAL_ENV)/bin/activate"
-        "$SCRIPT_DIR"/scheme_for_image.py "$img" 2>/dev/null | tr -d '\n'
-        deactivate
+        "$VIRTUAL_ENV_DIR/bin/python" "$SCRIPT_DIR/scheme_for_image.py" "$img" 2>/dev/null | tr -d '\n'
     }
 
     while [[ $# -gt 0 ]]; do
@@ -393,7 +440,7 @@ main() {
     fi
 
     # Validate type_flag (allow 'auto' as well)
-    allowed_types=(scheme-content scheme-expressive scheme-fidelity scheme-fruit-salad scheme-monochrome scheme-neutral scheme-rainbow scheme-tonal-spot auto)
+    allowed_types=(scheme-content scheme-expressive scheme-fidelity scheme-fruit-salad scheme-monochrome scheme-neutral scheme-rainbow scheme-tonal-spot scheme-vibrant auto)
     valid_type=0
     for t in "${allowed_types[@]}"; do
         if [[ "$type_flag" == "$t" ]]; then
