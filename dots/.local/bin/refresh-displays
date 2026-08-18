@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Re-arm Hyprland outputs without unbinding amdgpu or killing the session.
+# With no mode argument, each connected output is DPMS-cycled sequentially so
+# at least one display remains usable throughout the recovery.
+
+runtime_dir=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+exec 9>"$runtime_dir/refresh-displays.lock"
+flock -n 9 || {
+    printf 'A display refresh is already running.\n' >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage: refresh-displays [cycle|sleep|wake|status]
+
+  cycle   Sequentially DPMS-cycle every connected output (default)
+  sleep   Stop all outputs cleanly before switching monitor plugs off
+  wake    Wake all outputs and reconcile the current color transform
+  status  Show output, refresh, DPMS, VRR, and color-transform state
+EOF
+}
+
+lua_dpms() {
+    local action=$1
+    local monitor=${2:-}
+
+    if [[ -n $monitor ]]; then
+        [[ $monitor =~ ^[A-Za-z0-9_.:-]+$ ]] || {
+            printf 'Refusing unexpected monitor name: %s\n' "$monitor" >&2
+            return 1
+        }
+        hyprctl eval "hl.dispatch(hl.dsp.dpms({ action = \"$action\", monitor = \"$monitor\" }))" >/dev/null
+    else
+        hyprctl eval "hl.dispatch(hl.dsp.dpms({ action = \"$action\" }))" >/dev/null
+    fi
+}
+
+wait_dpms() {
+    local monitor=$1 expected=$2 current
+    for _ in {1..30}; do
+        current=$(hyprctl monitors -j | jq -r --arg monitor "$monitor" '.[] | select(.name == $monitor) | .dpmsStatus')
+        [[ $current == "$expected" ]] && return 0
+        sleep 0.1
+    done
+    printf 'Timed out waiting for %s DPMS=%s\n' "$monitor" "$expected" >&2
+    return 1
+}
+
+snapshot_color() {
+    color_identity=true
+    color_temperature=6000
+    color_gamma=100
+
+    if "$HOME/.local/bin/hyprsunsetctl" ensure >/dev/null 2>&1; then
+        color_identity=$("$HOME/.local/bin/hyprsunsetctl" identity get 2>/dev/null || printf true)
+        color_temperature=$("$HOME/.local/bin/hyprsunsetctl" temperature 2>/dev/null || printf 6000)
+        color_gamma=$("$HOME/.local/bin/hyprsunsetctl" gamma 2>/dev/null || printf 100)
+    fi
+}
+
+restore_color() {
+    "$HOME/.local/bin/hyprsunsetctl" ensure >/dev/null
+    if [[ $color_identity == true ]]; then
+        "$HOME/.local/bin/hyprsunsetctl" identity true >/dev/null
+    else
+        "$HOME/.local/bin/hyprsunsetctl" temperature "$color_temperature" >/dev/null
+    fi
+    "$HOME/.local/bin/hyprsunsetctl" gamma "$color_gamma" >/dev/null
+}
+
+show_status() {
+    hyprctl monitors -j | jq -r '.[] | "\(.name): \(.width)x\(.height) @ \(.refreshRate) Hz, DPMS=\(.dpmsStatus), VRR=\(.vrr), format=\(.currentFormat)"'
+    if "$HOME/.local/bin/hyprsunsetctl" ensure >/dev/null 2>&1; then
+        printf 'Color: identity=%s, temperature=%s K, gamma=%s%% (global across outputs)\n' \
+            "$("$HOME/.local/bin/hyprsunsetctl" identity get)" \
+            "$("$HOME/.local/bin/hyprsunsetctl" temperature)" \
+            "$("$HOME/.local/bin/hyprsunsetctl" gamma)"
+    else
+        printf 'Color: hyprsunset unavailable\n'
+    fi
+}
+
+mode=${1:-cycle}
+case $mode in
+    cycle)
+        snapshot_color
+        mapfile -t monitors < <(hyprctl monitors -j | jq -r '.[].name')
+        ((${#monitors[@]})) || {
+            printf 'Hyprland reports no connected monitors.\n' >&2
+            exit 1
+        }
+
+        for monitor in "${monitors[@]}"; do
+            printf 'Cycling %s...\n' "$monitor"
+            lua_dpms off "$monitor"
+            wait_dpms "$monitor" false
+            sleep 0.5
+            lua_dpms on "$monitor"
+            wait_dpms "$monitor" true
+            sleep 0.5
+        done
+        restore_color
+        show_status
+        ;;
+    sleep)
+        # Let in-flight frames drain before the physical connectors disappear.
+        lua_dpms off
+        sleep 1
+        printf 'Outputs are cleanly asleep; it is now safe to switch the monitor plugs off.\n'
+        ;;
+    wake)
+        snapshot_color
+        lua_dpms on
+        sleep 1
+        restore_color
+        show_status
+        ;;
+    status)
+        show_status
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

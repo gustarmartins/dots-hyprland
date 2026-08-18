@@ -11,8 +11,6 @@ hl.on("hyprland.start", function ()
     -- Automatic idle lock/DPMS is intentionally disabled; keep manual Super+L.
     hl.exec_cmd("dbus-update-activation-environment --all")
     hl.exec_cmd("sleep 1 && dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP") -- Some fix idk
-    hl.exec_cmd("hyprpm reload")
-
     -- Audio
     hl.exec_cmd("easyeffects --hide-window --service-mode")
 

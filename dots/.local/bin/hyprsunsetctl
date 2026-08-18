@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Keep End-4's hyprsunset control path healthy. A hyprsunset process may
+# remain alive after its IPC accept thread has died, in which case `pidof`
+# succeeds forever while every `hyprctl hyprsunset ...` command fails.
+
+runtime_dir=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+lock_file=$runtime_dir/hyprsunset-ensure.lock
+
+healthy() {
+    timeout 1 hyprctl hyprsunset identity get >/dev/null 2>&1
+}
+
+ensure_healthy() {
+    exec 9>"$lock_file"
+    flock -w 3 9
+
+    if healthy; then
+        flock -u 9
+        return 0
+    fi
+
+    # Stop a legacy End-4 daemon that was launched directly rather than by
+    # the user service. It can otherwise retain the compositor's single CTM
+    # manager and prevent the replacement from starting.
+    systemctl --user stop hyprsunset.service >/dev/null 2>&1 || true
+    mapfile -t stale_pids < <(pgrep -u "$(id -u)" -x hyprsunset || true)
+    if ((${#stale_pids[@]})); then
+        kill -TERM "${stale_pids[@]}" 2>/dev/null || true
+        for _ in {1..20}; do
+            live=0
+            for pid in "${stale_pids[@]}"; do
+                kill -0 "$pid" 2>/dev/null && live=1
+            done
+            ((live == 0)) && break
+            sleep 0.1
+        done
+        for pid in "${stale_pids[@]}"; do
+            if [[ $(cat "/proc/$pid/comm" 2>/dev/null || true) == hyprsunset ]]; then
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    systemctl --user start hyprsunset.service
+    for _ in {1..40}; do
+        if healthy; then
+            flock -u 9
+            return 0
+        fi
+        sleep 0.05
+    done
+
+    flock -u 9
+    printf 'hyprsunset did not expose a healthy control socket\n' >&2
+    return 1
+}
+
+ensure_healthy
+
+if (($# == 0)) || [[ $1 == ensure ]]; then
+    exit 0
+fi
+
+exec timeout 2 hyprctl hyprsunset "$@"
