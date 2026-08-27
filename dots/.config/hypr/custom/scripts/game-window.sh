@@ -57,9 +57,7 @@ ensure_tag() {
 }
 
 cmd_game() {
-    # F5 is intentionally idempotent: pressing it repeatedly must never
-    # disable VRR eligibility for the focused game.
-    ensure_tag gamemode "Game mode"
+    toggle_tag gamemode "Game mode"
 }
 
 cmd_tear() {

@@ -14,7 +14,7 @@ local monitors = {
         vrr = 2,
     },
     arzopa = {
-        output = "desc:GWD ARZOPA 5=\\x9d\\x16%\\xf9`S0001",
+        output = "HDMI-A-1",
         mode = "1920x1080@144.0",
         position = "1920x500",
         scale = 1.0,
