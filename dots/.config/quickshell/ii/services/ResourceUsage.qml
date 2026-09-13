@@ -25,6 +25,21 @@ Singleton {
 	property real gttTotal: 1
 	property real gttUsed: 0
 	property real gttUsedPercentage: gttUsed / gttTotal
+
+	// amdgpu engine load. gpu_busy_percent is the graphics pipe, mem_busy_percent
+	// the memory controller — both are single-read counters the driver already
+	// maintains, so polling them costs nothing beyond the read.
+	property real gpuUsage: 0
+	property real gpuMemBusy: 0
+	property real gpuPower: 0
+	property real gpuPowerCap: 1
+	property real gpuTempEdge: 0
+	property real gpuTempHotspot: 0
+	property real gpuTempMem: 0
+	property real gpuClock: 0
+	property real gpuMemClock: 0
+	property real gpuFan: 0
+
 	property real cpuUsage: 0
 	property var previousCpuStats
 	// Live peak core clock (MHz) — max scaling_cur_freq across all cores at poll
@@ -51,6 +66,7 @@ Singleton {
 	property list<real> cpuUsageHistory: []
 	property list<real> memoryUsageHistory: []
 	property list<real> swapUsageHistory: []
+	property list<real> gpuUsageHistory: []
 
 	function kbToGbString(kb) {
 	    return (kb / (1024 * 1024)).toFixed(1) + " GB";
@@ -75,6 +91,14 @@ Singleton {
         cpuUsageHistory = [...cpuUsageHistory, cpuUsage]
         if (cpuUsageHistory.length > historyLength) {
             cpuUsageHistory.shift()
+        }
+    }
+    // Driven from the gpuStatsProc callback, not updateHistories(), because the
+    // GPU values land asynchronously after the timer tick that requested them.
+    function updateGpuUsageHistory() {
+        gpuUsageHistory = [...gpuUsageHistory, gpuUsage]
+        if (gpuUsageHistory.length > historyLength) {
+            gpuUsageHistory.shift()
         }
     }
     function updateHistories() {
@@ -140,16 +164,38 @@ Singleton {
 
     Process {
         id: gpuStatsProc
-        command: ["bash", "-c", "cat /sys/class/drm/card1/device/mem_info_{vram_total,vram_used,gtt_total,gtt_used}"]
+        // One bash, one pass over the amdgpu sysfs nodes. Every entry falls back
+        // to 0 so the line count is fixed at 14 and the indices below stay valid
+        // even if a node is missing on another card.
+        command: ["bash", "-c",
+            "D=/sys/class/drm/card1/device; H=$(echo $D/hwmon/hwmon*); " +
+            "for f in $D/mem_info_vram_total $D/mem_info_vram_used " +
+            "$D/mem_info_gtt_total $D/mem_info_gtt_used " +
+            "$D/gpu_busy_percent $D/mem_busy_percent " +
+            "$H/power1_average $H/power1_cap " +
+            "$H/temp1_input $H/temp2_input $H/temp3_input " +
+            "$H/freq1_input $H/freq2_input $H/fan1_input; " +
+            "do cat \"$f\" 2>/dev/null || echo 0; done"]
         stdout: StdioCollector {
             onStreamFinished: {
-                const lines = text.split("\n").filter(l => l.length > 0)
-                if (lines.length >= 4) {
-                    root.vramTotal = Number(lines[0])
-                    root.vramUsed = Number(lines[1])
-                    root.gttTotal = Number(lines[2])
-                    root.gttUsed = Number(lines[3])
-                }
+                const l = text.split("\n")
+                if (l.length < 14) return
+                const n = i => Number(l[i]) || 0
+                root.vramTotal = n(0) || 1
+                root.vramUsed = n(1)
+                root.gttTotal = n(2) || 1
+                root.gttUsed = n(3)
+                root.gpuUsage = n(4) / 100
+                root.gpuMemBusy = n(5) / 100
+                root.gpuPower = n(6) / 1000000
+                root.gpuPowerCap = n(7) / 1000000 || 1
+                root.gpuTempEdge = n(8) / 1000
+                root.gpuTempHotspot = n(9) / 1000
+                root.gpuTempMem = n(10) / 1000
+                root.gpuClock = n(11) / 1000000
+                root.gpuMemClock = n(12) / 1000000
+                root.gpuFan = n(13)
+                root.updateGpuUsageHistory()
             }
         }
     }

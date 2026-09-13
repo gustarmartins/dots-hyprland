@@ -50,11 +50,22 @@ Singleton {
         return (key?.length > 0);
     }
     property var postResponseHook
+    property bool bypassPermissions: Persistent.states?.ai?.bypassPermissions ?? false
     property real temperature: Persistent.states?.ai?.temperature ?? 0.5
     property QtObject tokenCount: QtObject {
         property int input: -1
         property int output: -1
         property int total: -1
+    }
+
+    function setBypassPermissions(value: bool) {
+        Persistent.states.ai.bypassPermissions = value;
+        root.bypassPermissions = value;
+        root.addMessage(value ? Translation.tr("⚠️ **Permission Bypass ENABLED**: Commands will execute automatically without confirmation.") : Translation.tr("🛡️ **Permission Bypass DISABLED**: Commands require manual approval."), root.interfaceRole);
+    }
+
+    function toggleBypassPermissions() {
+        setBypassPermissions(!root.bypassPermissions);
     }
 
     function idForMessage(message) {
@@ -108,6 +119,28 @@ Singleton {
                             }
                         },
                         "required": ["key", "value"]
+                    }
+                },
+                {
+                    "name": "update",
+                    "description": "Update working notes before tool execution",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "previous_step": {
+                                "type": "string",
+                                "description": "Summary of previous step completed"
+                            },
+                            "plan": {
+                                "type": "string",
+                                "description": "Current overall plan"
+                            },
+                            "next_step": {
+                                "type": "string",
+                                "description": "Next step to execute"
+                            }
+                        },
+                        "required": ["previous_step", "plan", "next_step"]
                     }
                 },
                 {
@@ -258,6 +291,54 @@ Singleton {
 	    // - includeReasoningInHistory: Send saved reasoning_content back to OpenAI-compatible APIs that require it.
 	    // - extraParams: Extra parameters to be passed to the model. This is a JSON object.
 	    property var models: Config.options.policies.ai === 2 ? {} : {
+        "gemini-3.8-flash": aiModelComponent.createObject(this, {
+            "name": "Gemini 3.8 Flash (High)",
+            "icon": "google-gemini-symbolic",
+            "description": Translation.tr("Online | Google's hybrid reasoning Flash model (High thinking effort)\nPro-level reasoning intelligence at Flash speeds with search grounding, function calling, and deep chain-of-thought."),
+            "homepage": "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash",
+            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse",
+            "model": "gemini-3.8-flash",
+            "requires_key": true,
+            "key_id": "gemini",
+            "key_get_link": "https://aistudio.google.com/app/apikey",
+            "key_get_description": Translation.tr("**Pricing**: paid/free-tier availability depends on your Gemini API account.\n\n**Instructions**: Log into Google AI Studio, create an API key, then set it here with `/key`."),
+            "api_format": "gemini",
+            "omit_temperature": true,
+            "thinkingLevel": "high",
+            "includeThoughts": true,
+        }),
+        "gemini-3.8-flash-medium": aiModelComponent.createObject(this, {
+            "name": "Gemini 3.8 Flash (Medium)",
+            "icon": "google-gemini-symbolic",
+            "description": Translation.tr("Online | Google's hybrid reasoning Flash model (Medium thinking effort)\nOptimal balance for general video Q&A, lecture summarization, and clip retrieval."),
+            "homepage": "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash",
+            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse",
+            "model": "gemini-3.8-flash",
+            "requires_key": true,
+            "key_id": "gemini",
+            "key_get_link": "https://aistudio.google.com/app/apikey",
+            "key_get_description": Translation.tr("**Pricing**: paid/free-tier availability depends on your Gemini API account.\n\n**Instructions**: Log into Google AI Studio, create an API key, then set it here with `/key`."),
+            "api_format": "gemini",
+            "omit_temperature": true,
+            "thinkingLevel": "medium",
+            "includeThoughts": true,
+        }),
+        "gemini-3.8-flash-low": aiModelComponent.createObject(this, {
+            "name": "Gemini 3.8 Flash (Low)",
+            "icon": "google-gemini-symbolic",
+            "description": Translation.tr("Online | Google's hybrid reasoning Flash model (Low thinking effort)\nFast responses with lightweight reasoning for simple queries and transcript searches."),
+            "homepage": "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash",
+            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse",
+            "model": "gemini-3.8-flash",
+            "requires_key": true,
+            "key_id": "gemini",
+            "key_get_link": "https://aistudio.google.com/app/apikey",
+            "key_get_description": Translation.tr("**Pricing**: paid/free-tier availability depends on your Gemini API account.\n\n**Instructions**: Log into Google AI Studio, create an API key, then set it here with `/key`."),
+            "api_format": "gemini",
+            "omit_temperature": true,
+            "thinkingLevel": "low",
+            "includeThoughts": true,
+        }),
         "gemini-2.5-flash": aiModelComponent.createObject(this, {
             "name": "Gemini 2.5 Flash",
             "icon": "google-gemini-symbolic",
@@ -271,13 +352,13 @@ Singleton {
             "key_get_description": Translation.tr("**Pricing**: free. Data used for training.\n\n**Instructions**: Log into Google account, allow AI Studio to create Google Cloud project or whatever it asks, go back and click Get API key"),
 	            "api_format": "gemini",
 	        }),
-	        "gemini-3.5-flash": aiModelComponent.createObject(this, {
-	            "name": "Gemini 3.5 Flash",
+	        "gemini-3.6-flash": aiModelComponent.createObject(this, {
+	            "name": "Gemini 3.6 Flash",
 	            "icon": "google-gemini-symbolic",
 	            "description": Translation.tr("Online | Google's latest stable Flash model\nBest default for fast coding, agentic tasks, long context, Search grounding, URL context, structured outputs, and function calling."),
-	            "homepage": "https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash",
-	            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
-	            "model": "gemini-3.5-flash",
+	            "homepage": "https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash",
+	            "endpoint": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse",
+	            "model": "gemini-3.6-flash",
 	            "requires_key": true,
 	            "key_id": "gemini",
 	            "key_get_link": "https://aistudio.google.com/app/apikey",
@@ -391,6 +472,7 @@ Singleton {
     }
 
     property string requestScriptFilePath: "/tmp/quickshell/ai/request.sh"
+    property string requestPayloadFilePath: "/tmp/quickshell/ai/request.json"
     property string pendingFilePath: ""
 
     Component.onCompleted: {
@@ -548,7 +630,7 @@ Singleton {
     }
 
     function getModel() {
-        return models[currentModelId];
+        return models[currentModelId] || models["gemini-3.8-flash"] || models[modelList[0]];
     }
 
     function setModel(modelId, feedback = true, setPersistentState = true) {
@@ -645,15 +727,22 @@ Singleton {
         id: requesterScriptFile
     }
 
+    FileView {
+        id: requesterPayloadFile
+    }
+
     Process {
         id: requester
         property list<string> baseCommand: ["bash"]
         property AiMessageData message
         property ApiStrategy currentStrategy
+        property bool continuationQueued: false
+        property string stderrOutput: ""
 
         function markDone() {
+            if (!requester.message || requester.message.done) return;
             requester.message.done = true;
-            if (root.postResponseHook) {
+            if (!requester.continuationQueued && root.postResponseHook) {
                 root.postResponseHook();
                 root.postResponseHook = null; // Reset hook after use
             }
@@ -661,7 +750,19 @@ Singleton {
             root.responseFinished()
         }
 
+        function queueContinuation() {
+            if (requester.running) {
+                requester.continuationQueued = true;
+            } else {
+                Qt.callLater(requester.makeRequest);
+            }
+        }
+
         function makeRequest() {
+            if (requester.running) {
+                requester.continuationQueued = true;
+                return;
+            }
             const model = models[currentModelId];
 
             // Fetch API keys if needed
@@ -669,16 +770,26 @@ Singleton {
             
             requester.currentStrategy = root.currentApiStrategy;
             requester.currentStrategy.reset(); // Reset strategy state
+            requester.stderrOutput = "";
 
             /* Put API key in environment variable */
             if (model.requires_key) requester.environment[`${root.apiKeyEnvVarName}`] = root.apiKeys ? (root.apiKeys[model.key_id] ?? "") : ""
 
             /* Build endpoint, request data */
             const endpoint = root.currentApiStrategy.buildEndpoint(model);
-            const messageArray = root.messageIDs.map(id => root.messageByID[id]);
-            const filteredMessageArray = messageArray.filter(message => message.role !== Ai.interfaceRole);
+            const messageArray = root.messageIDs.map(id => root.messageByID[id]).filter(m => !!m);
+            // Filter out interface messages AND empty/failed assistant messages that have no content and no functionCall
+            const filteredMessageArray = messageArray.filter(message => {
+                if (message.role === Ai.interfaceRole) return false;
+                if (message.role === "assistant" && !message.functionName && !message.functionCall && (!message.content || message.content.trim().length === 0) && (!message.rawContent || message.rawContent.trim().length === 0)) return false;
+                return true;
+            });
+            if (filteredMessageArray.length === 0 || filteredMessageArray[filteredMessageArray.length - 1].role === "assistant") {
+                console.error("[AI] Refusing request with no user/tool-result turn after the last assistant turn");
+                root.addMessage(Translation.tr("Could not continue safely because the request history ends with an assistant turn."), root.interfaceRole);
+                return;
+            }
             const data = root.currentApiStrategy.buildRequestData(model, filteredMessageArray, root.systemPrompt, root.temperature, root.tools[model.api_format][root.currentTool], root.pendingFilePath);
-            // console.log("[Ai] Request data: ", JSON.stringify(data, null, 2));
 
             let requestHeaders = {
                 "Content-Type": "application/json",
@@ -703,14 +814,20 @@ Singleton {
                 .map(([k, v]) => `-H '${k}: ${v}'`)
                 .join(' ');
 
-            // console.log("Request headers: ", JSON.stringify(requestHeaders));
-            // console.log("Header string: ", headerString);
-
             /* Get authorization header from strategy */
             const authHeader = requester.currentStrategy.buildAuthorizationHeader(root.apiKeyEnvVarName);
+
+            /* Ensure temp directory exists with restricted user permissions */
+            Quickshell.execDetached(["bash", "-c", "mkdir -p -m 700 /tmp/quickshell/ai && chmod 700 /tmp/quickshell/ai 2>/dev/null || true"]);
+
+            /* Write payload to request.json to avoid command line length limits */
+            const jsonPayload = JSON.stringify(data);
+            const payloadPath = CF.FileUtils.trimFileProtocol(root.requestPayloadFilePath);
+            requesterPayloadFile.path = Qt.resolvedUrl(payloadPath);
+            requesterPayloadFile.setText(jsonPayload);
             
             /* Script shebang */
-            const scriptShebang = "#!/usr/bin/env bash\n";
+            const scriptShebang = "#!/usr/bin/env bash\nset -o pipefail\n";
 
             /* Create extra setup when there's an attached file */
             let scriptFileSetupContent = ""
@@ -720,12 +837,12 @@ Singleton {
                 root.pendingFilePath = ""
             }
 
-            /* Create command string */
+            /* Create command string using --data-binary with the payload file */
             let scriptRequestContent = ""
-            scriptRequestContent += `curl --no-buffer "${endpoint}"`
+            scriptRequestContent += `curl -s -S --no-buffer "${endpoint}"`
                 + ` ${headerString}`
                 + (authHeader ? ` ${authHeader}` : "")
-                + ` --data '${CF.StringUtils.shellSingleQuoteEscape(JSON.stringify(data))}'`
+                + ` --data-binary "@${payloadPath}"`
                 + "\n"
             
             /* Send the request */
@@ -740,13 +857,11 @@ Singleton {
         stdout: SplitParser {
             onRead: data => {
                 if (data.length === 0) return;
-                if (requester.message.thinking) requester.message.thinking = false;
-                // console.log("[Ai] Raw response line: ", data);
+                if (requester.message && requester.message.thinking) requester.message.thinking = false;
 
                 // Handle response line
                 try {
                     const result = requester.currentStrategy.parseResponseLine(data, requester.message);
-                    // console.log("[Ai] Parsed response result: ", JSON.stringify(result, null, 2));
 
                     if (result.functionCall) {
                         requester.message.functionCall = result.functionCall;
@@ -769,9 +884,25 @@ Singleton {
             }
         }
 
+        stderr: SplitParser {
+            onRead: data => {
+                if (data.length === 0) return;
+                requester.stderrOutput += data + "\n";
+            }
+        }
+
         onExited: (exitCode, exitStatus) => {
             const result = requester.currentStrategy.onRequestFinished(requester.message);
             
+            if (exitCode !== 0 && (!requester.message.content || requester.message.content.trim().length === 0)) {
+                const errText = requester.stderrOutput.trim();
+                const displayErr = errText.length > 0 
+                    ? `⚠️ **Request failed (code ${exitCode})**:\n\`\`\`\n${errText}\n\`\`\``
+                    : `⚠️ **Request failed (code ${exitCode})**: Connection lost or request was interrupted.`;
+                requester.message.rawContent = displayErr;
+                requester.message.content = displayErr;
+            }
+
             if (result.finished) {
                 requester.markDone();
             } else if (!requester.message.done) {
@@ -781,6 +912,11 @@ Singleton {
             // Handle error responses
             if (requester.message.content.includes("API key not valid")) {
                 root.addApiKeyAdvice(models[requester.message.model]);
+            }
+
+            if (requester.continuationQueued) {
+                requester.continuationQueued = false;
+                Qt.callLater(requester.makeRequest);
             }
         }
     }
@@ -810,16 +946,16 @@ Singleton {
 	    function createFunctionOutputMessage(name, output, includeOutputInChat = true, functionCall = null) {
 	        return aiMessageComponent.createObject(root, {
 	            "role": "user",
-	            "content": `[[ Output of ${name} ]]${includeOutputInChat ? ("\n\n<think>\n" + output + "\n</think>") : ""}`,
-	            "rawContent": `[[ Output of ${name} ]]${includeOutputInChat ? ("\n\n<think>\n" + output + "\n</think>") : ""}`,
+	            "content": output,
+	            "rawContent": output,
 	            "functionName": name,
 	            "functionCall": functionCall ?? ({ name: name }),
 	            "functionResponse": output,
 	            "thinking": false,
 	            "done": true,
-            // "visibleToUser": false,
-        });
-    }
+	            "visibleToUser": false,
+	        });
+	    }
 
 	    function addFunctionOutputMessage(name, output, functionCall = null) {
 	        const aiMessage = createFunctionOutputMessage(name, output, true, functionCall);
@@ -831,7 +967,14 @@ Singleton {
 	    function rejectCommand(message: AiMessageData) {
 	        if (!message.functionPending) return;
 	        message.functionPending = false; // User decided, no more "thinking"
-	        addFunctionOutputMessage(message.functionName, Translation.tr("Command rejected by user"), message.functionCall)
+	        addFunctionOutputMessage(message.functionName, JSON.stringify({
+	            "ok": false,
+	            "error": {
+	                "code": "USER_REJECTED",
+	                "message": Translation.tr("Command rejected by user")
+	            }
+	        }), message.functionCall)
+	        requester.queueContinuation();
 	    }
 
     function approveCommand(message: AiMessageData) {
@@ -846,63 +989,158 @@ Singleton {
         commandExecutionProc.message = responseMessage;
         commandExecutionProc.baseMessageContent = responseMessage.content;
         commandExecutionProc.shellCommand = message.functionCall.args.command;
+        commandExecutionProc.output = "";
+        commandExecutionProc.timedOut = false;
         commandExecutionProc.running = true; // Start the command execution
     }
 
     Process {
         id: commandExecutionProc
         property string shellCommand: ""
+        property string output: ""
+        property bool timedOut: false
         property AiMessageData message
         property string baseMessageContent: ""
-        command: ["bash", "-c", shellCommand]
+        command: ["timeout", "--signal=TERM", "--kill-after=2s", "30s", "bash", "-c", shellCommand]
+
+        function appendOutput(data) {
+            if (commandExecutionProc.output.length < 131072) {
+                commandExecutionProc.output += data;
+            } else if (!commandExecutionProc.output.endsWith("[... Output truncated ...]\n")) {
+                commandExecutionProc.output += "\n[... Output truncated ...]\n";
+            }
+            const displayOutput = commandExecutionProc.output.length > 16384 
+                ? commandExecutionProc.output.slice(0, 8192) + "\n\n[... Truncated for display ...]\n\n" + commandExecutionProc.output.slice(-8192)
+                : commandExecutionProc.output;
+            const updatedContent = commandExecutionProc.baseMessageContent + `\n\n<think>\n<tt>${displayOutput}</tt>\n</think>`;
+            commandExecutionProc.message.rawContent = updatedContent;
+            commandExecutionProc.message.content = updatedContent;
+        }
+
         stdout: SplitParser {
             onRead: (output) => {
-                commandExecutionProc.message.functionResponse += output + "\n\n";
-                const updatedContent = commandExecutionProc.baseMessageContent + `\n\n<think>\n<tt>${commandExecutionProc.message.functionResponse}</tt>\n</think>`;
-                commandExecutionProc.message.rawContent = updatedContent;
-                commandExecutionProc.message.content = updatedContent;
+                commandExecutionProc.appendOutput(output + "\n");
             }
         }
+        stderr: SplitParser {
+            onRead: (output) => commandExecutionProc.appendOutput(output + "\n")
+        }
         onExited: (exitCode, exitStatus) => {
-            commandExecutionProc.message.functionResponse += `[[ Command exited with code ${exitCode} (${exitStatus}) ]]\n`;
-            requester.makeRequest(); // Continue
+            commandExecutionProc.timedOut = exitCode === 124 || exitCode === 137;
+            let finalOutput = commandExecutionProc.output;
+            if (finalOutput.length > 65536) {
+                finalOutput = finalOutput.slice(0, 32768) + `\n\n[... Tool output truncated: total ${commandExecutionProc.output.length} characters ...]\n\n` + finalOutput.slice(-32768);
+            }
+            const result = {
+                "ok": !commandExecutionProc.timedOut && exitCode === 0,
+                "command": commandExecutionProc.shellCommand,
+                "exitCode": exitCode,
+                "exitStatus": String(exitStatus),
+                "timedOut": commandExecutionProc.timedOut,
+                "output": finalOutput
+            };
+            if (commandExecutionProc.timedOut) {
+                result.error = {
+                    "code": "TIMEOUT",
+                    "message": "Command exceeded the 30 second tool timeout"
+                };
+            } else if (exitCode !== 0) {
+                result.error = {
+                    "code": "NON_ZERO_EXIT",
+                    "message": `Command exited with code ${exitCode}`
+                };
+            }
+            commandExecutionProc.message.functionResponse = JSON.stringify(result);
+            commandExecutionProc.appendOutput(`[[ Command exited with code ${exitCode} (${exitStatus}) ]]\n`);
+            requester.queueContinuation();
         }
     }
 
+    function isDestructiveCommand(cmd) {
+        if (!cmd || typeof cmd !== "string") return false;
+        const lower = cmd.trim().toLowerCase();
+        return /\b(sudo|rm|dd|mkfs|wipefs|fdisk|parted|reboot|shutdown|poweroff|kill|pkill|killall|mv)\b/.test(lower) || />\s*\/dev\//.test(lower);
+    }
+
     function handleFunctionCall(name, args: var, message: AiMessageData) {
-	        if (name === "switch_to_search_mode") {
+	    try {
+	        if (name === "update") {
+	            let note = "";
+	            if (args.plan) note += `**Plan**: ${args.plan}\n`;
+	            if (args.next_step) note += `**Next Step**: ${args.next_step}\n`;
+	            if (note.length > 0) {
+	                message.rawContent += `\n\n<think>\n${note}</think>\n\n`;
+	                message.content += `\n\n<think>\n${note}</think>\n\n`;
+	            }
+	            addFunctionOutputMessage(name, JSON.stringify({ "ok": true, "status": "acknowledged" }), message.functionCall);
+	            requester.queueContinuation();
+	        } else if (name === "switch_to_search_mode") {
 	            const modelId = root.currentModelId;
 	            root.currentTool = "search"
 	            root.postResponseHook = () => { root.currentTool = "functions" }
-	            addFunctionOutputMessage(name, Translation.tr("Switched to search mode. Continue with the user's request."), message.functionCall)
-	            requester.makeRequest();
+	            addFunctionOutputMessage(name, JSON.stringify({ "ok": true, "message": Translation.tr("Switched to search mode. Continue with the user's request.") }), message.functionCall)
+	            requester.queueContinuation();
 	        } else if (name === "get_shell_config") {
 	            const configJson = CF.ObjectUtils.toPlainObject(Config.options)
-	            addFunctionOutputMessage(name, JSON.stringify(configJson), message.functionCall);
-	            requester.makeRequest();
+	            addFunctionOutputMessage(name, JSON.stringify({ "ok": true, "config": configJson }), message.functionCall);
+	            requester.queueContinuation();
 	        } else if (name === "set_shell_config") {
-	            if (!args.key || !args.value) {
-	                addFunctionOutputMessage(name, Translation.tr("Invalid arguments. Must provide `key` and `value`."), message.functionCall);
-	                requester.makeRequest();
+	            if (!args.key || args.value === undefined || args.value === null) {
+	                addFunctionOutputMessage(name, JSON.stringify({ "ok": false, "error": { "code": "INVALID_ARGUMENTS", "message": Translation.tr("Must provide `key` and `value`.") } }), message.functionCall);
+	                requester.queueContinuation();
 	                return;
 	            }
 	            const key = args.key;
 	            const value = args.value;
 	            Config.setNestedValue(key, value);
-	            addFunctionOutputMessage(name, Translation.tr("Set `%1` to `%2`.").arg(key).arg(value), message.functionCall);
-	            requester.makeRequest();
+	            addFunctionOutputMessage(name, JSON.stringify({ "ok": true, "key": key, "value": value }), message.functionCall);
+	            requester.queueContinuation();
 	        } else if (name === "run_shell_command") {
 		            if (!args.command || args.command.length === 0) {
-		                addFunctionOutputMessage(name, Translation.tr("Invalid arguments. Must provide `command`."), message.functionCall);
-		                requester.makeRequest();
+		                addFunctionOutputMessage(name, JSON.stringify({ "ok": false, "error": { "code": "INVALID_ARGUMENTS", "message": Translation.tr("Must provide `command`.") } }), message.functionCall);
+		                requester.queueContinuation();
 		                return;
 		            }
-            const contentToAppend = `\n\n**Command execution request**\n\n\`\`\`command\n${args.command}\n\`\`\``;
+            const contentToAppend = `\n\n\`\`\`command\n${args.command}\n\`\`\`\n`;
             message.rawContent += contentToAppend;
             message.content += contentToAppend;
-            message.functionPending = true; // Use thinking to indicate the command is waiting for approval
+            
+            // Safety guard: Even if bypassPermissions is enabled, NEVER auto-run destructive commands!
+            const dangerous = root.isDestructiveCommand(args.command);
+            if (root.bypassPermissions && !dangerous) {
+                message.functionPending = false;
+                const responseMessage = createFunctionOutputMessage(name, "", false, message.functionCall);
+                const id = idForMessage(responseMessage);
+                root.messageIDs = [...root.messageIDs, id];
+                root.messageByID[id] = responseMessage;
+
+                commandExecutionProc.message = responseMessage;
+                commandExecutionProc.baseMessageContent = responseMessage.content;
+                commandExecutionProc.shellCommand = args.command;
+                commandExecutionProc.output = "";
+                commandExecutionProc.timedOut = false;
+                commandExecutionProc.running = true;
+            } else {
+                message.functionPending = true; // Wait for manual approval
+                if (root.bypassPermissions && dangerous) {
+                    root.addMessage(Translation.tr("⚠️ **Destructive command detected**: Confirmation required even with bypass enabled."), root.interfaceRole);
+                }
+            }
         }
-        else root.addMessage(Translation.tr("Unknown function call: %1").arg(name), "assistant");
+        else {
+            addFunctionOutputMessage(name, JSON.stringify({ "ok": false, "error": { "code": "UNKNOWN_TOOL", "message": Translation.tr("Unknown function call: %1").arg(name) } }), message.functionCall);
+            requester.queueContinuation();
+        }
+	    } catch (e) {
+	        addFunctionOutputMessage(name, JSON.stringify({
+	            "ok": false,
+	            "error": {
+	                "code": "TOOL_EXECUTION_ERROR",
+	                "message": String(e)
+	            }
+	        }), message.functionCall);
+	        requester.queueContinuation();
+	    }
     }
 
     function chatToJson() {
@@ -924,10 +1162,17 @@ Singleton {
 	                "responseContent": message.responseContent,
 	                "functionName": message.functionName,
                 "functionCall": message.functionCall,
+                "thoughtSignature": message.thoughtSignature || message.functionCall?.thoughtSignature || "",
                 "functionResponse": message.functionResponse,
                 "visibleToUser": message.visibleToUser,
             })
         })
+    }
+
+    readonly property bool hasLastSession: savedChats.some(f => f.endsWith("lastSession.json"))
+
+    function resumeLastSession() {
+        return root.loadChat("lastSession");
     }
 
     FileView {
@@ -935,6 +1180,13 @@ Singleton {
         property string chatName: ""
         path: chatName.length > 0 ? `${Directories.aiChats}/${chatName}.json` : ""
         blockLoading: true // Prevent race conditions
+    }
+
+    FileView {
+        id: chatExportFile
+        property string exportPath: ""
+        path: exportPath
+        blockLoading: true
     }
 
     /**
@@ -957,15 +1209,27 @@ Singleton {
             chatSaveFile.chatName = chatName.trim()
             chatSaveFile.reload()
             const saveContent = chatSaveFile.text()
-            // console.log(saveContent)
+            if (!saveContent || saveContent.trim().length === 0) {
+                root.addMessage(Translation.tr("No saved chat found named '%1'").arg(chatName), root.interfaceRole);
+                return false;
+            }
             const saveData = JSON.parse(saveContent)
+            if (!Array.isArray(saveData) || saveData.length === 0) {
+                root.addMessage(Translation.tr("Saved chat '%1' is empty").arg(chatName), root.interfaceRole);
+                return false;
+            }
+            const validMessages = saveData.filter(message => {
+                if (message.role === "assistant" && !message.functionName && !message.functionCall && (!message.content || message.content.trim().length === 0) && (!message.rawContent || message.rawContent.trim().length === 0)) {
+                    return false;
+                }
+                return true;
+            });
             root.clearMessages()
-            root.messageIDs = saveData.map((_, i) => {
+            root.messageIDs = validMessages.map((_, i) => {
                 return i
             })
-            // console.log(JSON.stringify(messageIDs))
-            for (let i = 0; i < saveData.length; i++) {
-                const message = saveData[i];
+            for (let i = 0; i < validMessages.length; i++) {
+                const message = validMessages[i];
                 root.messageByID[i] = root.aiMessageComponent.createObject(root, {
                     "role": message.role,
                     "rawContent": message.rawContent,
@@ -976,21 +1240,66 @@ Singleton {
                     "model": message.model,
                     "thinking": message.thinking,
                     "done": message.done,
-	                    "annotations": message.annotations,
-	                    "annotationSources": message.annotationSources,
-	                    "providerParts": message.providerParts,
-	                    "reasoningContent": message.reasoningContent,
-	                    "responseContent": message.responseContent,
-	                    "functionName": message.functionName,
+                    "annotations": message.annotations,
+                    "annotationSources": message.annotationSources,
+                    "providerParts": message.providerParts,
+                    "reasoningContent": message.reasoningContent,
+                    "responseContent": message.responseContent,
+                    "functionName": message.functionName,
                     "functionCall": message.functionCall,
+                    "thoughtSignature": message.thoughtSignature || message.functionCall?.thoughtSignature || "",
                     "functionResponse": message.functionResponse,
                     "visibleToUser": message.visibleToUser,
                 });
             }
+            root.addMessage(Translation.tr("Loaded chat: **%1** (%2 messages)").arg(chatName).arg(validMessages.length), root.interfaceRole);
+            return true;
         } catch (e) {
             console.log("[AI] Could not load chat: ", e);
+            root.addMessage(Translation.tr("Failed to load chat '%1': %2").arg(chatName).arg(String(e)), root.interfaceRole);
+            return false;
         } finally {
             getSavedChats.running = true;
         }
+    }
+
+    /**
+     * Exports the active chat conversation to a clean Markdown file.
+     * @param fileName Optional custom filename (defaults to ai-chat-<timestamp>.md)
+     */
+    function exportChatToMarkdown(fileName) {
+        if (root.messageIDs.length === 0) {
+            root.addMessage(Translation.tr("No active chat to export"), root.interfaceRole);
+            return;
+        }
+        let cleanName = (fileName ?? "").trim();
+        if (cleanName.length === 0) {
+            const dateStr = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+            cleanName = `ai-chat-${dateStr}.md`;
+        } else if (!cleanName.endsWith(".md")) {
+            cleanName += ".md";
+        }
+
+        const exportDir = `${Directories.state}/user/ai/exports`;
+        Quickshell.execDetached(["mkdir", "-p", exportDir]);
+        const fullPath = `${exportDir}/${cleanName}`;
+
+        let md = `# AI Chat Export\n\n- **Date**: ${new Date().toLocaleString()}\n- **Model**: ${root.getModel()?.name ?? "AI"}\n\n---\n\n`;
+        for (let i = 0; i < root.messageIDs.length; i++) {
+            const id = root.messageIDs[i];
+            const msg = root.messageByID[id];
+            if (!msg || msg.visibleToUser === false) continue;
+            if (msg.role === "user") {
+                md += `### 👤 User\n\n${msg.rawContent || msg.content}\n\n---\n\n`;
+            } else if (msg.role === "assistant") {
+                md += `### 🤖 Assistant (${msg.model || "AI"})\n\n${msg.rawContent || msg.content}\n\n---\n\n`;
+            } else if (msg.role === root.interfaceRole) {
+                md += `> ℹ️ *System: ${msg.rawContent || msg.content}*\n\n---\n\n`;
+            }
+        }
+
+        chatExportFile.exportPath = fullPath;
+        chatExportFile.setText(md);
+        root.addMessage(Translation.tr("Chat exported to:\n`%1`").arg(fullPath), root.interfaceRole);
     }
 }

@@ -16,13 +16,17 @@ Singleton {
     signal gammaChangeAttempt()
 
     readonly property real gammaLowerLimit: 25
+    readonly property string controlPath: `${Quickshell.env("HOME")}/.local/bin/hyprsunsetctl`
 
     property string from: Config.options?.light?.night?.from ?? "19:00" 
     property string to: Config.options?.light?.night?.to ?? "06:30"
     property bool automatic: Config.options?.light?.night?.automatic && (Config?.ready ?? true)
     property int colorTemperature: Config.options?.light?.night?.colorTemperature ?? 5000
-    property int defaultColorTemperature: 6000
     property int gamma: 100
+    property int pendingGamma: 100
+    property int gammaInFlight: 100
+    property int pendingColorTemperature: colorTemperature
+    property int colorTemperatureInFlight: colorTemperature
     property bool shouldBeOn
     property bool firstEvaluation: true
     property bool temperatureActive: false
@@ -84,7 +88,7 @@ Singleton {
     }
 
     function startHyprsunset() {
-        Quickshell.execDetached(["bash", "-c", `pidof hyprsunset || hyprsunset`]);
+        Quickshell.execDetached([root.controlPath, "ensure"]);
     }
 
     function load() {
@@ -102,32 +106,95 @@ Singleton {
         }
     }
 
-    readonly property string stateFile: "/tmp/hyprsunset_active"
-
     function enableTemperature() {
         root.temperatureActive = true;
         // console.log("[Hyprsunset] Enabling");
-        root.startHyprsunset();
-        Quickshell.execDetached(["bash", "-c", `hyprctl hyprsunset temperature ${root.colorTemperature}`]);
-        Quickshell.execDetached(["bash", "-c", `echo ${root.colorTemperature} > ${root.stateFile}`]);
+        Quickshell.execDetached([root.controlPath, "temperature", `${root.colorTemperature}`]);
         reconcileTimer.restart();
     }
 
     function disableTemperature() {
         root.temperatureActive = false;
         // console.log("[Hyprsunset] Disabling");
-        Quickshell.execDetached(["bash", "-c", `hyprctl hyprsunset temperature ${root.defaultColorTemperature}`]);
-        Quickshell.execDetached(["bash", "-c", `echo ${root.defaultColorTemperature} > ${root.stateFile}`]);
+        // A temperature such as 6000 K is still a non-neutral color matrix.
+        // Identity is the actual Hyprland/default color state; gamma remains
+        // independently applied.
+        Quickshell.execDetached([root.controlPath, "identity", "true"]);
         reconcileTimer.restart();
     }
 
     function setGamma(gamma) {
-        root.gamma = Math.max(root.gammaLowerLimit, Math.min(100, gamma));
+        root.gamma = Math.round(Math.max(root.gammaLowerLimit, Math.min(100, gamma)));
+        root.pendingGamma = root.gamma;
 
         root.gammaChangeAttempt();
 
         root.startHyprsunset();
-        Quickshell.execDetached(["bash", "-c", `hyprctl hyprsunset gamma ${root.gamma}`]);
+        gammaApplyTimer.restart();
+    }
+
+    // Slider drags can emit many values in a few milliseconds. Launching each
+    // hyprctl command detached lets an older value finish after the final one,
+    // leaving the UI at 100 while hyprsunset is still dimmed. Keep only the
+    // newest request, apply one command at a time, then read the real state back.
+    function applyPendingGamma() {
+        if (gammaSetProc.running) {
+            gammaApplyTimer.restart();
+            return;
+        }
+
+        root.gammaInFlight = root.pendingGamma;
+        gammaSetProc.command = [root.controlPath, "gamma", `${root.gammaInFlight}`];
+        gammaSetProc.running = true;
+    }
+
+    function fetchGammaState() {
+        if (gammaSetProc.running || gammaApplyTimer.running)
+            return;
+        gammaFetchProc.running = false;
+        gammaFetchProc.running = true;
+    }
+
+    Timer {
+        id: gammaApplyTimer
+        // CTM updates damage every output.  Wait until the drag has settled
+        // instead of committing a new full-display matrix every few ms.
+        interval: 180
+        repeat: false
+        onTriggered: root.applyPendingGamma()
+    }
+
+    Timer {
+        id: gammaReconcileTimer
+        interval: 150
+        repeat: false
+        onTriggered: root.fetchGammaState()
+    }
+
+    Process {
+        id: gammaSetProc
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0 || root.pendingGamma !== root.gammaInFlight)
+                gammaApplyTimer.restart();
+            else
+                gammaReconcileTimer.restart();
+        }
+    }
+
+    Process {
+        id: gammaFetchProc
+        running: true
+        command: [root.controlPath, "gamma"]
+        stdout: StdioCollector {
+            id: gammaCollector
+            onStreamFinished: {
+                const actualGamma = parseInt(gammaCollector.text.trim());
+                if (!isNaN(actualGamma) && !gammaSetProc.running && !gammaApplyTimer.running) {
+                    root.gamma = actualGamma;
+                    root.pendingGamma = actualGamma;
+                }
+            }
+        }
     }
 
     function fetchState() {
@@ -147,20 +214,13 @@ Singleton {
     Process {
         id: fetchProc
         running: true
-        // Query hyprsunset directly instead of reading the tmpfs state file:
-        // /tmp is RAM-backed here and is wiped on every reboot, which produced
-        // a phantom "on" state. hyprsunset reports the default temperature
-        // (defaultColorTemperature, 6000) when no warming filter is applied.
-        command: ["bash", "-c", `hyprctl hyprsunset temperature 2>/dev/null || echo ${root.defaultColorTemperature}`]
+        // Identity is the only unambiguous neutral state.
+        command: [root.controlPath, "identity", "get"]
         stdout: StdioCollector {
             id: stateCollector
             onStreamFinished: {
                 const output = stateCollector.text.trim();
-                const temp = parseInt(output);
-                if (isNaN(temp) || temp <= 0 || output.startsWith("Couldn't"))
-                    root.temperatureActive = false;
-                else
-                    root.temperatureActive = (temp != root.defaultColorTemperature); // 6000 == off
+                root.temperatureActive = (output === "false");
                 // console.log("[Hyprsunset] Fetched state:", output, "->", root.temperatureActive);
             }
         }
@@ -186,8 +246,56 @@ Singleton {
         target: Config.options.light.night
         function onColorTemperatureChanged() {
             if (!root.temperatureActive) return;
-            Hyprland.dispatch(`hyprctl hyprsunset temperature ${Config.options.light.night.colorTemperature}`);
-            Quickshell.execDetached(["hyprctl", "hyprsunset", "temperature", `${Config.options.light.night.colorTemperature}`]);
+            root.pendingColorTemperature = Config.options.light.night.colorTemperature;
+            temperatureApplyTimer.restart();
+        }
+    }
+
+    Timer {
+        id: temperatureApplyTimer
+        interval: 180
+        repeat: false
+        onTriggered: {
+            if (temperatureSetProc.running) {
+                restart();
+                return;
+            }
+            root.colorTemperatureInFlight = root.pendingColorTemperature;
+            temperatureSetProc.command = [root.controlPath, "temperature", `${root.colorTemperatureInFlight}`];
+            temperatureSetProc.running = true;
+        }
+    }
+
+    Process {
+        id: temperatureSetProc
+        onExited: {
+            if (root.pendingColorTemperature !== root.colorTemperatureInFlight)
+                temperatureApplyTimer.restart();
+            else
+                reconcileTimer.restart();
+        }
+    }
+
+    // hyprsunset v0.4.0 applies one global CTM to every wl_output.  Reconcile
+    // after hotplug only once the DRM connector has had time to settle.
+    Connections {
+        target: Hyprland
+        function onRawEvent(event) {
+            if (["monitoradded", "monitoraddedv2"].includes(event.name))
+                monitorReconcileTimer.restart();
+        }
+    }
+
+    Timer {
+        id: monitorReconcileTimer
+        interval: 2000
+        repeat: false
+        onTriggered: {
+            if (root.temperatureActive)
+                Quickshell.execDetached([root.controlPath, "temperature", `${root.colorTemperature}`]);
+            else
+                Quickshell.execDetached([root.controlPath, "identity", "true"]);
+            root.setGamma(root.gamma);
         }
     }
 }

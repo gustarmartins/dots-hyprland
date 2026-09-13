@@ -26,11 +26,15 @@ Scope {
         }
         LazyLoader {
             id: barLoader
-            active: GlobalStates.barOpen && !GlobalStates.screenLocked
             required property ShellScreen modelData
+            property bool fullscreen: HyprlandData.monitorHasFullscreen(modelData?.name ?? "")
+            property bool superRevealEnabled: Config?.options?.bar?.autoHide?.showWhenPressingSuper?.enable ?? true
+            active: GlobalStates.barOpen && !GlobalStates.screenLocked
+                && (!fullscreen || (GlobalStates.superDown && superRevealEnabled))
             component: PanelWindow { // Bar window
                 id: barRoot
                 screen: barLoader.modelData
+                visible: !barLoader.fullscreen || superShow
 
                 property var brightnessMonitor: Brightness.getMonitorForScreen(barLoader.modelData)
                 
@@ -76,6 +80,8 @@ Scope {
 
                 // Include in focus grab
                 Component.onCompleted: {
+                    if (barLoader.fullscreen && GlobalStates.superDown && barLoader.superRevealEnabled)
+                        showBarTimer.restart();
                     GlobalFocusGrab.addPersistent(barRoot);
                 }
                 Component.onDestruction: {

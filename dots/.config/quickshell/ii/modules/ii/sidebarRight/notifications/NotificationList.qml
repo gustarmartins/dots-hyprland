@@ -8,6 +8,7 @@ import QtQuick.Layouts
 
 Item {
     id: root
+    signal openQuickSettings()
 
     NotificationListView { // Scrollable window
         id: listview
@@ -47,6 +48,14 @@ Item {
             bottom: parent.bottom
         }
 
+        NotificationStatusButton {
+            Layout.fillWidth: false
+            buttonIcon: "apps"
+            onClicked: root.openQuickSettings()
+            StyledToolTip {
+                text: Translation.tr("Quick settings")
+            }
+        }
         NotificationStatusButton {
             Layout.fillWidth: false
             buttonIcon: "notifications_paused"

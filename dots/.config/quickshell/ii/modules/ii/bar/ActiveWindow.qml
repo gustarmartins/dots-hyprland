@@ -9,6 +9,7 @@ import Quickshell.Hyprland
 
 Item {
     id: root
+    clip: true
     readonly property HyprlandMonitor monitor: Hyprland.monitorFor(root.QsWindow.window?.screen)
     readonly property Toplevel activeWindow: ToplevelManager.activeToplevel
 

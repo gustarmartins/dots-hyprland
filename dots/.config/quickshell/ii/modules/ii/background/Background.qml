@@ -27,11 +27,8 @@ Variants {
 
         required property var modelData
 
-        // Hide when fullscreen — MONITOR-LOCAL (not global focus). See ScreenCorners.qml:
-        // gating on workspace.active misses a fullscreen app on an unfocused monitor,
-        // so the wallpaper keeps compositing under the game on that output.
-        property bool monitorFullscreen: monitor?.activeWorkspace?.hasFullscreen ?? false
-        visible: GlobalStates.screenLocked || !monitorFullscreen || !Config?.options.background.hideWhenFullscreen
+        property bool monitorFullscreen: HyprlandData.monitorHasFullscreen(modelData?.name ?? "")
+        visible: GlobalStates.screenLocked || !monitorFullscreen
 
         // Workspaces
         property HyprlandMonitor monitor: Hyprland.monitorFor(modelData)

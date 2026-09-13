@@ -26,14 +26,58 @@ StyledPopup {
             spacing: 8
 
             StyledPopupHeaderRow {
-                icon: "monitoring"
+                icon: "developer_board"
                 label: "GPU"
             }
             Column {
                 spacing: 4
                 StyledPopupValueRow {
-                    icon: "video_settings"
-                    label: Translation.tr("VRAM:")
+                    icon: "bolt"
+                    label: Translation.tr("Load:")
+                    value: `${Math.round(ResourceUsage.gpuUsage * 100)}%`
+                }
+                StyledPopupValueRow {
+                    icon: "database"
+                    label: Translation.tr("Mem ctrl:")
+                    value: `${Math.round(ResourceUsage.gpuMemBusy * 100)}%`
+                }
+                StyledPopupValueRow {
+                    icon: "speed"
+                    label: Translation.tr("Clock:")
+                    value: `${Math.round(ResourceUsage.gpuClock)} / ${Math.round(ResourceUsage.gpuMemClock)} MHz`
+                }
+                StyledPopupValueRow {
+                    icon: "power"
+                    label: Translation.tr("Power:")
+                    value: `${ResourceUsage.gpuPower.toFixed(1)} / ${Math.round(ResourceUsage.gpuPowerCap)} W`
+                }
+                StyledPopupValueRow {
+                    icon: "thermostat"
+                    label: Translation.tr("Temp:")
+                    value: `${Math.round(ResourceUsage.gpuTempEdge)}° edge / ${Math.round(ResourceUsage.gpuTempHotspot)}° hot`
+                }
+                StyledPopupValueRow {
+                    visible: ResourceUsage.gpuFan > 0
+                    icon: "mode_fan"
+                    label: Translation.tr("Fan:")
+                    value: `${Math.round(ResourceUsage.gpuFan)} RPM`
+                }
+            }
+        }
+
+        Column {
+            anchors.top: parent.top
+            spacing: 8
+
+            StyledPopupHeaderRow {
+                icon: "video_settings"
+                label: "VRAM"
+            }
+            Column {
+                spacing: 4
+                StyledPopupValueRow {
+                    icon: "clock_loader_60"
+                    label: Translation.tr("Used:")
                     value: root.formatBytes(ResourceUsage.vramUsed)
                 }
                 StyledPopupValueRow {

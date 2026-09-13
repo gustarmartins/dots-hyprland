@@ -28,6 +28,7 @@ Item {
     property bool showNightLightDialog: false
     property bool showWifiDialog: false
     property bool editMode: false
+    property bool showingNotifications: false
 
     Connections {
         target: GlobalStates
@@ -37,6 +38,8 @@ Item {
                 root.showBluetoothDialog = false;
                 root.showAudioOutputDialog = false;
                 root.showAudioInputDialog = false;
+            } else {
+                root.showingNotifications = false;
             }
         }
     }
@@ -97,9 +100,11 @@ Item {
             }
 
             CenterWidgetGroup {
+                visible: root.showingNotifications
                 Layout.alignment: Qt.AlignHCenter
                 Layout.fillHeight: true
                 Layout.fillWidth: true
+                onOpenQuickSettings: root.showingNotifications = false
             }
 
             BottomWidgetGroup {
@@ -185,7 +190,9 @@ Item {
         required property string styleName
         Layout.alignment: item?.Layout.alignment ?? Qt.AlignHCenter
         Layout.fillWidth: item?.Layout.fillWidth ?? false
-        visible: active
+        Layout.fillHeight: item?.Layout.fillHeight ?? false
+        Layout.minimumHeight: item?.Layout.minimumHeight ?? 0
+        visible: active && (styleName !== "android" || !root.showingNotifications)
         active: Config.options.sidebar.quickToggles.style === styleName
         Connections {
             target: quickPanelImplLoader.item
@@ -203,6 +210,9 @@ Item {
             }
             function onOpenWifiDialog() {
                 root.showWifiDialog = true;
+            }
+            function onOpenNotifications() {
+                root.showingNotifications = true;
             }
         }
     }
@@ -259,7 +269,10 @@ Item {
                 toggled: root.editMode
                 visible: Config.options.sidebar.quickToggles.style === "android"
                 buttonIcon: "edit"
-                onClicked: root.editMode = !root.editMode
+                onClicked: {
+                    root.showingNotifications = false;
+                    root.editMode = !root.editMode;
+                }
                 StyledToolTip {
                     text: Translation.tr("Edit quick toggles") + (root.editMode ? Translation.tr("\nLMB to enable/disable\nRMB to toggle size\nScroll to swap position") : "")
                 }

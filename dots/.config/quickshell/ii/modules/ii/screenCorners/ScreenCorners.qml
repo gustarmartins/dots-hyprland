@@ -149,14 +149,7 @@ Scope {
             required property var modelData
             property HyprlandMonitor monitor: Hyprland.monitorFor(modelData)
 
-            // Hide when fullscreen — MONITOR-LOCAL detection.
-            // Do NOT gate on workspace.active: that is GLOBAL focus (only one
-            // workspace is .active across all monitors). A fullscreen app on an
-            // unfocused monitor (e.g. osu!lazer on the AOC while you click on DP-1)
-            // would then be missed, leaving these Overlay-layer corner surfaces up —
-            // which both draws rounded corners over the game AND blocks Hyprland's
-            // direct scanout on that output. Check THIS monitor's own activeWorkspace.
-            property bool fullscreen: monitor?.activeWorkspace?.hasFullscreen ?? false
+            property bool fullscreen: HyprlandData.monitorHasFullscreen(modelData?.name ?? "")
 
             CornerPanelWindow {
                 screen: modelData

@@ -1,0 +1,8 @@
+# Kitty layout with all tmux sessions
+layout grid
+launch --title "all-in-one" tmux attach-session -t "all-in-one"
+launch --title "codex-safe" tmux attach-session -t "codex-safe"
+launch --title "gus-100-126-176-104" tmux attach-session -t "gus-100-126-176-104"
+launch --title "gus-100-126-176-104-3" tmux attach-session -t "gus-100-126-176-104-3"
+launch --title "gus-100-126-176-104-4" tmux attach-session -t "gus-100-126-176-104-4"
+launch --title "gus-100-126-176-104-old" tmux attach-session -t "gus-100-126-176-104-old"

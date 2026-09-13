@@ -31,6 +31,8 @@ GroupButton {
     toggled: toggleModel?.toggled ?? false
     property var mainAction: toggleModel?.mainAction ?? null
     altAction: toggleModel?.hasMenu ? (() => root.openMenu()) : (toggleModel?.altAction ?? null)
+    property bool altActionOnRightClick: toggleModel?.altActionOnRightClick ?? false
+    readonly property bool splitAltAction: altAction && expandedSize && !altActionOnRightClick
 
     // Edit mode state
     property bool editMode: false
@@ -60,16 +62,16 @@ GroupButton {
     verticalPadding: padding
 
     colBackground: Appearance.colors.colLayer2
-    colBackgroundToggled: (altAction && expandedSize) ? Appearance.colors.colLayer2 : Appearance.colors.colPrimary
-    colBackgroundToggledHover: (altAction && expandedSize) ? Appearance.colors.colLayer2Hover : Appearance.colors.colPrimaryHover
-    colBackgroundToggledActive: (altAction && expandedSize) ? Appearance.colors.colLayer2Active : Appearance.colors.colPrimaryActive
+    colBackgroundToggled: splitAltAction ? Appearance.colors.colLayer2 : Appearance.colors.colPrimary
+    colBackgroundToggledHover: splitAltAction ? Appearance.colors.colLayer2Hover : Appearance.colors.colPrimaryHover
+    colBackgroundToggledActive: splitAltAction ? Appearance.colors.colLayer2Active : Appearance.colors.colPrimaryActive
     buttonRadius: toggled ? Appearance.rounding.large : height / 2
     buttonRadiusPressed: Appearance.rounding.normal
-    property color colText: (toggled && !(altAction && expandedSize) && enabled) ? Appearance.colors.colOnPrimary : ColorUtils.transparentize(Appearance.colors.colOnLayer2, enabled ? 0 : 0.7)
+    property color colText: (toggled && !splitAltAction && enabled) ? Appearance.colors.colOnPrimary : ColorUtils.transparentize(Appearance.colors.colOnLayer2, enabled ? 0 : 0.7)
     property color colIcon: expandedSize ? ((root.toggled) ? Appearance.colors.colOnPrimary : Appearance.colors.colOnLayer3) : colText
 
     onClicked: {
-        if (root.expandedSize && root.altAction) root.altAction();
+        if (!root.altActionOnRightClick && root.expandedSize && root.altAction) root.altAction();
         else root.mainAction();
     }
 
@@ -105,7 +107,7 @@ GroupButton {
                 radius: root.radius - root.verticalPadding
                 color: {
                     const baseColor = root.toggled ? Appearance.colors.colPrimary : Appearance.colors.colLayer3
-                    const transparentizeAmount = (root.altAction && root.expandedSize) ? 0 : 1
+                    const transparentizeAmount = root.splitAltAction ? 0 : 1
                     return ColorUtils.transparentize(baseColor, transparentizeAmount)
                 }
 
@@ -127,7 +129,7 @@ GroupButton {
                 // State layer
                 Loader {
                     anchors.fill: parent
-                    active: (root.expandedSize && root.altAction)
+                    active: root.splitAltAction
                     sourceComponent: Rectangle {
                         radius: iconBackground.radius
                         color: ColorUtils.transparentize(root.colIcon, iconMouseArea.containsPress ? 0.88 : iconMouseArea.containsMouse ? 0.95 : 1)
@@ -175,6 +177,19 @@ GroupButton {
                     text: root.statusText
                 }
             }
+        }
+    }
+
+    // Literal right-click actions are reserved for the memory-management
+    // tiles that opt in. Left-click continues through GroupButton/mainAction.
+    MouseArea {
+        anchors.fill: parent
+        visible: root.altActionOnRightClick && !root.editMode
+        enabled: visible
+        acceptedButtons: Qt.RightButton
+        cursorShape: Qt.PointingHandCursor
+        onClicked: {
+            if (root.altAction) root.altAction();
         }
     }
 

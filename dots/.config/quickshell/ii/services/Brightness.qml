@@ -28,12 +28,6 @@ Singleton {
     }
 
     function increaseBrightness(): void {
-        // if gamma is not yet 100, first increase gamma
-        if (Hyprsunset.gamma !== 100) {
-            Hyprsunset.setGamma(Hyprsunset.gamma + 5);
-            return;
-        }
-
         const focusedName = Hyprland.focusedMonitor.name;
         const monitor = monitors.find(m => focusedName === m.screen.name);
         if (monitor)
@@ -45,10 +39,9 @@ Singleton {
         const monitor = monitors.find(m => focusedName === m.screen.name);
         if (monitor && monitor.brightness > 0) 
             monitor.setBrightness(monitor.brightness - 0.05);
-        // if brightness is 0, then decrease gamma
-        else {
-            Hyprsunset.setGamma(Hyprsunset.gamma - 5);
-        }
+        // Do not use a global CTM/gamma transform as a fake backlight.  It
+        // affects every output, survives physical hotplug in confusing ways,
+        // and makes slider drags trigger full-display color commits.
     }
 
     reloadableId: "brightness"

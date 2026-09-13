@@ -147,9 +147,9 @@ Button {
                             buttonText: Translation.tr("Open file link")
                             onClicked: {
                                 root.showActions = false
-                                Quickshell.execDetached(["hyprctl","keyword","cursor:no_warps","true"])
+                                Quickshell.execDetached(["hyprctl", "eval", "hl.config({ cursor = { no_warps = true } })"])
                                 Qt.openUrlExternally(root.imageData.file_url)
-                                Quickshell.execDetached(["hyprctl","keyword","cursor:no_warps","false"])
+                                Quickshell.execDetached(["hyprctl", "eval", "hl.config({ cursor = { no_warps = false } })"])
                             }
                         }
                         MenuButton {
@@ -160,9 +160,9 @@ Button {
                             enabled: root.imageData.source && root.imageData.source.length > 0
                             onClicked: {
                                 root.showActions = false
-                                Quickshell.execDetached(["hyprctl","keyword","cursor:no_warps","true"])
+                                Quickshell.execDetached(["hyprctl", "eval", "hl.config({ cursor = { no_warps = true } })"])
                                 Qt.openUrlExternally(root.imageData.source)
-                                Quickshell.execDetached(["hyprctl","keyword","cursor:no_warps","false"])
+                                Quickshell.execDetached(["hyprctl", "eval", "hl.config({ cursor = { no_warps = false } })"])
                             }
                         }
                         MenuButton {

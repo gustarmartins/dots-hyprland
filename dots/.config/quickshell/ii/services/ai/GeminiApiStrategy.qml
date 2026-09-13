@@ -8,74 +8,135 @@ ApiStrategy {
     readonly property string fileUriSubstitutionString: "{{ fileUriVarName }}"
     readonly property string fileMimeTypeSubstitutionString: "{{ fileMimeTypeVarName }}"
     property string buffer: ""
+    property bool isReasoning: false
     
     function buildEndpoint(model: AiModel): string {
         const separator = model.endpoint.includes("?") ? "&" : "?";
-        const result = model.endpoint + `${separator}key=\$\{${root.apiKeyEnvVarName}\}`
-        // console.log("[AI] Endpoint: " + result);
+        const result = model.endpoint + `${separator}key=\$\{${root.apiKeyEnvVarName}\}`;
         return result;
     }
 
     function buildRequestData(model: AiModel, messages, systemPrompt: string, temperature: real, tools: list<var>, filePath: string) {
-        let contents = messages.map(message => {
-            // console.log("[AI] Building request data for message:", JSON.stringify(message, null, 2));
+        let contents = [];
+
+        for (let i = 0; i < messages.length; i++) {
+            const message = messages[i];
             const geminiApiRoleName = (message.role === "assistant") ? "model" : message.role;
-            const usingSearch = tools[0]?.google_search !== undefined
-            if (message.role === "assistant" && message.providerParts && message.providerParts.length > 0) {
-                return {
-                    "role": geminiApiRoleName,
-                    "parts": message.providerParts,
-                }
-            }
-            if (!usingSearch && message.functionCall != undefined && message.functionName.length > 0) {
-                const functionCall = (typeof message.functionCall === "object")
-                    ? message.functionCall
-                    : { "name": message.functionName };
-                return {
-                    "role": geminiApiRoleName,
-                    "parts": [{
-                        functionCall: functionCall
-                    }]
-                }
-            }
-            if (!usingSearch && message.functionResponse != undefined && message.functionName.length > 0) {
+
+            // 1. Tool result message (user role responding to a previous functionCall)
+            if (message.role === "user" && message.functionName && message.functionName.length > 0) {
+                let responseContent = (message.functionResponse !== undefined && message.functionResponse !== null && message.functionResponse.length > 0)
+                    ? message.functionResponse
+                    : (message.content || message.rawContent || "");
+                let responseObj = { "content": responseContent };
                 const functionResponse = {
                     "name": message.functionName,
-                    "response": { "content": message.functionResponse }
+                    "response": responseObj
                 };
                 if (message.functionCall?.id) functionResponse.id = message.functionCall.id;
-                return {
-                    "role": geminiApiRoleName,
-                    "parts": [{ 
-                        functionResponse: functionResponse
-                    }]
-                }
+                contents.push({
+                    "role": "user",
+                    "parts": [{ functionResponse: functionResponse }]
+                });
+                continue;
             }
-            return {
-                "role": geminiApiRoleName,
-                "parts": [
-                    { text: message.rawContent },
-                    ...(message.fileUri && message.fileUri.length > 0 ? [{ 
-                        "file_data": {
-                            "mime_type": message.fileMimeType,
-                            "file_uri": message.fileUri
-                        }
-                    }] : [])
-                ]
+
+            // 2. Assistant tool call message
+            if (message.role === "assistant" && message.functionCall && message.functionName && message.functionName.length > 0) {
+                const fc = (typeof message.functionCall === "object")
+                    ? message.functionCall
+                    : { "name": message.functionName, "args": {} };
+                let callPart = {
+                    "functionCall": {
+                        "name": fc.name,
+                        "args": fc.args ?? {}
+                    }
+                };
+                if (fc.id) callPart.functionCall.id = fc.id;
+                const sig = fc.thoughtSignature || fc.thought_signature || message.thoughtSignature;
+                if (sig && sig.length > 0) callPart.thoughtSignature = sig;
+
+                contents.push({
+                    "role": "model",
+                    "parts": [callPart]
+                });
+                continue;
             }
-        })
-        if (filePath && filePath.length > 0) {
-            const trimmedFilePath = CF.FileUtils.trimFileProtocol(filePath);
-            // Add file_data part to the last message's parts array
-            contents[contents.length - 1].parts.unshift({
-                file_data: {
-                    mime_type: fileMimeTypeSubstitutionString,
-                    file_uri: fileUriSubstitutionString
+
+            // 3. Regular assistant text message
+            if (message.role === "assistant") {
+                let cleanText = (message.responseContent && message.responseContent.length > 0)
+                    ? message.responseContent
+                    : (message.rawContent || message.content || "");
+                // Strip <think> blocks from conversation history so reasoning doesn't pollute subsequent turns
+                cleanText = cleanText.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+                if (cleanText.length > 0) {
+                    contents.push({
+                        "role": "model",
+                        "parts": [{ text: cleanText }]
+                    });
                 }
-            });
+                continue;
+            }
+
+            // 4. User message
+            let userText = message.rawContent || message.content || "";
+            let userParts = [];
+            if (userText.length > 0) {
+                userParts.push({ text: userText });
+            }
+            if (message.fileUri && message.fileUri.length > 0) {
+                userParts.push({
+                    "file_data": {
+                        "mime_type": message.fileMimeType,
+                        "file_uri": message.fileUri
+                    }
+                });
+            }
+            if (userParts.length > 0) {
+                contents.push({
+                    "role": "user",
+                    "parts": userParts
+                });
+            }
         }
+
+        // Attached file for the current pending prompt
+        if (filePath && filePath.length > 0) {
+            if (contents.length > 0) {
+                contents[contents.length - 1].parts.unshift({
+                    file_data: {
+                        mime_type: fileMimeTypeSubstitutionString,
+                        file_uri: fileUriSubstitutionString
+                    }
+                });
+            }
+        }
+
+        // Merge consecutive turns with the same role to strictly adhere to Gemini alternating turn requirements
+        let mergedContents = [];
+        for (let i = 0; i < contents.length; i++) {
+            const turn = contents[i];
+            if (mergedContents.length > 0 && mergedContents[mergedContents.length - 1].role === turn.role) {
+                mergedContents[mergedContents.length - 1].parts = [
+                    ...mergedContents[mergedContents.length - 1].parts,
+                    ...turn.parts
+                ];
+            } else {
+                mergedContents.push(turn);
+            }
+        }
+
+        // Clean leading and trailing model turns (Gemini requires first turn to be 'user' and last turn to be 'user')
+        while (mergedContents.length > 0 && mergedContents[0].role === "model") {
+            mergedContents.shift();
+        }
+        while (mergedContents.length > 0 && mergedContents[mergedContents.length - 1].role === "model") {
+            mergedContents.pop();
+        }
+
         let baseData = {
-            "contents": contents,
+            "contents": mergedContents,
             "tools": tools,
             "system_instruction": {
                 "parts": [{ text: systemPrompt }]
@@ -94,7 +155,7 @@ ApiStrategy {
             };
         }
         if (Object.keys(baseData.generationConfig).length === 0) delete baseData.generationConfig;
-        // print("Gemini API call payload:", JSON.stringify(baseData, null, 2));
+
         const result = model.extraParams ? Object.assign({}, baseData, model.extraParams) : baseData;
         if (model.extraParams?.generationConfig && baseData.generationConfig) {
             result.generationConfig = Object.assign({}, baseData.generationConfig, model.extraParams.generationConfig);
@@ -116,115 +177,152 @@ ApiStrategy {
 
     function parseResponseLine(line, message) {
         const cleanLine = line.trim();
+        if (!cleanLine || cleanLine.startsWith(":")) return {};
+
         if (cleanLine.startsWith("data:")) {
             const eventData = cleanLine.slice(5).trim();
             if (eventData.length === 0 || eventData === "[DONE]") return {};
             buffer = eventData;
             return parseBuffer(message);
         }
-        if (line.startsWith("[")) {
-            buffer += line.slice(1).trim();
-        } else if (line === "]") {
-            buffer += line.slice(0, -1).trim();
+
+        if (cleanLine.startsWith("[")) {
+            buffer += cleanLine.slice(1).trim();
+        } else if (cleanLine === "]") {
+            buffer += cleanLine.slice(0, -1).trim();
             return parseBuffer(message);
-        } else if (line.startsWith(",")) {
+        } else if (cleanLine.startsWith(",")) {
             return parseBuffer(message);
         } else {
-            buffer += line.trim();
+            buffer += cleanLine;
+            // Handle standalone JSON error object starting with { and ending with }
+            if (buffer.startsWith("{") && buffer.endsWith("}")) {
+                try {
+                    JSON.parse(buffer);
+                    return parseBuffer(message);
+                } catch (e) {
+                    // Not a complete JSON yet, continue buffering
+                }
+            }
         }
         return {};
     }
 
     function parseBuffer(message) {
-        // console.log("[Ai] Gemini buffer: ", buffer);
         let finished = false;
         try {
-            if (buffer.length === 0) return {};
+            if (!buffer || buffer.length === 0) return {};
             const dataJson = JSON.parse(buffer);
 
             // Uploaded file
             if (dataJson.uploadedFile) {
                 message.fileUri = dataJson.uploadedFile.uri;
                 message.fileMimeType = dataJson.uploadedFile.mimeType;
-                return ({})
+                return {};
             }
 
             // Error response handling
             if (dataJson.error) {
-                const errorMsg = `**Error ${dataJson.error.code}**: ${dataJson.error.message}`;
+                const errorMsg = `\n\n⚠️ **Error ${dataJson.error.code || ''}** (${dataJson.error.status || 'API Error'}): ${dataJson.error.message || JSON.stringify(dataJson.error)}`;
+                if (isReasoning) {
+                    isReasoning = false;
+                    message.rawContent += "\n\n</think>\n\n";
+                    message.content += "\n\n</think>\n\n";
+                }
                 message.rawContent += errorMsg;
                 message.content += errorMsg;
                 return { finished: true };
             }
 
             // No candidates?
-            if (!dataJson.candidates) return {};
+            if (!dataJson.candidates || dataJson.candidates.length === 0) return {};
             
-            // Finished?
-            if (dataJson.candidates[0]?.finishReason) {
+            const candidate = dataJson.candidates[0];
+            if (candidate?.finishReason) {
                 finished = true;
             }
             
-            const parts = dataJson.candidates[0]?.content?.parts ?? [];
-            if (parts.length > 0) message.providerParts = [...(message.providerParts ?? []), ...parts];
+            const parts = candidate?.content?.parts ?? [];
 
             // Function call handling
             const functionCallPart = parts.find(part => part.functionCall);
             if (functionCallPart) {
-                const functionCall = functionCallPart.functionCall;
+                const fc = functionCallPart.functionCall;
+                const sig = functionCallPart.thoughtSignature || functionCallPart.thought_signature || candidate?.thoughtSignature || candidate?.thought_signature || "";
                 const call = {
-                    name: functionCall.name,
-                    args: functionCall.args ?? {},
+                    name: fc.name,
+                    args: fc.args ?? {},
                 };
-                if (functionCall.id) call.id = functionCall.id;
+                if (fc.id) call.id = fc.id;
+                if (sig.length > 0) call.thoughtSignature = sig;
                 message.functionName = call.name;
                 message.functionCall = call;
-                const newContent = `\n\n[[ Function: ${call.name}(${JSON.stringify(call.args, null, 2)}) ]]\n`
-                message.rawContent += newContent;
-                message.content += newContent;
+                message.thoughtSignature = sig;
+                if (isReasoning) {
+                    isReasoning = false;
+                    message.rawContent += "\n\n</think>\n\n";
+                    message.content += "\n\n</think>\n\n";
+                }
                 return { functionCall: call, finished: finished };
             }
 
-            // Normal text response
-            let responseContent = "";
-            let thoughtContent = "";
+            // Normal text & reasoning response
+            let newResponseText = "";
+            let newThoughtText = "";
             parts.forEach(part => {
-                if (!part.text) return;
-                if (part.thought) thoughtContent += part.text;
-                else responseContent += part.text;
+                if (part.text === undefined || part.text === null) return;
+                if (part.thought) {
+                    newThoughtText += part.text;
+                } else {
+                    newResponseText += part.text;
+                }
             });
-            if (thoughtContent.length > 0) {
-                const thoughtBlock = `\n\n<think>\n\n${thoughtContent}\n\n</think>\n\n`;
-                message.rawContent += thoughtBlock;
-                message.content += thoughtBlock;
+
+            if (newThoughtText.length > 0) {
+                message.reasoningContent = (message.reasoningContent || "") + newThoughtText;
+                if (!isReasoning) {
+                    isReasoning = true;
+                    const startTag = "\n\n<think>\n\n";
+                    message.rawContent += startTag;
+                    message.content += startTag;
+                }
+                message.rawContent += newThoughtText;
+                message.content += newThoughtText;
             }
-            if (responseContent.length > 0) {
-                message.rawContent += responseContent;
-                message.content += responseContent;
+
+            if (newResponseText.length > 0) {
+                message.responseContent = (message.responseContent || "") + newResponseText;
+                if (isReasoning) {
+                    isReasoning = false;
+                    const endTag = "\n\n</think>\n\n";
+                    message.rawContent += endTag;
+                    message.content += endTag;
+                }
+                message.rawContent += newResponseText;
+                message.content += newResponseText;
             }
             
-            // Handle annotations and metadata
-            const annotationSources = dataJson.candidates[0]?.groundingMetadata?.groundingChunks?.map(chunk => {
-                return {
-                    "type": "url_citation",
-                    "text": chunk?.web?.title,
-                    "url": chunk?.web?.uri,
-                }
-            }) ?? [];
+            // Grounding annotations and metadata
+            const annotationSources = candidate?.groundingMetadata?.groundingChunks?.map(chunk => ({
+                "type": "url_citation",
+                "text": chunk?.web?.title,
+                "url": chunk?.web?.uri,
+            })) ?? [];
 
-            const annotations = dataJson.candidates[0]?.groundingMetadata?.groundingSupports?.map(citation => {
-                return {
-                    "type": "url_citation",
-                    "start_index": citation.segment?.startIndex,
-                    "end_index": citation.segment?.endIndex,
-                    "text": citation?.segment.text,
-                    "url": annotationSources[citation.groundingChunkIndices[0]]?.url,
-                    "sources": citation.groundingChunkIndices
-                }
-            });
-            message.annotationSources = annotationSources;
-            message.annotations = annotations;
-            message.searchQueries = dataJson.candidates[0]?.groundingMetadata?.webSearchQueries ?? [];
+            const annotations = candidate?.groundingMetadata?.groundingSupports?.map(citation => ({
+                "type": "url_citation",
+                "start_index": citation.segment?.startIndex,
+                "end_index": citation.segment?.endIndex,
+                "text": citation?.segment?.text,
+                "url": annotationSources[citation.groundingChunkIndices?.[0]]?.url,
+                "sources": citation.groundingChunkIndices
+            })) ?? [];
+
+            if (annotationSources.length > 0) message.annotationSources = annotationSources;
+            if (annotations.length > 0) message.annotations = annotations;
+            if (candidate?.groundingMetadata?.webSearchQueries) {
+                message.searchQueries = candidate.groundingMetadata.webSearchQueries;
+            }
 
             // Usage metadata
             if (dataJson.usageMetadata) {
@@ -249,20 +347,26 @@ ApiStrategy {
     }
 
     function onRequestFinished(message) {
-        return parseBuffer(message);
+        if (isReasoning) {
+            isReasoning = false;
+            const endTag = "\n\n</think>\n\n";
+            message.rawContent += endTag;
+            message.content += endTag;
+        }
+        if (buffer && buffer.trim().length > 0) {
+            return parseBuffer(message);
+        }
+        return {};
     }
     
     function reset() {
         buffer = "";
+        isReasoning = false;
     }
 
     function buildScriptFileSetup(filePath) {
         const trimmedFilePath = CF.FileUtils.trimFileProtocol(filePath);
-        let content = ""
-
-        // print("file path:", filePath)
-        // print("trimmed file path:", trimmedFilePath)
-        // print("escaped file path:", CF.StringUtils.shellSingleQuoteEscape(trimmedFilePath))
+        let content = "";
 
         content += `IMAGE_PATH='${CF.StringUtils.shellSingleQuoteEscape(trimmedFilePath)}'\n`;
         content += `${fileMimeTypeVarName}=$(file -b --mime-type "$IMAGE_PATH")\n`;
@@ -271,24 +375,23 @@ ApiStrategy {
         content += 'tmp_file_info_file="/tmp/quickshell/ai/file-info.json.tmp"\n';
 
         // Initial resumable request defining metadata.
-        // The upload url is in the response headers dump them to a file.
-        content += 'curl "https://generativelanguage.googleapis.com/upload/v1beta/files"'
+        content += 'curl -s "https://generativelanguage.googleapis.com/upload/v1beta/files"'
             + ` -H "x-goog-api-key: \$${apiKeyEnvVarName}"`
-            + ' -D $tmp_header_file'
+            + ' -D "$tmp_header_file"'
             + ' -H "X-Goog-Upload-Protocol: resumable"'
             + ' -H "X-Goog-Upload-Command: start"'
             + ' -H "X-Goog-Upload-Header-Content-Length: ${NUM_BYTES}"'
             + ` -H "X-Goog-Upload-Header-Content-Type: \${${fileMimeTypeVarName}}"`
             + ' -H "Content-Type: application/json"'
-            + ` -d "{'file': {'display_name': 'Image'}}" 2> /dev/null`
+            + ` -d "{\\"file\\": {\\"display_name\\": \\"Image\\"}}" 2> /dev/null`
             + '\n';
 
         // Get file upload header
-        content += 'upload_url=$(grep -i "x-goog-upload-url: " "${tmp_header_file}" | cut -d" " -f2 | tr -d "\r")\n';
-        content += 'rm "${tmp_header_file}"\n';
+        content += 'upload_url=$(grep -i "x-goog-upload-url: " "${tmp_header_file}" | cut -d" " -f2 | tr -d "\\r")\n';
+        content += 'rm -f "${tmp_header_file}"\n';
 
         // Upload the actual file
-        content += 'curl "${upload_url}"'
+        content += 'curl -s "${upload_url}"'
             + ` -H "x-goog-api-key: \$${apiKeyEnvVarName}"`
             + ' -H "Content-Length: ${NUM_BYTES}"'
             + ' -H "X-Goog-Upload-Offset: 0"'
@@ -296,14 +399,16 @@ ApiStrategy {
             + ' --data-binary "@${IMAGE_PATH}" 2> /dev/null > "${tmp_file_info_file}"'
             + '\n';
 
-        content += `${fileUriVarName}=$(jq -r ".file.uri" "$tmp_file_info_file")\n`
-        content += `printf "{\\"uploadedFile\\": {\\"uri\\": \\"$${fileUriVarName}\\", \\"mimeType\\": \\"$${fileMimeTypeVarName}\\"}}\\n,\\n"\n`
+        content += `${fileUriVarName}=$(jq -r ".file.uri" "$tmp_file_info_file")\n`;
+        content += 'rm -f "$tmp_file_info_file"\n';
+        content += `sed -i "s|${fileUriSubstitutionString}|\$${fileUriVarName}|g" /tmp/quickshell/ai/request.json\n`;
+        content += `sed -i "s|${fileMimeTypeSubstitutionString}|\$${fileMimeTypeVarName}|g" /tmp/quickshell/ai/request.json\n`;
+        content += `printf "{\\"uploadedFile\\": {\\"uri\\": \\"$${fileUriVarName}\\", \\"mimeType\\": \\"$${fileMimeTypeVarName}\\"}}\\n,\\n"\n`;
 
-        return content
+        return content;
     }
 
     function finalizeScriptContent(scriptContent: string): string {
-        return scriptContent.replace(fileMimeTypeSubstitutionString, `'"\$${fileMimeTypeVarName}"'`)
-                            .replace(fileUriSubstitutionString, `'"\$${fileUriVarName}"'`);
+        return scriptContent;
     }
 }

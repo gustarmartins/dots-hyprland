@@ -96,6 +96,20 @@ Item {
             }
         },
         {
+            name: "resume",
+            description: Translation.tr("Resume last session (/load lastSession)"),
+            execute: () => {
+                Ai.loadChat("lastSession");
+            }
+        },
+        {
+            name: "export",
+            description: Translation.tr("Export conversation to Markdown file (/export [filename])"),
+            execute: args => {
+                Ai.exportChatToMarkdown(args.join(" "));
+            }
+        },
+        {
             name: "save",
             description: Translation.tr("Save chat"),
             execute: args => {
@@ -109,14 +123,33 @@ Item {
         },
         {
             name: "load",
-            description: Translation.tr("Load chat"),
+            description: Translation.tr("Load a saved chat (/load [name])"),
             execute: args => {
                 const joinedArgs = args.join(" ");
-                if (joinedArgs.trim().length == 0) {
-                    Ai.addMessage(Translation.tr("Usage: %1load CHAT_NAME").arg(root.commandPrefix), Ai.interfaceRole);
+                if (joinedArgs.trim().length === 0) {
+                    const chats = (Ai.savedChats || []).map(f => f.split("/").pop().replace(/\.json$/, "")).filter(Boolean);
+                    if (chats.length === 0) {
+                        Ai.addMessage(Translation.tr("📁 **No saved chats found** in `%1`.\n\nYou can save your current conversation anytime using `/save <name>`.").arg(Directories.aiChats), Ai.interfaceRole);
+                    } else {
+                        const listStr = chats.map(c => `- \`/load ${c}\``).join("\n");
+                        Ai.addMessage(Translation.tr("📁 **Saved Chats**:\n\n%1\n\nType `/load <name>` to load one.").arg(listStr), Ai.interfaceRole);
+                    }
                     return;
                 }
                 Ai.loadChat(joinedArgs);
+            }
+        },
+        {
+            name: "chats",
+            description: Translation.tr("List all available saved chats"),
+            execute: () => {
+                const chats = (Ai.savedChats || []).map(f => f.split("/").pop().replace(/\.json$/, "")).filter(Boolean);
+                if (chats.length === 0) {
+                    Ai.addMessage(Translation.tr("📁 **No saved chats found**.\n\nYou can save your current conversation anytime using `/save <name>`."), Ai.interfaceRole);
+                } else {
+                    const listStr = chats.map(c => `- \`/load ${c}\``).join("\n");
+                    Ai.addMessage(Translation.tr("📁 **Saved Chats**:\n\n%1").arg(listStr), Ai.interfaceRole);
+                }
             }
         },
         {
@@ -136,6 +169,21 @@ Item {
                 } else {
                     const temp = parseFloat(args[0]);
                     Ai.setTemperature(temp);
+                }
+            }
+        },
+        {
+            name: "bypass",
+            description: Translation.tr("Toggle or set auto-approval for command execution (/bypass on | /bypass off | /bypass)"),
+            execute: args => {
+                if (args.length === 0) {
+                    Ai.toggleBypassPermissions();
+                } else if (args[0] === "on" || args[0] === "true" || args[0] === "1") {
+                    Ai.setBypassPermissions(true);
+                } else if (args[0] === "off" || args[0] === "false" || args[0] === "0") {
+                    Ai.setBypassPermissions(false);
+                } else {
+                    Ai.addMessage(Translation.tr("Usage: /bypass [on|off]"), Ai.interfaceRole);
                 }
             }
         },
@@ -212,8 +260,8 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
             Ai.sendUserMessage(inputText);
         }
 
-        // Always scroll to bottom when user sends a message
-        messageListView.positionViewAtEnd();
+        // Wait for large pasted messages to finish affecting delegate height.
+        messageListView.scrollToEndAfterLayout();
     }
 
     Process {
@@ -364,6 +412,29 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                 mouseScrollFactor: Config.options.interactions.scrolling.mouseScrollFactor * 1.4
 
                 property int lastResponseLength: 0
+                property bool scrollToEndPending: false
+
+                function scrollToEndAfterLayout() {
+                    scrollToEndPending = true;
+                    Qt.callLater(() => messageListView.positionViewAtEnd());
+                    scrollToEndSettleTimer.restart();
+                }
+
+                onContentHeightChanged: {
+                    if (!scrollToEndPending) return;
+                    Qt.callLater(() => messageListView.positionViewAtEnd());
+                    scrollToEndSettleTimer.restart();
+                }
+
+                Timer {
+                    id: scrollToEndSettleTimer
+                    interval: 200
+                    repeat: false
+                    onTriggered: {
+                        messageListView.positionViewAtEnd();
+                        messageListView.scrollToEndPending = false;
+                    }
+                }
                 // onContentHeightChanged: {
                 //     if (atYEnd)
                 //         Qt.callLater(positionViewAtEnd);
@@ -393,13 +464,33 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                 }
             }
 
-            PagePlaceholder {
+            Item {
                 z: 2
-                shown: Ai.messageIDs.length === 0
-                icon: "neurology"
-                title: Translation.tr("Large language models")
-                description: Translation.tr("Type /key to get started with online models\nCtrl+O to expand sidebar\nCtrl+P to pin sidebar\nCtrl+D to detach sidebar")
-                shape: MaterialShape.Shape.PixelCircle
+                anchors.fill: parent
+                visible: Ai.messageIDs.length === 0
+
+                PagePlaceholder {
+                    anchors.fill: parent
+                    shown: Ai.messageIDs.length === 0
+                    icon: "neurology"
+                    title: Translation.tr("Large language models")
+                    description: Translation.tr("Type /key to get started with online models\nCtrl+O to expand sidebar\nCtrl+P to pin sidebar\nCtrl+D to detach sidebar")
+                    shape: MaterialShape.Shape.PixelCircle
+                }
+
+                ApiCommandButton {
+                    anchors {
+                        horizontalCenter: parent.horizontalCenter
+                        bottom: parent.bottom
+                        bottomMargin: 24
+                    }
+                    visible: Ai.hasLastSession && Ai.messageIDs.length === 0
+                    buttonText: Translation.tr("⟳ Resume Last Session")
+                    colBackground: Appearance.colors.colSecondaryContainer
+                    downAction: () => {
+                        Ai.loadChat("lastSession");
+                    }
+                }
             }
 
             ScrollToBottomButton {
@@ -507,14 +598,15 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                 ScrollView {
                     id: inputScrollView
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.min(root.height * 3/5, messageInputField.height)
+                    Layout.preferredHeight: Math.min(root.height * 3/5, Math.max(40, messageInputField.implicitHeight))
                     clip: true
                     ScrollBar.vertical.policy: ScrollBar.AsNeeded
 
                     StyledTextArea { // The actual TextArea (inside ScrollView to enable scrolling)
                         id: messageInputField
-                        anchors.fill: parent
+                        width: inputScrollView.availableWidth
                         wrapMode: TextArea.Wrap
+                        textFormat: TextEdit.PlainText
                         padding: 10
                         color: activeFocus ? Appearance.m3colors.m3onSurface : Appearance.m3colors.m3onSurfaceVariant
                         placeholderText: Translation.tr('Message the model... "%1" for commands').arg(root.commandPrefix)
@@ -661,8 +753,8 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                             } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) {
                                 // Intercept Ctrl+V to handle image/file pasting
                                 if (event.modifiers & Qt.ShiftModifier) {
-                                    // Let Shift+Ctrl+V = plain paste
-                                    messageInputField.text += Quickshell.clipboardText;
+                                    // Shift+Ctrl+V = explicit plain-text paste.
+                                    messageInputField.insert(messageInputField.cursorPosition, Quickshell.clipboardText);
                                     event.accepted = true;
                                     return;
                                 }
@@ -681,7 +773,10 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                                     event.accepted = true;
                                     return;
                                 }
-                                event.accepted = false; // No image, let text pasting proceed
+                                // Always use the clipboard's text/plain representation.
+                                // Browser HTML tables otherwise become rich-text table objects.
+                                messageInputField.insert(messageInputField.cursorPosition, Quickshell.clipboardText);
+                                event.accepted = true;
                             } else if (event.key === Qt.Key_Escape) {
                                 // Esc to detach file
                                 if (Ai.pendingFilePath.length > 0) {
@@ -740,6 +835,14 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                         sendDirectly: false,
                         dontAddSpace: true
                     },
+                    ...(Ai.hasLastSession && Ai.messageIDs.length === 0 ? [{
+                        name: "resume",
+                        sendDirectly: true
+                    }] : []),
+                    ...(Ai.messageIDs.length > 0 ? [{
+                        name: "export",
+                        sendDirectly: true
+                    }] : []),
                     {
                         name: "clear",
                         sendDirectly: true
@@ -758,6 +861,20 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                     icon: "service_toolbox"
                     text: Ai.currentTool.charAt(0).toUpperCase() + Ai.currentTool.slice(1)
                     tooltipText: Translation.tr("Current tool: %1\nSet it with %2tool TOOL").arg(Ai.currentTool).arg(root.commandPrefix)
+                }
+
+                ApiInputBoxIndicator {
+                    // Permission bypass indicator
+                    icon: Ai.bypassPermissions ? "bolt" : "shield"
+                    text: Ai.bypassPermissions ? Translation.tr("Bypass") : Translation.tr("Safe")
+                    tooltipText: Ai.bypassPermissions
+                        ? Translation.tr("Command execution: Auto-Approve (Bypass ON)\nClick to require confirmation, or use /bypass off")
+                        : Translation.tr("Command execution: Require Confirmation (Safe)\nClick to enable auto-approval, or use /bypass on")
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: Ai.toggleBypassPermissions()
+                    }
                 }
 
                 Item {

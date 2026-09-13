@@ -93,7 +93,7 @@ Rectangle {
                 Layout.fillWidth: true
                 Layout.topMargin: 4
                 text: root.filePath
-                font.pixelSize: Appearance.font.pixelSize.smaller
+                font.pixelSize: Appearance.font.monoPixelSize.smaller
                 font.family: Appearance.font.family.monospace
                 wrapMode: Text.Wrap
             }

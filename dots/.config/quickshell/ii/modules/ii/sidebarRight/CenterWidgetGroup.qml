@@ -9,11 +9,13 @@ import QtQuick.Layouts
 
 Rectangle {
     id: root
+    signal openQuickSettings()
     radius: Appearance.rounding.normal
     color: Appearance.colors.colLayer1
 
     NotificationList {
         anchors.fill: parent
         anchors.margins: 5
+        onOpenQuickSettings: root.openQuickSettings()
     }
 }

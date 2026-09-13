@@ -19,8 +19,8 @@ MouseArea {
 
         Resource {
             Layout.alignment: Qt.AlignHCenter
-            iconName: "leaderboard"
-            percentage: ResourceUsage.vramUsedPercentage
+            iconName: "developer_board"
+            percentage: ResourceUsage.gpuUsage
             warningThreshold: 90
         }
 

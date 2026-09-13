@@ -3,6 +3,7 @@ import QtQuick.Layouts
 import Qt5Compat.GraphicalEffects
 import Quickshell
 import Quickshell.Wayland
+import qs.services
 
 Scope {
 	id: root
@@ -15,7 +16,8 @@ Scope {
 
 		function onReloadCompleted() {
 			root.failed = false;
-			popupLoader.loading = true;
+			if (!HyprlandData.anyMonitorHasFullscreen())
+				popupLoader.loading = true;
 		}
 
 		function onReloadFailed(error: string) {
@@ -24,7 +26,8 @@ Scope {
 
 			root.failed = true;
 			root.errorString = error;
-			popupLoader.loading = true;
+			if (!HyprlandData.anyMonitorHasFullscreen())
+				popupLoader.loading = true;
 		}
 	}
 

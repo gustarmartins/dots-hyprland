@@ -212,6 +212,14 @@ Singleton {
     }
 
     font: QtObject {
+        // Qt Quick pixel sizes use logical pixels. Keep the typography hierarchy
+        // around a 16 px body size, with fontctl sizes expressed in points.
+        function scaledPixelSize(original: real, points: real): int {
+            return points > 0 ? Math.max(1, Math.round(original * points / 12)) : original;
+        }
+        property real uiPointSize: Config.options.appearance.fontSizes.ui
+        property real monoPointSize: Config.options.appearance.fontSizes.mono
+        property real titlePointSize: Config.options.appearance.fontSizes.title
         property QtObject family: QtObject {
             property string main: Config.options.appearance.fonts.main
             property string numbers: Config.options.appearance.fonts.numbers
@@ -235,16 +243,22 @@ Singleton {
             })
         }
         property QtObject pixelSize: QtObject {
-            property int smallest: 10
-            property int smaller: 12
-            property int smallie: 13
-            property int small: 15
-            property int normal: 16
-            property int large: 17
-            property int larger: 19
-            property int huge: 22
-            property int hugeass: 23
-            property int title: huge
+            property int smallest: root.font.scaledPixelSize(10, root.font.uiPointSize)
+            property int smaller: root.font.scaledPixelSize(12, root.font.uiPointSize)
+            property int smallie: root.font.scaledPixelSize(13, root.font.uiPointSize)
+            property int small: root.font.scaledPixelSize(15, root.font.uiPointSize)
+            property int normal: root.font.scaledPixelSize(16, root.font.uiPointSize)
+            property int large: root.font.scaledPixelSize(17, root.font.uiPointSize)
+            property int larger: root.font.scaledPixelSize(19, root.font.uiPointSize)
+            property int huge: root.font.scaledPixelSize(22, root.font.uiPointSize)
+            property int hugeass: root.font.scaledPixelSize(23, root.font.uiPointSize)
+            property int title: root.font.titlePointSize > 0
+                ? Math.round(root.font.titlePointSize * 4 / 3) : huge
+        }
+        property QtObject monoPixelSize: QtObject {
+            property int smaller: root.font.scaledPixelSize(12, root.font.monoPointSize)
+            property int small: root.font.scaledPixelSize(15, root.font.monoPointSize)
+            property int normal: root.font.scaledPixelSize(16, root.font.monoPointSize)
         }
     }
 

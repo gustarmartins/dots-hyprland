@@ -9,45 +9,34 @@ import qs.modules.common.widgets
 
 QuickToggleModel {
     id: root
-    name: Translation.tr("Memory Mode")
+    name: Translation.tr("Memory")
 
-    // Live profile name, read from actual system state (desync-proof, never a
-    // stored counter). One of: ultra | blazing | optimized | heavy | anti-freeze | custom
-    property string profile: "optimized"
+    property string memoryState: "off"
 
-    icon: switch(profile) {
-        case "ultra":       return "local_fire_department" // ultra zram-only, max speed
-        case "blazing":     return "rocket_launch"   // zram-only, fast speed
-        case "optimized":   return "developer_board" // proven daily
-        case "heavy":       return "stacks"           // VM / Waydroid footprint
-        case "anti-freeze": return "ac_unit"          // widest reclaim buffer
-        default:            return "help"             // custom / manual tinkering
-    }
-    statusText: switch(profile) {
-        case "ultra":       return "Ultra Max"
-        case "blazing":     return "Blazing"
-        case "optimized":   return "Optimized"
-        case "heavy":       return "Heavy / VM"
-        case "anti-freeze": return "Anti-freeze"
-        default:            return "Custom"
-    }
-    // Light the button up for any non-default mode (incl. custom) so the daily
-    // "optimized" baseline reads as the neutral resting state.
-    toggled: profile !== "optimized"
+    icon: memoryState === "ram-plus" ? "add_to_drive" : "memory"
+    statusText: memoryState === "ram-plus"
+        ? "Max Speed · disk 4 GiB"
+        : "Max Speed · disk off"
+    toggled: memoryState === "ram-plus"
+    altActionOnRightClick: true
 
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "/home/gus/.local/bin/memory-mode.sh next"])
-        refreshDelay.restart() // re-read state shortly after the apply lands
+        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-mode.sh\" report"])
+    }
+
+    altAction: () => {
+        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-mode.sh\" toggle"])
+        refreshDelay.restart()
     }
 
     Process {
         id: fetchActiveState
         running: true
-        command: ["bash", "-c", "/home/gus/.local/bin/memory-mode.sh get_state"]
+        command: ["bash", "-c", "exec \"$HOME/.local/bin/memory-mode.sh\" get_state"]
         stdout: StdioCollector {
             onStreamFinished: {
                 const s = text.trim()
-                if (s.length > 0) root.profile = s
+                if (s.length > 0) root.memoryState = s
             }
         }
     }
@@ -68,5 +57,5 @@ QuickToggleModel {
         onTriggered: fetchActiveState.running = true
     }
 
-    tooltipText: Translation.tr("Cycle: Ultra → Blazing → Optimized → Heavy → Anti-freeze")
+    tooltipText: Translation.tr("Turbo VM. L: show info. R: toggle 4G low-priority NVMe.")
 }

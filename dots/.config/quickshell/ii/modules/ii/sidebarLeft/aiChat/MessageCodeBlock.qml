@@ -12,7 +12,6 @@ import org.kde.syntaxhighlighting
 
 ColumnLayout {
     id: root
-    // These are needed on the parent loader
     property bool editing: false
     property bool renderMarkdown: true
     property bool enableMouseSelection: false
@@ -22,37 +21,296 @@ ColumnLayout {
     property bool isCommandRequest: segmentLang === "command"
     property var displayLang: (isCommandRequest ? "bash" : segmentLang)
 
-    property real codeBlockBackgroundRounding: Appearance.rounding.small
-    property real codeBlockHeaderPadding: 3
-    property real codeBlockComponentSpacing: 2
+    property bool expanded: !isCommandRequest || (segmentContent.split("\n").length <= 2)
 
-    spacing: codeBlockComponentSpacing
+    spacing: 3
 
-    Rectangle { // Code background
+    function getCommandAnalysis(cmdText) {
+        if (!cmdText || typeof cmdText !== "string") {
+            return {
+                binary: "bash",
+                category: "general",
+                label: "EXEC",
+                icon: "terminal",
+                bg: "#181a1f",
+                badgeBg: "#282c34",
+                fg: "#adb5bd",
+                border: "#3a3f4b"
+            };
+        }
+
+        const trimmed = cmdText.trim();
+        // Extract first binary word
+        const words = trimmed.replace(/^[A-Za-z0-9_]+=[^\s]+\s+/, "").split(/\s+/);
+        let binary = words[0] || "bash";
+        if (binary === "sudo" && words.length > 1) {
+            binary = `sudo ${words[1]}`;
+        }
+
+        // Clean punctuation from binary name
+        binary = binary.replace(/[^a-zA-Z0-9_\-\.]/g, "");
+
+        const lower = trimmed.toLowerCase();
+
+        // 1. Destructive / Dangerous
+        if (/\b(sudo|rm|dd|mkfs|wipefs|fdisk|parted|reboot|shutdown|poweroff|kill|pkill|killall|mv)\b/.test(lower)) {
+            return {
+                binary: binary || "root",
+                category: "destructive",
+                label: "DESTRUCTIVE",
+                icon: "warning",
+                bg: "#2b1114",
+                badgeBg: "#4a1c22",
+                fg: "#ff8787",
+                border: "#7a2732"
+            };
+        }
+
+        // 2. Modifying / Write / Config
+        if (/\b(mkdir|touch|cp|chmod|chown|sed|git|systemctl|journalctl|pacman|yay|paru|npm|pip|cargo|rustup|tar|unzip|zip|tee)\b/.test(lower) || />/.test(lower)) {
+            return {
+                binary: binary || "write",
+                category: "write",
+                label: "MODIFY",
+                icon: "edit_note",
+                bg: "#261a0a",
+                badgeBg: "#473012",
+                fg: "#ffd43b",
+                border: "#6b491b"
+            };
+        }
+
+        // 3. Read-only / Inspection / Diagnostics
+        if (/\b(find|which|type|cat|head|tail|ls|grep|rg|ip|ps|adb|adbc|df|free|uptime|wc|stat|file|uname|whoami|curl|wget|ping|awk|sort|uniq|ss|netstat)\b/.test(lower)) {
+            return {
+                binary: binary || "query",
+                category: "read",
+                label: "READ",
+                icon: "search",
+                bg: "#0c2117",
+                badgeBg: "#173d2b",
+                fg: "#69db7c",
+                border: "#255c42"
+            };
+        }
+
+        // 4. General / Unknown
+        return {
+            binary: binary || "exec",
+            category: "general",
+            label: "EXEC",
+            icon: "terminal",
+            bg: "#181a1f",
+            badgeBg: "#282c34",
+            fg: "#adb5bd",
+            border: "#3a3f4b"
+        };
+    }
+
+    readonly property var cmdInfo: root.isCommandRequest ? root.getCommandAnalysis(root.segmentContent) : ({})
+
+    // =========================================================================
+    // COMMAND EXECUTION CARD (When segment is a command)
+    // =========================================================================
+    Rectangle {
+        visible: root.isCommandRequest
         Layout.fillWidth: true
-        topLeftRadius: codeBlockBackgroundRounding
-        topRightRadius: codeBlockBackgroundRounding
+        radius: Appearance.rounding.small
+        color: root.cmdInfo.bg ?? Appearance.colors.colLayer2
+        border.color: root.cmdInfo.border ?? Appearance.colors.colOutlineVariant
+        border.width: 1
+        implicitHeight: commandCardLayout.implicitHeight + 10
+
+        ColumnLayout {
+            id: commandCardLayout
+            anchors {
+                left: parent.left
+                right: parent.right
+                top: parent.top
+                margins: 6
+            }
+            spacing: 6
+
+            // Header Bar
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                // Action Tag Badge
+                Rectangle {
+                    radius: Appearance.rounding.small
+                    color: root.cmdInfo.badgeBg ?? "#333"
+                    implicitHeight: 22
+                    implicitWidth: tagRow.implicitWidth + 12
+
+                    RowLayout {
+                        id: tagRow
+                        anchors.centerIn: parent
+                        spacing: 4
+
+                        MaterialSymbol {
+                            text: root.cmdInfo.icon ?? "terminal"
+                            iconSize: 14
+                            color: root.cmdInfo.fg ?? "#fff"
+                        }
+                        StyledText {
+                            text: root.cmdInfo.label ?? "EXEC"
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                            font.weight: Font.Bold
+                            color: root.cmdInfo.fg ?? "#fff"
+                        }
+                    }
+                }
+
+                // Main Binary Tag
+                Rectangle {
+                    radius: Appearance.rounding.small
+                    color: Appearance.colors.colSurfaceContainerHigh
+                    implicitHeight: 22
+                    implicitWidth: binaryText.implicitWidth + 12
+
+                    StyledText {
+                        id: binaryText
+                        anchors.centerIn: parent
+                        text: root.cmdInfo.binary ?? "bash"
+                        font.family: Appearance.font.family.monospace
+                        font.pixelSize: Appearance.font.monoPixelSize.smaller
+                        font.weight: Font.Bold
+                        color: Appearance.colors.colOnSurface
+                    }
+                }
+
+                // Single-line preview if collapsed
+                StyledText {
+                    visible: !root.expanded
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                    text: (root.segmentContent || "").replace(/\n/g, " ").trim()
+                    font.family: Appearance.font.family.monospace
+                    font.pixelSize: Appearance.font.monoPixelSize.small
+                    color: Appearance.colors.colSubtext
+                }
+
+                Item { Layout.fillWidth: true; visible: root.expanded }
+
+                // Copy Command Button
+                AiMessageControlButton {
+                    id: copyCmdButton
+                    buttonIcon: activated ? "inventory" : "content_copy"
+                    onClicked: {
+                        Quickshell.clipboardText = root.segmentContent
+                        copyCmdButton.activated = true
+                        cmdCopyTimer.restart()
+                    }
+                    Timer {
+                        id: cmdCopyTimer
+                        interval: 1500
+                        onTriggered: copyCmdButton.activated = false
+                    }
+                    StyledToolTip { text: Translation.tr("Copy command") }
+                }
+
+                // Expand / Collapse Chevron
+                AiMessageControlButton {
+                    buttonIcon: root.expanded ? "expand_less" : "expand_more"
+                    onClicked: root.expanded = !root.expanded
+                    StyledToolTip { text: root.expanded ? Translation.tr("Collapse") : Translation.tr("Expand") }
+                }
+            }
+
+            // Command Content Box (Expandable)
+            Rectangle {
+                visible: root.expanded
+                Layout.fillWidth: true
+                radius: Appearance.rounding.small
+                color: Appearance.colors.colLayer1
+                implicitHeight: cmdScroll.implicitHeight + 8
+
+                ScrollView {
+                    id: cmdScroll
+                    anchors {
+                        fill: parent
+                        margins: 4
+                    }
+                    implicitHeight: Math.min(cmdArea.implicitHeight + 4, 180)
+                    clip: true
+                    ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                    TextArea {
+                        id: cmdArea
+                        readOnly: true
+                        selectByMouse: true
+                        font.family: Appearance.font.family.monospace
+                        font.pixelSize: Appearance.font.monoPixelSize.small
+                        wrapMode: TextEdit.Wrap
+                        color: Appearance.colors.colOnSurface
+                        text: root.segmentContent
+
+                        SyntaxHighlighter {
+                            textEdit: cmdArea
+                            repository: Repository
+                            definition: Repository.definitionForName("bash")
+                            theme: Appearance.syntaxHighlightingTheme
+                        }
+                    }
+                }
+            }
+
+            // Interactive Approval Buttons (If waiting for user permission)
+            RowLayout {
+                visible: root.messageData?.functionPending ?? false
+                Layout.fillWidth: true
+                Layout.topMargin: 2
+                spacing: 8
+
+                Item { Layout.fillWidth: true }
+
+                ButtonGroup {
+                    GroupButton {
+                        contentItem: StyledText {
+                            text: Translation.tr("Reject")
+                            font.pixelSize: Appearance.font.pixelSize.small
+                            color: Appearance.colors.colOnLayer2
+                        }
+                        onClicked: Ai.rejectCommand(root.messageData)
+                    }
+                    GroupButton {
+                        toggled: true
+                        contentItem: StyledText {
+                            text: Translation.tr("Approve & Run")
+                            font.pixelSize: Appearance.font.pixelSize.small
+                            font.weight: Font.Bold
+                            color: Appearance.colors.colOnPrimary
+                        }
+                        onClicked: Ai.approveCommand(root.messageData)
+                    }
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // STANDARD CODE BLOCK (For non-command code snippets: python, json, etc.)
+    // =========================================================================
+    Rectangle {
+        visible: !root.isCommandRequest
+        Layout.fillWidth: true
+        topLeftRadius: Appearance.rounding.small
+        topRightRadius: Appearance.rounding.small
         bottomLeftRadius: Appearance.rounding.unsharpen
         bottomRightRadius: Appearance.rounding.unsharpen
         color: Appearance.colors.colSurfaceContainerHighest
-        implicitHeight: codeBlockTitleBarRowLayout.implicitHeight + codeBlockHeaderPadding * 2
+        implicitHeight: standardHeaderRow.implicitHeight + 6
 
-        RowLayout { // Language and buttons
-            id: codeBlockTitleBarRowLayout
+        RowLayout {
+            id: standardHeaderRow
             anchors.verticalCenter: parent.verticalCenter
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.leftMargin: codeBlockHeaderPadding
-            anchors.rightMargin: codeBlockHeaderPadding
+            anchors.margins: 4
             spacing: 5
 
             StyledText {
-                id: codeBlockLanguage
-                Layout.alignment: Qt.AlignLeft
-                Layout.fillWidth: false
-                Layout.topMargin: 7
-                Layout.bottomMargin: 7
-                Layout.leftMargin: 10
                 font.pixelSize: Appearance.font.pixelSize.small
                 font.weight: Font.DemiBold
                 color: Appearance.colors.colOnLayer2
@@ -63,94 +321,79 @@ ColumnLayout {
 
             ButtonGroup {
                 AiMessageControlButton {
-                    id: copyCodeButton
+                    id: copyCodeBtn
                     buttonIcon: activated ? "inventory" : "content_copy"
-
                     onClicked: {
-                        Quickshell.clipboardText = segmentContent
-                        copyCodeButton.activated = true
-                        copyIconTimer.restart()
+                        Quickshell.clipboardText = root.segmentContent
+                        copyCodeBtn.activated = true
+                        codeTimer.restart()
                     }
-
                     Timer {
-                        id: copyIconTimer
+                        id: codeTimer
                         interval: 1500
-                        repeat: false
-                        onTriggered: {
-                            copyCodeButton.activated = false
-                        }
+                        onTriggered: copyCodeBtn.activated = false
                     }
-                    StyledToolTip {
-                        text: Translation.tr("Copy code")
-                    }
+                    StyledToolTip { text: Translation.tr("Copy code") }
                 }
                 AiMessageControlButton {
-                    id: saveCodeButton
+                    id: saveCodeBtn
                     buttonIcon: activated ? "check" : "save"
-
                     onClicked: {
                         const downloadPath = FileUtils.trimFileProtocol(Directories.downloads)
                         Quickshell.execDetached(["bash", "-c", 
-                            `echo '${StringUtils.shellSingleQuoteEscape(segmentContent)}' > '${downloadPath}/code.${segmentLang || "txt"}'`
+                            `echo '${StringUtils.shellSingleQuoteEscape(root.segmentContent)}' > '${downloadPath}/code.${root.segmentLang || "txt"}'`
                         ])
                         Quickshell.execDetached(["notify-send", 
                             Translation.tr("Code saved to file"), 
-                            Translation.tr("Saved to %1").arg(`${downloadPath}/code.${segmentLang || "txt"}`),
+                            Translation.tr("Saved to %1").arg(`${downloadPath}/code.${root.segmentLang || "txt"}`),
                             "-a", "Shell"
                         ])
-                        saveCodeButton.activated = true
-                        saveIconTimer.restart()
+                        saveCodeBtn.activated = true
+                        saveTimer.restart()
                     }
-
                     Timer {
-                        id: saveIconTimer
+                        id: saveTimer
                         interval: 1500
-                        repeat: false
-                        onTriggered: {
-                            saveCodeButton.activated = false
-                        }
+                        onTriggered: saveCodeBtn.activated = false
                     }
-                    StyledToolTip {
-                        text: Translation.tr("Save to Downloads")
-                    }
+                    StyledToolTip { text: Translation.tr("Save to Downloads") }
                 }
             }
         }
     }
 
-    RowLayout { // Line numbers and code
-        spacing: codeBlockComponentSpacing
+    RowLayout {
+        visible: !root.isCommandRequest
+        spacing: 2
 
-        Rectangle { // Line numbers
-            implicitWidth: 40
-            implicitHeight: lineNumberColumnLayout.implicitHeight
+        // Line Numbers
+        Rectangle {
+            implicitWidth: 36
+            implicitHeight: lineNumbersCol.implicitHeight
             Layout.fillHeight: true
-            Layout.fillWidth: false
+            color: Appearance.colors.colLayer2
             topLeftRadius: Appearance.rounding.unsharpen
-            bottomLeftRadius: codeBlockBackgroundRounding
+            bottomLeftRadius: Appearance.rounding.small
             topRightRadius: Appearance.rounding.unsharpen
             bottomRightRadius: Appearance.rounding.unsharpen
-            color: Appearance.colors.colLayer2
 
             ColumnLayout {
-                id: lineNumberColumnLayout
+                id: lineNumbersCol
                 anchors {
                     left: parent.left
                     right: parent.right
-                    rightMargin: 5
+                    rightMargin: 6
                     top: parent.top
                     topMargin: 6
                 }
                 spacing: 0
-                
                 Repeater {
-                    model: codeTextArea.text.split("\n").length
+                    model: standardCodeArea.text.split("\n").length
                     Text {
                         required property int index
                         Layout.fillWidth: true
-                        Layout.alignment: Qt.AlignRight
                         font.family: Appearance.font.family.monospace
-                        font.pixelSize: Appearance.font.pixelSize.small
+                        font.pixelSize: Appearance.font.monoPixelSize.small
                         color: Appearance.colors.colSubtext
                         horizontalAlignment: Text.AlignRight
                         text: index + 1
@@ -159,136 +402,43 @@ ColumnLayout {
             }
         }
 
-        Rectangle { // Code background
+        // Code Editor
+        Rectangle {
             Layout.fillWidth: true
+            color: Appearance.colors.colLayer2
             topLeftRadius: Appearance.rounding.unsharpen
             bottomLeftRadius: Appearance.rounding.unsharpen
             topRightRadius: Appearance.rounding.unsharpen
-            bottomRightRadius: codeBlockBackgroundRounding
-            color: Appearance.colors.colLayer2
-            implicitHeight: codeColumnLayout.implicitHeight
+            bottomRightRadius: Appearance.rounding.small
+            implicitHeight: standardScroll.implicitHeight + 8
 
-            ColumnLayout {
-                id: codeColumnLayout
-                anchors.fill: parent
-                spacing: 0
-                ScrollView {
-                    id: codeScrollView
-                    Layout.fillWidth: true
-                    // Layout.fillHeight: true
-                    implicitWidth: parent.width
-                    implicitHeight: codeTextArea.implicitHeight + 1
-                    contentWidth: codeTextArea.width - 1
-                    // contentHeight: codeTextArea.contentHeight
-                    clip: true
-                    ScrollBar.vertical.policy: ScrollBar.AlwaysOff
-                    
-                    ScrollBar.horizontal: ScrollBar {
-                        anchors.bottom: parent.bottom
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        padding: 5
-                        policy: ScrollBar.AsNeeded
-                        opacity: visualSize == 1 ? 0 : 1
-                        visible: opacity > 0
-
-                        Behavior on opacity {
-                            NumberAnimation {
-                                duration: Appearance.animation.elementMoveFast.duration
-                                easing.type: Appearance.animation.elementMoveFast.type
-                                easing.bezierCurve: Appearance.animation.elementMoveFast.bezierCurve
-                            }
-                        }
-                        
-                        contentItem: Rectangle {
-                            implicitHeight: 6
-                            radius: Appearance.rounding.small
-                            color: Appearance.colors.colLayer2Active
-                        }
-                    }
-
-                    TextArea { // Code
-                        id: codeTextArea
-                        Layout.fillWidth: true
-                        readOnly: !editing
-                        selectByMouse: enableMouseSelection || editing
-                        renderType: Text.NativeRendering
-                        font.family: Appearance.font.family.monospace
-                        font.hintingPreference: Font.PreferNoHinting // Prevent weird bold text
-                        font.pixelSize: Appearance.font.pixelSize.small
-                        selectedTextColor: Appearance.m3colors.m3onSecondaryContainer
-                        selectionColor: Appearance.colors.colSecondaryContainer
-                        // wrapMode: TextEdit.Wrap
-                        color: messageData.thinking ? Appearance.colors.colSubtext : Appearance.colors.colOnLayer1
-
-                        text: segmentContent
-                        onTextChanged: {
-                            segmentContent = text
-                        }
-
-                        Keys.onPressed: (event) => {
-                            if (event.key === Qt.Key_Tab) {
-                                // Insert 4 spaces at cursor
-                                const cursor = codeTextArea.cursorPosition;
-                                codeTextArea.insert(cursor, "    ");
-                                codeTextArea.cursorPosition = cursor + 4;
-                                event.accepted = true;
-                            } else if ((event.key === Qt.Key_C) && event.modifiers == Qt.ControlModifier) {
-                                codeTextArea.copy();
-                                event.accepted = true;
-                            }
-                        }
-
-                        SyntaxHighlighter {
-                            id: highlighter
-                            textEdit: codeTextArea
-                            repository: Repository
-                            definition: Repository.definitionForName(root.displayLang || "plaintext")
-                            theme: Appearance.syntaxHighlightingTheme
-                        }
-                    }
+            ScrollView {
+                id: standardScroll
+                anchors {
+                    fill: parent
+                    margins: 4
                 }
-                Loader {
-                    active: root.isCommandRequest && root.messageData.functionPending
-                    visible: active
-                    Layout.fillWidth: true
-                    Layout.margins: 6
-                    Layout.topMargin: 0
-                    sourceComponent: RowLayout {
-                        Item { Layout.fillWidth: true }
-                        ButtonGroup {
-                            GroupButton {
-                                contentItem: StyledText {
-                                    text: Translation.tr("Reject")
-                                    font.pixelSize: Appearance.font.pixelSize.small
-                                    color: Appearance.colors.colOnLayer2
-                                }
-                                onClicked: Ai.rejectCommand(root.messageData)
-                            }
-                            GroupButton {
-                                toggled: true
-                                contentItem: StyledText {
-                                    text: Translation.tr("Approve")
-                                    font.pixelSize: Appearance.font.pixelSize.small
-                                    color: Appearance.colors.colOnPrimary
-                                }
-                                onClicked: Ai.approveCommand(root.messageData)
-                            }
-                        }
+                implicitHeight: standardCodeArea.implicitHeight + 2
+                clip: true
+
+                TextArea {
+                    id: standardCodeArea
+                    readOnly: !root.editing
+                    selectByMouse: root.enableMouseSelection || root.editing
+                    font.family: Appearance.font.family.monospace
+                    font.pixelSize: Appearance.font.monoPixelSize.small
+                    color: Appearance.colors.colOnLayer1
+                    text: root.segmentContent
+                    onTextChanged: { root.segmentContent = text }
+
+                    SyntaxHighlighter {
+                        textEdit: standardCodeArea
+                        repository: Repository
+                        definition: Repository.definitionForName(root.displayLang || "plaintext")
+                        theme: Appearance.syntaxHighlightingTheme
                     }
                 }
             }
-
-            // MouseArea to block scrolling
-            // MouseArea {
-            //     id: codeBlockMouseArea
-            //     anchors.fill: parent
-            //     acceptedButtons: editing ? Qt.NoButton : Qt.LeftButton
-            //     cursorShape: (enableMouseSelection || editing) ? Qt.IBeamCursor : Qt.ArrowCursor
-            //     onWheel: (event) => {
-            //         event.accepted = false
-            //     }
-            // }
         }
     }
 }

@@ -13,9 +13,25 @@ QuickToggleModel {
     mainAction: () => {
         root.toggled = !root.toggled;
         if (root.toggled) {
-            Quickshell.execDetached(["bash", "-c", `hyprctl --batch "keyword animations:enabled 0; keyword decoration:shadow:enabled 0; keyword decoration:blur:enabled 0; keyword general:gaps_in 0; keyword general:gaps_out 0; keyword general:border_size 1; keyword decoration:rounding 0"`])
+            HyprlandConfig.setMany({
+                "animations:enabled": 0,
+                "decoration:shadow:enabled": 0,
+                "decoration:blur:enabled": 0,
+                "general:gaps_in": 0,
+                "general:gaps_out": 0,
+                "general:border_size": 1,
+                "decoration:rounding": 0
+            });
         } else {
-            Quickshell.execDetached(["hyprctl", "reload"])
+            HyprlandConfig.resetMany([
+                "animations:enabled",
+                "decoration:shadow:enabled",
+                "decoration:blur:enabled",
+                "general:gaps_in",
+                "general:gaps_out",
+                "general:border_size",
+                "decoration:rounding"
+            ]);
         }
     }
 

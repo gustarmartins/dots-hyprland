@@ -126,9 +126,6 @@ ApiStrategy {
                     };
                     message.functionName = call.name;
                     message.functionCall = call;
-                    const callContent = `\n\n[[ Function: ${call.name}(${JSON.stringify(call.args, null, 2)}) ]]\n`;
-                    message.rawContent += callContent;
-                    message.content += callContent;
                     toolCallFragments = ({});
                     return { functionCall: call };
                 }

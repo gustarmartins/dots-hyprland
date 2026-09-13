@@ -17,6 +17,11 @@ Item { // Bar content region
     property real useShortenedForm: (Appearance.sizes.barHellaShortenScreenWidthThreshold >= screen?.width) ? 2 : (Appearance.sizes.barShortenScreenWidthThreshold >= screen?.width) ? 1 : 0
     readonly property int centerSideModuleWidth: (useShortenedForm == 2) ? Appearance.sizes.barCenterSideModuleWidthHellaShortened : (useShortenedForm == 1) ? Appearance.sizes.barCenterSideModuleWidthShortened : Appearance.sizes.barCenterSideModuleWidth
 
+    readonly property real barContentMinScale: 0.5
+    function fitScale(available, needed) {
+        return Math.max(barContentMinScale, Math.min(1, available / Math.max(1, needed)));
+    }
+
     component VerticalBarSeparator: Rectangle {
         Layout.topMargin: Appearance.sizes.baseBarHeight / 3
         Layout.bottomMargin: Appearance.sizes.baseBarHeight / 3
@@ -49,6 +54,7 @@ Item { // Bar content region
 
     FocusedScrollMouseArea { // Left side | scroll to change brightness
         id: barLeftSideMouseArea
+        clip: true
 
         anchors {
             top: parent.top
@@ -81,6 +87,8 @@ Item { // Bar content region
             id: leftSectionRowLayout
             anchors.fill: parent
             spacing: 4
+            transformOrigin: Item.Left
+            scale: root.fitScale(width, implicitWidth)
 
             LeftSidebarButton { // Left sidebar button
                 id: leftSidebarButton
@@ -93,6 +101,8 @@ Item { // Bar content region
                 Layout.leftMargin: 6 + (leftSidebarButton.visible ? 0 : Appearance.rounding.screenRounding)
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                Layout.preferredWidth: 0
+                Layout.minimumWidth: 0
                 visible: root.useShortenedForm === 0
             }
 
@@ -149,6 +159,7 @@ Item { // Bar content region
 
     FocusedScrollMouseArea { // Right side | scroll to change volume
         id: barRightSideMouseArea
+        clip: true
 
         anchors {
             top: parent.top
@@ -183,6 +194,8 @@ Item { // Bar content region
             anchors.fill: parent
             spacing: 5
             layoutDirection: Qt.RightToLeft
+            transformOrigin: Item.Right
+            scale: root.fitScale(width, implicitWidth)
 
             RippleButton { // Right sidebar button
                 id: rightSidebarButton

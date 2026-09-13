@@ -107,6 +107,12 @@ Singleton {
             property JsonObject appearance: JsonObject {
                 property bool extraBackgroundTint: true
                 property int fakeScreenRounding: 2 // 0: None | 1: Always | 2: When not fullscreen
+                property JsonObject fontSizes: JsonObject {
+                    // Points, managed by fontctl; zero preserves the original shell sizes.
+                    property real ui: 0
+                    property real mono: 0
+                    property real title: 0
+                }
                 property JsonObject fonts: JsonObject {
                     property string main: "Google Sans Flex"
                     property string numbers: "Google Sans Flex"
@@ -127,14 +133,14 @@ Singleton {
                     property bool enableQtApps: true
                     property bool enableTerminal: true
                     property JsonObject terminalGenerationProps: JsonObject {
-                        property real harmony: 0.6
-                        property real harmonizeThreshold: 100
-                        property real termFgBoost: 0.35
+                        property real harmony: 0.15
+                        property real harmonizeThreshold: 15
+                        property real termFgBoost: 0.50
                         property bool forceDarkMode: false
                     }
                 }
                 property JsonObject palette: JsonObject {
-                    property string type: "auto" // Allowed: auto, scheme-content, scheme-expressive, scheme-fidelity, scheme-fruit-salad, scheme-monochrome, scheme-neutral, scheme-rainbow, scheme-tonal-spot
+                    property string type: "auto" // Allowed: auto, scheme-content, scheme-expressive, scheme-fidelity, scheme-fruit-salad, scheme-monochrome, scheme-neutral, scheme-rainbow, scheme-tonal-spot, scheme-vibrant
                     property string accentColor: ""
                 }
             }
@@ -535,7 +541,13 @@ Singleton {
                             { "size": 1, "type": "mic" },
                             { "size": 2, "type": "audio" },
                             { "size": 2, "type": "nightLight" },
-                            { "size": 2, "type": "memoryMode" }
+                            { "size": 2, "type": "memoryMode" },
+                            { "size": 2, "type": "focusMode" },
+                            { "size": 2, "type": "zramRecompress" },
+                            { "size": 2, "type": "zramWriteback" },
+                            { "size": 1, "type": "dropCaches" },
+                            { "size": 1, "type": "memoryCompact" },
+                            { "size": 2, "type": "gpuMemory" }
                         ]
                     }
                 }

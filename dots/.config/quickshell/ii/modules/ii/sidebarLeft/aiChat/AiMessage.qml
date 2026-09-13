@@ -17,7 +17,9 @@ Rectangle {
     property real contentSpacing: 3
 
     property bool enableMouseSelection: false
-    property bool renderMarkdown: true
+    // Qt's Markdown table renderer can produce very tall blank grids for large
+    // pasted user tables. Keep only those messages in readable source form.
+    property bool renderMarkdown: !(root.messageData?.role === "user" && /\n\|/.test(root.messageData?.content ?? ""))
     property bool editing: false
 
     property list<var> messageBlocks: StringUtils.splitMarkdownBlocks(root.messageData?.content)
@@ -360,4 +362,3 @@ Rectangle {
 
     }
 }
-
