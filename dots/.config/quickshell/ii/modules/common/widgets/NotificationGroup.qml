@@ -18,15 +18,15 @@ MouseArea { // Notification group area
     property bool multipleNotifications: notificationCount > 1
     property bool expanded: false
     property bool popup: false
-    property real padding: 10
+    property real padding: 16
     property real collapsedHeightLimit: popup ? 160 : 130
     implicitHeight: background.implicitHeight
 
     property real dragConfirmThreshold: 70 // Drag further to discard notification
     property real dismissOvershoot: 20 // Account for gaps and bouncy animations
     property var qmlParent: root?.parent?.parent // There's something between this and the parent ListView
-    property var parentDragIndex: qmlParent?.dragIndex
-    property var parentDragDistance: qmlParent?.dragDistance
+    property var parentDragIndex: qmlParent?.dragIndex ?? -1
+    property var parentDragDistance: qmlParent?.dragDistance ?? 0
     property var dragIndexDiff: Math.abs(parentDragIndex - index)
     property real xOffset: dragIndexDiff == 0 ? parentDragDistance : 
         Math.abs(parentDragDistance) > dragConfirmThreshold ? 0 :
@@ -127,8 +127,10 @@ MouseArea { // Notification group area
         id: background
         anchors.left: parent.left
         width: parent.width
-        color: popup ? Appearance.colors.colBackgroundSurfaceContainer : Appearance.colors.colLayer2
-        radius: Appearance.rounding.normal
+        color: popup ? Qt.alpha(Appearance.m3colors.m3surfaceContainer, (DesktopEffects.settings.popup_opacity ?? 82) / 100) : Appearance.m3colors.m3surfaceContainerHigh
+        border.width: 1
+        border.color: Qt.alpha(Appearance.m3colors.m3outlineVariant, 0.35)
+        radius: 24
         anchors.leftMargin: root.xOffset
 
         Behavior on anchors.leftMargin {
@@ -234,17 +236,22 @@ MouseArea { // Notification group area
 
                 StyledListView { // Notification body (expanded)
                     id: notificationsColumn
-                    implicitHeight: contentHeight
+                    // A bounded viewport keeps large email groups virtualized.
+                    implicitHeight: root.expanded ? Math.min(contentHeight, root.popup ? 420 : 520) : contentHeight
+                    cacheBuffer: 160
+                    clip: root.expanded
+                    animateAppearance: false
+                    animateMovement: false
                     Layout.fillWidth: true
                     spacing: expanded ? 5 : 3
                     // clip: true
-                    interactive: false
+                    interactive: root.expanded && contentHeight > height
                     Behavior on spacing {
                         animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
                     }
                     model: ScriptModel {
                         values: root.expanded ? root.notifications.slice().reverse() : 
-                            root.notifications.slice().reverse().slice(0, 2)
+                            root.notifications.slice(-2).reverse()
                     }
                     delegate: NotificationItem {
                         required property int index
@@ -255,8 +262,7 @@ MouseArea { // Notification group area
                         onlyNotification: (root.notificationCount === 1)
                         opacity: (!root.expanded && index == 1 && root.notificationCount > 2) ? 0.5 : 1
                         visible: root.expanded || (index < 2)
-                        anchors.left: parent?.left
-                        anchors.right: parent?.right
+                        width: ListView.view.width
                     }
                 }
 

@@ -49,7 +49,3 @@ end
 -- Shell overrides --
 require("hyprland.shellOverrides.main")
 
--- Custom post-override pins --
-if is_file_exists(HOME .. "/.config/hypr/custom/post.lua") then
-    require("custom.post")
-end

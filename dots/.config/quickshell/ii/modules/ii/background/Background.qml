@@ -46,7 +46,7 @@ Variants {
             const sensitiveNetwork = (CF.StringUtils.stringListContainsSubstring(Network.networkName.toLowerCase(), Config.options.workSafety.triggerCondition.networkNameKeywords));
             return enabled && sensitiveWallpaper && sensitiveNetwork;
         }
-        readonly property real parallaxRation: Config.options.background.parallax.workspaceZoom
+        readonly property real parallaxRation: DesktopEffects.settings.parallax ? Math.max(1.16, Config.options.background.parallax.workspaceZoom) : Config.options.background.parallax.workspaceZoom
         property real minSuitableScale: 1 // Some reasonable init, to be updated
         property real effectiveWallpaperScale: minSuitableScale * parallaxRation
         property int wallpaperWidth: modelData.width // Some reasonable init value, to be updated
@@ -146,7 +146,7 @@ Variants {
 
                 property real usedFractionX: {
                     let usedFraction = middleFraction;
-                    if (Config.options.background.parallax.enableWorkspace && !bgRoot.verticalParallax) {
+                    if ((Config.options.background.parallax.enableWorkspace || DesktopEffects.settings.parallax === true) && !bgRoot.verticalParallax) {
                         usedFraction = fraction;
                     }
                     if (Config.options.background.parallax.enableSidebar) {
@@ -157,7 +157,7 @@ Variants {
                 }
                 property real usedFractionY: {
                     let usedFraction = middleFraction;
-                    if (Config.options.background.parallax.enableWorkspace && bgRoot.verticalParallax) {
+                    if ((Config.options.background.parallax.enableWorkspace || DesktopEffects.settings.parallax === true) && bgRoot.verticalParallax) {
                         usedFraction = fraction;
                     }
                     return Math.max(0, Math.min(1, usedFraction));
@@ -219,6 +219,17 @@ Variants {
                         anchors.fill: parent
                         color: CF.ColorUtils.transparentize(Appearance.colors.colLayer0, 0.7)
                     }
+                }
+            }
+
+            Loader {
+                anchors.fill: parent
+                active: !GlobalStates.screenLocked && !bgRoot.monitorFullscreen
+                    && !bgRoot.wallpaperSafetyTriggered
+                    && (DesktopEffects.settings.aurora === true || DesktopEffects.settings.stars === true)
+                sourceComponent: AmbientScene {
+                    animate: bgRoot.visible && !bgRoot.monitorFullscreen
+                    workspace: bgRoot.monitor?.activeWorkspace?.id ?? 1
                 }
             }
 

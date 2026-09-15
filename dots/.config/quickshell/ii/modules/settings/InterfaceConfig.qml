@@ -513,7 +513,7 @@ ContentPage {
             ConfigSpinBox {
                 enabled: Config.options.sidebar.quickToggles.style === "android"
                 icon: "splitscreen_left"
-                text: Translation.tr("Columns")
+                text: Translation.tr("Maximum grid columns")
                 value: Config.options.sidebar.quickToggles.android.columns
                 from: 1
                 to: 8

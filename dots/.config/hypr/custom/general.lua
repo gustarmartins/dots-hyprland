@@ -1,4 +1,6 @@
 hl.config({
+    -- Keep text contrast stable when focus moves between displays.
+    decoration = { dim_inactive = false },
     input = {
         kb_layout = "br,us",
         kb_options = "",
@@ -40,3 +42,6 @@ hl.window_rule({
     match = { class = "", title = "" },
     size = { 1366, 768 },
 })
+
+-- Cinematic effects layered over the selected animation preset.
+require("custom.cinematic-effects")

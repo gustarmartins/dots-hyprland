@@ -19,14 +19,7 @@ Item {
         anchors.bottomMargin: 5
 
         clip: true
-        layer.enabled: true
-        layer.effect: OpacityMask {
-            maskSource: Rectangle {
-                width: listview.width
-                height: listview.height
-                radius: Appearance.rounding.normal
-            }
-        }
+
 
         popup: false
     }
@@ -35,7 +28,7 @@ Item {
     PagePlaceholder {
         shown: Notifications.list.length === 0
         icon: "notifications_active"
-        description: Translation.tr("Nothing")
+        description: Translation.tr("You’re all caught up")
         shape: MaterialShape.Shape.Ghostish
         descriptionHorizontalAlignment: Text.AlignHCenter
     }

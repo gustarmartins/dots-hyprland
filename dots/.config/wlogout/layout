@@ -1,6 +1,6 @@
 {
     "label" : "lock",
-    "action" : "loginctl lock-session",
+    "action" : "hyprctl dispatch 'hl.dsp.global(\"quickshell:lock\")'",
     "text" : "lock",
     "keybind" : "l"
 }

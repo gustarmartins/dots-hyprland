@@ -96,6 +96,20 @@ Item {
             }
         },
         {
+            name: "resume",
+            description: Translation.tr("Resume last session (/load lastSession)"),
+            execute: () => {
+                Ai.loadChat("lastSession");
+            }
+        },
+        {
+            name: "export",
+            description: Translation.tr("Export conversation to Markdown file (/export [filename])"),
+            execute: args => {
+                Ai.exportChatToMarkdown(args.join(" "));
+            }
+        },
+        {
             name: "save",
             description: Translation.tr("Save chat"),
             execute: args => {
@@ -109,14 +123,33 @@ Item {
         },
         {
             name: "load",
-            description: Translation.tr("Load chat"),
+            description: Translation.tr("Load a saved chat (/load [name])"),
             execute: args => {
                 const joinedArgs = args.join(" ");
-                if (joinedArgs.trim().length == 0) {
-                    Ai.addMessage(Translation.tr("Usage: %1load CHAT_NAME").arg(root.commandPrefix), Ai.interfaceRole);
+                if (joinedArgs.trim().length === 0) {
+                    const chats = (Ai.savedChats || []).map(f => f.split("/").pop().replace(/\.json$/, "")).filter(Boolean);
+                    if (chats.length === 0) {
+                        Ai.addMessage(Translation.tr("📁 **No saved chats found** in `%1`.\n\nYou can save your current conversation anytime using `/save <name>`.").arg(Directories.aiChats), Ai.interfaceRole);
+                    } else {
+                        const listStr = chats.map(c => `- \`/load ${c}\``).join("\n");
+                        Ai.addMessage(Translation.tr("📁 **Saved Chats**:\n\n%1\n\nType `/load <name>` to load one.").arg(listStr), Ai.interfaceRole);
+                    }
                     return;
                 }
                 Ai.loadChat(joinedArgs);
+            }
+        },
+        {
+            name: "chats",
+            description: Translation.tr("List all available saved chats"),
+            execute: () => {
+                const chats = (Ai.savedChats || []).map(f => f.split("/").pop().replace(/\.json$/, "")).filter(Boolean);
+                if (chats.length === 0) {
+                    Ai.addMessage(Translation.tr("📁 **No saved chats found**.\n\nYou can save your current conversation anytime using `/save <name>`."), Ai.interfaceRole);
+                } else {
+                    const listStr = chats.map(c => `- \`/load ${c}\``).join("\n");
+                    Ai.addMessage(Translation.tr("📁 **Saved Chats**:\n\n%1").arg(listStr), Ai.interfaceRole);
+                }
             }
         },
         {
@@ -136,6 +169,21 @@ Item {
                 } else {
                     const temp = parseFloat(args[0]);
                     Ai.setTemperature(temp);
+                }
+            }
+        },
+        {
+            name: "bypass",
+            description: Translation.tr("Toggle or set auto-approval for command execution (/bypass on | /bypass off | /bypass)"),
+            execute: args => {
+                if (args.length === 0) {
+                    Ai.toggleBypassPermissions();
+                } else if (args[0] === "on" || args[0] === "true" || args[0] === "1") {
+                    Ai.setBypassPermissions(true);
+                } else if (args[0] === "off" || args[0] === "false" || args[0] === "0") {
+                    Ai.setBypassPermissions(false);
+                } else {
+                    Ai.addMessage(Translation.tr("Usage: /bypass [on|off]"), Ai.interfaceRole);
                 }
             }
         },
@@ -416,13 +464,33 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                 }
             }
 
-            PagePlaceholder {
+            Item {
                 z: 2
-                shown: Ai.messageIDs.length === 0
-                icon: "neurology"
-                title: Translation.tr("Large language models")
-                description: Translation.tr("Type /key to get started with online models\nCtrl+O to expand sidebar\nCtrl+P to pin sidebar\nCtrl+D to detach sidebar")
-                shape: MaterialShape.Shape.PixelCircle
+                anchors.fill: parent
+                visible: Ai.messageIDs.length === 0
+
+                PagePlaceholder {
+                    anchors.fill: parent
+                    shown: Ai.messageIDs.length === 0
+                    icon: "neurology"
+                    title: Translation.tr("Large language models")
+                    description: Translation.tr("Type /key to get started with online models\nCtrl+O to expand sidebar\nCtrl+P to pin sidebar\nCtrl+D to detach sidebar")
+                    shape: MaterialShape.Shape.PixelCircle
+                }
+
+                ApiCommandButton {
+                    anchors {
+                        horizontalCenter: parent.horizontalCenter
+                        bottom: parent.bottom
+                        bottomMargin: 24
+                    }
+                    visible: Ai.hasLastSession && Ai.messageIDs.length === 0
+                    buttonText: Translation.tr("⟳ Resume Last Session")
+                    colBackground: Appearance.colors.colSecondaryContainer
+                    downAction: () => {
+                        Ai.loadChat("lastSession");
+                    }
+                }
             }
 
             ScrollToBottomButton {
@@ -767,6 +835,14 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                         sendDirectly: false,
                         dontAddSpace: true
                     },
+                    ...(Ai.hasLastSession && Ai.messageIDs.length === 0 ? [{
+                        name: "resume",
+                        sendDirectly: true
+                    }] : []),
+                    ...(Ai.messageIDs.length > 0 ? [{
+                        name: "export",
+                        sendDirectly: true
+                    }] : []),
                     {
                         name: "clear",
                         sendDirectly: true
@@ -785,6 +861,20 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                     icon: "service_toolbox"
                     text: Ai.currentTool.charAt(0).toUpperCase() + Ai.currentTool.slice(1)
                     tooltipText: Translation.tr("Current tool: %1\nSet it with %2tool TOOL").arg(Ai.currentTool).arg(root.commandPrefix)
+                }
+
+                ApiInputBoxIndicator {
+                    // Permission bypass indicator
+                    icon: Ai.bypassPermissions ? "bolt" : "shield"
+                    text: Ai.bypassPermissions ? Translation.tr("Bypass") : Translation.tr("Safe")
+                    tooltipText: Ai.bypassPermissions
+                        ? Translation.tr("Command execution: Auto-Approve (Bypass ON)\nClick to require confirmation, or use /bypass off")
+                        : Translation.tr("Command execution: Require Confirmation (Safe)\nClick to enable auto-approval, or use /bypass on")
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: Ai.toggleBypassPermissions()
+                    }
                 }
 
                 Item {

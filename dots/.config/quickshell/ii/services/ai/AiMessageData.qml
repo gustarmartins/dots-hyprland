@@ -21,6 +21,7 @@ QtObject {
     property string responseContent
     property string functionName
     property var functionCall
+    property string thoughtSignature
     property string functionResponse
     property bool functionPending: false
     property bool visibleToUser: true

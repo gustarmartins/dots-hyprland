@@ -74,8 +74,9 @@ Scope {
             anchors {
                 horizontalCenter: parent.horizontalCenter
                 top: parent.top
+                topMargin: 16
             }
-            spacing: -8
+            spacing: 12
 
             Keys.onPressed: event => {
                 if (event.key === Qt.Key_Escape) {

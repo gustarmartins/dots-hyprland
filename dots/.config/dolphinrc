@@ -1,32 +1,60 @@
+[CompactMode]
+PreviewSize=16
+
 [ContentDisplay]
 DirectorySizeMode=ContentSize
-RecursiveDirectorySizeLimit=20
+RecursiveDirectorySizeLimit=15
+UsePermissionsFormat=CombinedFormat
 
 [Desktop Entry]
 DefaultProfile=zsh.profile
 
 [DetailsMode]
-IconSize=22
-PreviewSize=32
+IconSize=32
+PreviewSize=22
 
 [ExtractDialog]
 2 screens: Window-Maximized=true
-DirHistory[$e]=/usr/share/fonts/gnu-free,$HOME/Downloads/
+DirHistory[$e]=$HOME/Documents/,/usr/share/fonts/gnu-free,$HOME/Downloads/
 
 [General]
+AlwaysShowTabBar=true
+ConfirmClosingMultipleTabs=false
+DynamicView=true
+GlobalViewProps=false
+RememberOpenedTabs=false
 ShowFullPath=true
 ShowFullPathInTitlebar=true
 ShowStatusBar=FullWidth
+ShowToolTips=true
 ShowZoomSlider=true
 Version=202
 
+[IconsMode]
+IconSize=48
+MaximumTextLines=0
+PreviewSize=32
+TextWidthIndex=0
+
+[InformationPanel]
+previewsAutoPlay=true
+showHovered=false
+
 [KFileDialog Settings]
-Places Icons Auto-resize=false
-Places Icons Static Size=22
+Places Icons Auto-resize=true
+Places Icons Static Size=32
 
 [Notification Messages]
+ConfirmOpenManyFolders=false
+ConfirmOpenManyTerminals=false
 ConfirmRenameFileType=false
 warnAboutRisksBeforeActingAsAdmin=false
 
+[PlacesPanel]
+IconSize=-1
+
 [PreviewSettings]
-Plugins=appimagethumbnail,audiothumbnail,blenderthumbnail,comicbookthumbnail,cursorthumbnail,djvuthumbnail,ebookthumbnail,exrthumbnail,directorythumbnail,fontthumbnail,imagethumbnail,jpegthumbnail,kraorathumbnail,windowsexethumbnail,windowsimagethumbnail,mobithumbnail,opendocumentthumbnail,gsthumbnail,rawthumbnail,svgthumbnail,ffmpegthumbs
+Plugins=apkthumbnail,appimagethumbnail,audiothumbnail,glycin-heif,blenderthumbnail,comicbookthumbnail,cursorthumbnail,djvuthumbnail,ebookthumbnail,exrthumbnail,directorythumbnail,fontthumbnail,imagethumbnail,calligraimagethumbnail,glycin-image-rs,jpegthumbnail,glycin-jxl,kraorathumbnail,windowsexethumbnail,windowsimagethumbnail,mltpreview,mobithumbnail,opendocumentthumbnail,gsthumbnail,rawthumbnail,svgthumbnail,textthumbnail,ffmpegthumbs
+
+[Search]
+Location=Everywhere

@@ -8,7 +8,7 @@ import qs.services
 QuickToggleModel {
     id: root
     name: Translation.tr("Recompress")
-    property string mode: "idle"
+    property string mode: "tier1"
 
     icon: "compress"
     statusText: mode
@@ -43,5 +43,5 @@ QuickToggleModel {
         onTriggered: fetchMode.running = true
     }
 
-    tooltipText: Translation.tr("Left: run zstd second pass. Right: choose idle → huge-idle → huge → all.")
+    tooltipText: Translation.tr("Left: run selected verified tier. Right: choose ZSTD 3 → 9 → 15.")
 }

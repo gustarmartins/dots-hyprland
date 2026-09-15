@@ -61,14 +61,14 @@ GroupButton {
     horizontalPadding: padding
     verticalPadding: padding
 
-    colBackground: Appearance.colors.colLayer2
-    colBackgroundToggled: splitAltAction ? Appearance.colors.colLayer2 : Appearance.colors.colPrimary
-    colBackgroundToggledHover: splitAltAction ? Appearance.colors.colLayer2Hover : Appearance.colors.colPrimaryHover
-    colBackgroundToggledActive: splitAltAction ? Appearance.colors.colLayer2Active : Appearance.colors.colPrimaryActive
-    buttonRadius: toggled ? Appearance.rounding.large : height / 2
+    colBackground: Appearance.m3colors.m3surfaceContainerHigh
+    colBackgroundToggled: splitAltAction ? Appearance.m3colors.m3surfaceContainerHigh : Appearance.m3colors.m3primaryContainer
+    colBackgroundToggledHover: splitAltAction ? Appearance.colors.colLayer2Hover : ColorUtils.mix(Appearance.m3colors.m3primaryContainer, Appearance.m3colors.m3onPrimaryContainer, 0.08)
+    colBackgroundToggledActive: splitAltAction ? Appearance.colors.colLayer2Active : ColorUtils.mix(Appearance.m3colors.m3primaryContainer, Appearance.m3colors.m3onPrimaryContainer, 0.12)
+    buttonRadius: 20
     buttonRadiusPressed: Appearance.rounding.normal
-    property color colText: (toggled && !splitAltAction && enabled) ? Appearance.colors.colOnPrimary : ColorUtils.transparentize(Appearance.colors.colOnLayer2, enabled ? 0 : 0.7)
-    property color colIcon: expandedSize ? ((root.toggled) ? Appearance.colors.colOnPrimary : Appearance.colors.colOnLayer3) : colText
+    property color colText: (toggled && !splitAltAction && enabled) ? Appearance.m3colors.m3onPrimaryContainer : ColorUtils.transparentize(Appearance.colors.colOnLayer2, enabled ? 0 : 0.7)
+    property color colIcon: expandedSize ? ((root.toggled) ? Appearance.m3colors.m3onPrimaryContainer : Appearance.colors.colOnLayer3) : colText
 
     onClicked: {
         if (!root.altActionOnRightClick && root.expandedSize && root.altAction) root.altAction();
@@ -106,7 +106,7 @@ GroupButton {
                 implicitWidth: height
                 radius: root.radius - root.verticalPadding
                 color: {
-                    const baseColor = root.toggled ? Appearance.colors.colPrimary : Appearance.colors.colLayer3
+                    const baseColor = root.toggled ? Appearance.m3colors.m3primaryContainer : Appearance.colors.colLayer3
                     const transparentizeAmount = root.splitAltAction ? 0 : 1
                     return ColorUtils.transparentize(baseColor, transparentizeAmount)
                 }
@@ -148,17 +148,19 @@ GroupButton {
             visible: root.expandedSize
             active: visible
             sourceComponent: Column {
-                spacing: -2
+                spacing: 2
 
                 StyledText {
                     anchors {
                         left: parent.left
                         right: parent.right
                     }
-                    font.pixelSize: Appearance.font.pixelSize.smallie
-                    font.weight: 600
+                    font.pixelSize: 14
+                    font.weight: 500
                     color: root.colText
                     elide: Text.ElideRight
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
                     text: root.name
                 }
 
@@ -169,8 +171,8 @@ GroupButton {
                         right: parent.right
                     }
                     font {
-                        pixelSize: Appearance.font.pixelSize.smaller
-                        weight: 100
+                        pixelSize: 12
+                        weight: 400
                     }
                     color: root.colText
                     elide: Text.ElideRight

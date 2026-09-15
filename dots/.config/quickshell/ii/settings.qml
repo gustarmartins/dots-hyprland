@@ -24,6 +24,11 @@ ApplicationWindow {
     property bool showNextTime: false
     property var pages: [
         {
+            name: Translation.tr("Desktop effects"),
+            icon: "auto_awesome",
+            component: "modules/settings/DesktopEffectsConfig.qml"
+        },
+        {
             name: Translation.tr("Quick"),
             icon: "instant_mix",
             component: "modules/settings/QuickConfig.qml"

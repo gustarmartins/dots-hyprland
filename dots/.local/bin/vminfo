@@ -9,6 +9,9 @@ Keys:
   +/-    Show more / fewer processes
   f      Force-swap (evict) selected PIDs/names into swap
   u      Unswap (fault back) selected PIDs/names into RAM
+  k      Send an explicit signal to selected PIDs
+  r      Run ZRAM recompression
+  w      Run guarded ZRAM writeback
   Space  Pause
   q      Quit
 """
@@ -19,6 +22,9 @@ import time
 import select
 import subprocess
 import signal
+import shutil
+import unicodedata
+import fcntl
 
 # ── ANSI Escape Codes ──────────────────────────────────────────────────
 RESET = "\033[0m"
@@ -46,55 +52,72 @@ BCYAN = "\033[96m"
 BWHITE = "\033[97m"
 
 
+# ── System constants ───────────────────────────────────────────────────
+_CLK_TCK = os.sysconf('SC_CLK_TCK')
+_ZRAM_ACTION_LOCK = '/run/lock/vmatlas-zram-tier.lock'
+
 # ── Layout helpers ─────────────────────────────────────────────────────
 
-_tw_cache = (0, 80)  # (timestamp, width) – avoid syscall every line
+_tw_cache = (0.0, 80, 24)  # (timestamp, columns, rows)
 
 def get_term_size():
-    """Get (columns, rows), cached for 0.25s."""
+    """Get the current (columns, rows) without retaining a stale dimension."""
     global _tw_cache
     now = time.monotonic()
-    if now - _tw_cache[0] > 0.25:
+    if now - _tw_cache[0] > 0.10:
         try:
-            sz = os.get_terminal_size()
-            _tw_cache = (now, sz.columns)
-            return sz.columns, sz.lines
+            sz = os.get_terminal_size(sys.stdout.fileno())
         except Exception:
-            _tw_cache = (now, 80)
-            return 80, 24
-    try:
-        return _tw_cache[1], os.get_terminal_size().lines
-    except Exception:
-        return _tw_cache[1], 24
+            sz = shutil.get_terminal_size(fallback=(80, 24))
+        cols = max(1, int(sz.columns or os.environ.get('COLUMNS', 80)))
+        rows = max(1, int(sz.lines or os.environ.get('LINES', 24)))
+        _tw_cache = (now, cols, rows)
+    return _tw_cache[1], _tw_cache[2]
 
 
 def get_term_width():
     return get_term_size()[0]
 
 
-def clamp_line(text, tw):
-    """Naively clamp visible length – strip ANSI for counting."""
-    import re
-    visible = re.sub(r'\033\[[0-9;]*m', '', text)
-    if len(visible) <= tw:
-        return text
-    # Truncate: walk chars, track visible count
-    out = []
+_ANSI_RE = re.compile(
+    r'\033(?:\[[0-?]*[ -/]*[@-~]|\][^\a]*(?:\a|\033\\))'
+)
+
+def _char_width(char):
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ('W', 'F') else 1
+
+def visible_len(text):
+    return sum(_char_width(char) for char in _ANSI_RE.sub('', text))
+
+def fit_line(text, tw):
+    """Keep each render row inside one terminal line, preserving ANSI state."""
+    # Keep one column spare: terminals may auto-wrap a glyph written in the
+    # last cell, which turns the next redraw into a shifted, stale-looking UI.
+    limit = max(1, tw - 1)
     vis = 0
+    out = []
     i = 0
-    while i < len(text) and vis < tw - 1:
+    n = len(text)
+    while i < n:
         if text[i] == '\033':
-            j = i + 1
-            while j < len(text) and text[j] != 'm':
-                j += 1
-            out.append(text[i:j+1])
-            i = j + 1
-        else:
-            out.append(text[i])
-            vis += 1
-            i += 1
+            m = _ANSI_RE.match(text, i)
+            if m:
+                out.append(m.group(0))
+                i = m.end()
+                continue
+        char_width = _char_width(text[i])
+        if vis + char_width > limit:
+            break
+        out.append(text[i])
+        vis += char_width
+        i += 1
     out.append(RESET)
     return ''.join(out)
+
+def clamp_line(text, tw):
+    return fit_line(text, tw)
 
 
 def to_human(bytes_val):
@@ -146,10 +169,86 @@ def make_separator(label="", width=None):
     if width is None:
         width = get_term_width()
     if label:
-        visual_label_len = len(label) + 2
+        visual_label_len = visible_len(label) + 2
         dash_len = max(1, width - visual_label_len - 2)
         return f" {BOLD}{BCYAN}{label}{RESET} {CYAN}{'─' * dash_len}{RESET}"
-    return f" {CYAN}{'─' * (width - 2)}{RESET}"
+    return f" {CYAN}{'─' * max(1, width - 2)}{RESET}"
+
+
+def memory_breakdown_cells(mem, avail_ram):
+    """Return memory fields in importance order for the responsive grid."""
+    free_mem = mem.get('MemFree', 0)
+    cached = mem.get('Cached', 0)
+    buffers = mem.get('Buffers', 0)
+    active = mem.get('Active', 0)
+    inactive = mem.get('Inactive', 0)
+    dirty = mem.get('Dirty', 0)
+    mapped = mem.get('Mapped', 0)
+    sreclaim = mem.get('SReclaimable', 0)
+    sunreclaim = mem.get('SUnreclaim', 0)
+    cache_total = buffers + cached + sreclaim
+    anon = mem.get('Active(anon)', 0) + mem.get('Inactive(anon)', 0)
+    anon_active = mem.get('Active(anon)', 0)
+    anon_inactive = mem.get('Inactive(anon)', 0)
+    file_active = mem.get('Active(file)', 0)
+    file_inactive = mem.get('Inactive(file)', 0)
+    shmem = mem.get('Shmem', 0)
+    pagetables = mem.get('PageTables', 0)
+
+    dirty_color = (BRED if dirty > 512 * 1024 * 1024
+                   else BYELLOW if dirty > 256 * 1024 * 1024
+                   else BWHITE)
+    inactive_color = BYELLOW if anon_inactive > 1024 * 1024 * 1024 else BWHITE
+
+    return [
+        ("Available", avail_ram, BGREEN),
+        ("Anon tot", anon, BWHITE),
+        ("Cache tot", cache_total, BGREEN),
+        ("Free", free_mem, BGREEN),
+        ("Anon active", anon_active, BWHITE),
+        ("File active", file_active, WHITE),
+        ("Anon inact", anon_inactive, inactive_color),
+        ("File inact", file_inactive, BWHITE),
+        ("Active", active, BWHITE),
+        ("Inactive", inactive, BWHITE),
+        ("Cached", cached, WHITE),
+        ("Buffers", buffers, WHITE),
+        ("Slab recl", sreclaim, BGREEN),
+        ("Slab pin", sunreclaim, BYELLOW),
+        ("Shmem", shmem, BWHITE),
+        ("PageTables", pagetables, BWHITE),
+        ("Dirty", dirty, dirty_color),
+        ("Mapped", mapped, BWHITE),
+    ]
+
+
+def memory_grid(cells, tw, indent="   "):
+    """Pack memory cells into as many readable columns as the terminal allows."""
+    if not cells:
+        return []
+
+    # Keep the grid dense enough to use three columns on an ordinary split
+    # pane.  The previous 12+12 minimum forced an unnecessary two-column grid
+    # around 80 columns, consuming rows needed by the process table.
+    label_width = max(11, max(visible_len(label) for label, _, _ in cells))
+    value_width = max(9, max(visible_len(to_human(value)) for _, value, _ in cells))
+    cell_width = label_width + 1 + value_width
+    # Keep one spare terminal cell so the final glyph cannot auto-wrap.
+    available = max(1, tw - visible_len(indent) - 1)
+    min_gap = 3
+    columns = max(1, min(len(cells), available // (cell_width + min_gap)))
+    remaining = available - columns * cell_width
+    gap = 0 if columns == 1 else max(min_gap, remaining // (columns - 1))
+
+    def mem_cell(label, value, color):
+        return (f"{CYAN}{label:<{label_width}}{RESET} "
+                f"{color}{to_human(value):>{value_width}}{RESET}")
+
+    rendered = []
+    for start in range(0, len(cells), columns):
+        row = cells[start:start + columns]
+        rendered.append(indent + (" " * gap).join(mem_cell(*cell) for cell in row))
+    return rendered
 
 
 # ── Data Collection ────────────────────────────────────────────────────
@@ -195,16 +294,20 @@ def get_psi():
     return psi
 
 
-def get_zram_stats():
+def _read_zram_stats_unlocked():
     """Return the live zram tier state without spawning vmatlas.
 
     vmatlas is the full read-only source of truth.  The small subset here is
     deliberately syscall-light enough for a 2 Hz dashboard refresh.
     """
     stats = {
-        'orig': 0, 'compr': 0, 'mem_used': 0, 'primary': '?', 'recomp': None,
-        'backing': None, 'backing_bytes': 0, 'wb_enabled': None,
-        'wb_limit_bytes': 0,
+        'orig': 0, 'compr': 0, 'mem_used': 0, 'mem_limit': 0, 'mem_used_max': 0,
+        'same': 0, 'compacted': 0, 'huge': 0, 'huge_since': 0,
+        'primary': '?', 'recomp_tiers': [], 'recomp': None,
+        'backing': None, 'backing_bytes': 0, 'bd_reads': 0, 'bd_writes': 0,
+        'wb_boot_writes': 0,
+        'wb_enabled': None, 'wb_limit_bytes': 0, 'compressed_wb': False,
+        'disksize': 0,
     }
     base = '/sys/block/zram0'
 
@@ -217,10 +320,30 @@ def get_zram_stats():
 
     try:
         parts = read(f'{base}/mm_stat').split()
-        if len(parts) >= 3:
+        if len(parts) >= 8:
             stats['orig'] = int(parts[0])
             stats['compr'] = int(parts[1])
             stats['mem_used'] = int(parts[2])
+            stats['mem_limit'] = int(parts[3])
+            stats['mem_used_max'] = int(parts[4])
+            stats['same'] = int(parts[5])
+            stats['compacted'] = int(parts[6])
+            stats['huge'] = int(parts[7])
+            if len(parts) >= 9:
+                stats['huge_since'] = int(parts[8])
+        elif len(parts) >= 3:
+            stats['orig'] = int(parts[0])
+            stats['compr'] = int(parts[1])
+            stats['mem_used'] = int(parts[2])
+
+        ds = read(f'{base}/disksize')
+        if ds.isdigit():
+            stats['disksize'] = int(ds)
+
+        if stats['mem_limit'] == 0:
+            ml = read(f'{base}/mem_limit')
+            if ml.isdigit() and int(ml) > 0:
+                stats['mem_limit'] = int(ml)
 
         def selected(value):
             for item in value.split():
@@ -229,46 +352,256 @@ def get_zram_stats():
             return value.split()[-1] if value.split() else '?'
 
         stats['primary'] = selected(read(f'{base}/comp_algorithm'))
-        recomp = read(f'{base}/recomp_algorithm')
-        stats['recomp'] = selected(recomp) if '#' in recomp else None
+
+        level_state = {}
+        for state_line in read('/run/vmatlas-tier/levels').splitlines():
+            if '=' in state_line:
+                key, value = state_line.split('=', 1)
+                level_state[key] = value
+        recomp_raw = read(f'{base}/recomp_algorithm')
+        tiers = []
+        if recomp_raw:
+            for line in recomp_raw.replace('\x00', '\n').splitlines():
+                line = line.strip()
+                if line.startswith('#'):
+                    prio_num = line.split(':')[0]
+                    sel = selected(line)
+                    priority = prio_num[1:]
+                    spec = level_state.get(f'tier{priority}')
+                    verified = spec and spec.split(':', 1)[0] == sel
+                    tiers.append(f"{spec} ({prio_num}, verified)" if verified else
+                                 f"{sel} ({prio_num}, level unverified)")
+        stats['recomp_tiers'] = tiers
+        stats['recomp'] = ' → '.join(tiers) if tiers else None
+
         backing = read(f'{base}/backing_dev')
         stats['backing'] = backing if backing and backing != 'none' else None
         bd = read(f'{base}/bd_stat').split()
         if bd:
             stats['backing_bytes'] = int(bd[0]) * 4096
+            if len(bd) >= 2:
+                stats['bd_reads'] = int(bd[1])
+            if len(bd) >= 3:
+                stats['bd_writes'] = int(bd[2])
+                stats['wb_boot_writes'] = stats['bd_writes']
+        boot_writes = read('/run/vmatlas-tier/writeback_pages')
+        if boot_writes.isdigit():
+            stats['wb_boot_writes'] = max(stats['wb_boot_writes'], int(boot_writes))
         enabled = read(f'{base}/writeback_limit_enable')
         stats['wb_enabled'] = enabled == '1' if enabled else None
         limit = read(f'{base}/writeback_limit')
         if limit.isdigit():
             stats['wb_limit_bytes'] = int(limit) * 4096
+        cwb = read(f'{base}/compressed_writeback')
+        stats['compressed_wb'] = (cwb == '1' or cwb.lower() == 'yes')
     except Exception:
         pass
     return stats
 
 
-def get_vm_posture():
-    """Small vmscope-derived readout for roomy terminals; never mutates VM."""
+def get_zram_stats(previous=None):
+    """Read ZRAM stats without allowing a tier action to freeze the TUI.
+
+    The memory-tools wrapper holds the ZRAM action lock for the duration of a
+    recompression/writeback operation.  ZRAM sysfs readers can sleep in the
+    kernel while that operation is running, so take a non-blocking shared lock
+    first.  If it is busy, return the last sample and let the dashboard label
+    it as stale; all other telemetry continues to refresh normally.
+    """
+    fd = None
+    try:
+        fd = os.open(_ZRAM_ACTION_LOCK, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            if isinstance(exc, BlockingIOError) or getattr(exc, 'errno', None) in (11, 35):
+                stats = dict(previous or {})
+                stats['busy'] = True
+                stats['sample_time'] = stats.get('sample_time')
+                return stats
+            raise
+    except OSError:
+        # If the optional coordination file is absent, preserve legacy
+        # read-only behavior.  Normal memory-tools actions always create it.
+        return _read_zram_stats_unlocked()
+
+    try:
+        stats = _read_zram_stats_unlocked()
+        stats['busy'] = False
+        stats['sample_time'] = time.monotonic()
+        return stats
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def get_vm_knobs():
+    """Read VM tunables and sysctl knobs."""
     keys = (
-        'swappiness', 'page-cluster', 'min_free_kbytes',
-        'dirty_background_bytes', 'dirty_bytes', 'compaction_proactiveness',
+        'swappiness', 'page-cluster', 'vfs_cache_pressure',
+        'dirty_background_bytes', 'dirty_background_ratio',
+        'dirty_bytes', 'dirty_ratio',
+        'dirty_expire_centisecs', 'dirty_writeback_centisecs',
+        'dirtytime_expire_seconds',
+        'min_free_kbytes', 'watermark_scale_factor', 'watermark_boost_factor',
+        'compaction_proactiveness', 'extfrag_threshold', 'zone_reclaim_mode',
+        'lowmem_reserve_ratio', 'overcommit_memory', 'overcommit_ratio',
+        'overcommit_kbytes', 'max_map_count', 'admin_reserve_kbytes',
+        'user_reserve_kbytes', 'page_lock_unfairness',
+        'percpu_pagelist_high_fraction',
     )
-    posture = {}
+    knobs = {}
     for key in keys:
         try:
             with open(f'/proc/sys/vm/{key}') as f:
-                posture[key] = int(f.read().strip())
+                val = f.read().strip()
+                if '\t' in val or ' ' in val:
+                    knobs[key] = val
+                elif val.isdigit() or (val.startswith('-') and val[1:].isdigit()):
+                    knobs[key] = int(val)
+                else:
+                    knobs[key] = val
         except Exception:
-            posture[key] = None
-    return posture
+            knobs[key] = None
+    return knobs
+
+
+def fmt_swap_knobs(knobs, tw=120):
+    parts = []
+    sw = knobs.get('swappiness')
+    if sw is not None:
+        parts.append(f"{DIM}swappiness{RESET} {BWHITE}{sw}{RESET}")
+    cluster = knobs.get('page-cluster')
+    if cluster is not None:
+        parts.append(f"{DIM}cluster{RESET} {BWHITE}{cluster}{RESET}")
+    vfs = knobs.get('vfs_cache_pressure')
+    if vfs is not None:
+        parts.append(f"{DIM}vfs_cache_pressure{RESET} {BWHITE}{vfs}{RESET}")
+    if tw >= 100:
+        max_map = knobs.get('max_map_count')
+        if max_map is not None:
+            try:
+                m = int(max_map)
+                mm_str = f"{m/1000000:.2f}M" if m >= 1000000 else f"{m}"
+                parts.append(f"{DIM}max_map_count{RESET} {BWHITE}{mm_str}{RESET}")
+            except Exception:
+                parts.append(f"{DIM}max_map_count{RESET} {BWHITE}{max_map}{RESET}")
+        oc = knobs.get('overcommit_memory')
+        ocr = knobs.get('overcommit_ratio')
+        if oc is not None:
+            oc_mode = {0: 'heuristic', 1: 'always', 2: 'strict'}.get(int(oc) if str(oc).isdigit() else -1, str(oc))
+            if ocr is not None and tw >= 115:
+                parts.append(f"{DIM}overcommit{RESET} {BWHITE}{oc}{RESET} {DIM}({oc_mode}, {ocr}%){RESET}")
+            else:
+                parts.append(f"{DIM}overcommit{RESET} {BWHITE}{oc}{RESET} {DIM}({oc_mode}){RESET}")
+    return f" {DIM}     {' · '.join(parts)}{RESET}"
+
+
+def fmt_dirty_knobs(knobs, tw=120):
+    bg_bytes = knobs.get('dirty_background_bytes')
+    bg_ratio = knobs.get('dirty_background_ratio')
+    d_bytes = knobs.get('dirty_bytes')
+    d_ratio = knobs.get('dirty_ratio')
+
+    if d_bytes and int(d_bytes) > 0:
+        limit_str = to_human(int(d_bytes))
+    elif d_ratio is not None:
+        limit_str = f"{d_ratio}%"
+    else:
+        limit_str = "?"
+
+    if bg_bytes and int(bg_bytes) > 0:
+        bg_str = to_human(int(bg_bytes))
+    elif bg_ratio is not None:
+        bg_str = f"{bg_ratio}%"
+    else:
+        bg_str = "?"
+
+    wb_cs = knobs.get('dirty_writeback_centisecs')
+    exp_cs = knobs.get('dirty_expire_centisecs')
+    dtime_s = knobs.get('dirtytime_expire_seconds')
+
+    def fmt_cs(cs):
+        if cs is None: return '?'
+        s = int(cs) / 100.0
+        return f"{s:.0f}s" if s >= 10 else f"{s:.1f}s"
+
+    def fmt_sec(s):
+        if s is None: return '?'
+        s = int(s)
+        if s >= 3600: return f"{s//3600}h"
+        if s >= 60: return f"{s//60}m"
+        return f"{s}s"
+
+    parts = [f"{DIM}dirty bg/limit{RESET} {BWHITE}{bg_str}/{limit_str}{RESET}"]
+    if exp_cs is not None:
+        parts.append(f"{DIM}expire{RESET} {BWHITE}{fmt_cs(exp_cs)}{RESET}")
+    if wb_cs is not None:
+        parts.append(f"{DIM}writeback{RESET} {BWHITE}{fmt_cs(wb_cs)}{RESET}")
+    if dtime_s is not None and tw >= 100:
+        parts.append(f"{DIM}dirtytime{RESET} {BWHITE}{fmt_sec(dtime_s)}{RESET}")
+
+    return f"   {' · '.join(parts)}"
+
+
+def zone_knob_parts(knobs, tw=120):
+    parts = []
+    mf = knobs.get('min_free_kbytes')
+    if mf is not None:
+        try:
+            m = int(mf) * 1024
+            parts.append(f"{DIM}min_free{RESET} {BWHITE}{to_human(m)}{RESET}")
+        except Exception:
+            parts.append(f"{DIM}min_free{RESET} {BWHITE}{mf} KB{RESET}")
+
+    ws = knobs.get('watermark_scale_factor')
+    if ws is not None:
+        try:
+            pct = int(ws) / 100.0
+            parts.append(f"{DIM}wmark_scale{RESET} {BWHITE}{ws}{RESET} {DIM}({pct:.2f}%){RESET}")
+        except Exception:
+            parts.append(f"{DIM}wmark_scale{RESET} {BWHITE}{ws}{RESET}")
+
+    wb = knobs.get('watermark_boost_factor')
+    if wb is not None:
+        try:
+            pct = int(wb) / 100.0
+            if pct > 0:
+                parts.append(f"{DIM}boost_factor{RESET} {BWHITE}{wb}{RESET} {DIM}({pct:.0f}%){RESET}")
+            else:
+                parts.append(f"{DIM}boost_factor{RESET} {BWHITE}{wb}{RESET}")
+        except Exception:
+            parts.append(f"{DIM}boost_factor{RESET} {BWHITE}{wb}{RESET}")
+
+    cp = knobs.get('compaction_proactiveness')
+    if cp is not None:
+        parts.append(f"{DIM}compaction{RESET} {BWHITE}{cp}{RESET}")
+
+    ef = knobs.get('extfrag_threshold')
+    if ef is not None and tw >= 110:
+        parts.append(f"{DIM}extfrag{RESET} {BWHITE}{ef}{RESET}")
+
+    zr = knobs.get('zone_reclaim_mode')
+    if zr is not None and tw >= 120:
+        parts.append(f"{DIM}zone_reclaim{RESET} {BWHITE}{zr}{RESET}")
+
+    if tw >= 145:
+        lm = knobs.get('lowmem_reserve_ratio')
+        if lm:
+            lm_clean = '/'.join(lm.split()[:3])
+            parts.append(f"{DIM}lowmem_reserve{RESET} {BWHITE}{lm_clean}{RESET}")
+
+    return parts
+
+
+def fmt_zone_knobs(knobs, tw=120):
+    return f"   {' · '.join(zone_knob_parts(knobs, tw))}"
 
 
 def get_watermark_snapshot():
-    """Read zone and reclaim counters from local /proc.
-
-    Zones use pages, exactly as /proc/zoneinfo exposes them.  The caller uses
-    counter deltas rather than kswapd's lifetime CPU percentage, matching the
-    Android Labs verdict: a low watermark plus real reclaim is an awakening.
-    """
+    """Read zone and reclaim counters from local /proc."""
     zones = []
     node = None
     zone = None
@@ -284,10 +617,22 @@ def get_watermark_snapshot():
                     node, zone = int(match.group(1)), match.group(2)
                     fields = {}
                     continue
-                match = re.match(r'(pages free|min|low|high|managed)\s+(\d+)$', line)
+                match = re.match(r'pages free\s+(\d+)$', line)
                 if match and zone:
-                    key = 'free' if match.group(1) == 'pages free' else match.group(1)
-                    fields[key] = int(match.group(2))
+                    fields['free'] = int(match.group(1))
+                    continue
+                match = re.match(r'(min|low|high|boost|promo|spanned|present|managed|cma)\s+(\d+)$', line)
+                if match and zone:
+                    fields[match.group(1)] = int(match.group(2))
+                    continue
+                match = re.match(r'protection:\s*\((.*?)\)', line)
+                if match and zone:
+                    fields['protection'] = match.group(1)
+                    continue
+                match = re.match(r'(nr_zspages|nr_zone_write_pending)\s+(\d+)$', line)
+                if match and zone:
+                    fields[match.group(1)] = int(match.group(2))
+                    continue
         if zone and fields.get('managed', 0) > 0:
             zones.append({'node': node, 'name': zone, **fields})
     except Exception:
@@ -296,7 +641,7 @@ def get_watermark_snapshot():
     counters = {}
     wanted = {
         'pgscan_kswapd', 'pgscan_kswapd_normal', 'pgscan_direct',
-        'pgsteal_kswapd', 'kswapd_low_wmark_hit_quickly',
+        'pgsteal_kswapd', 'pgsteal_direct', 'kswapd_low_wmark_hit_quickly',
         'allocstall', 'allocstall_normal', 'allocstall_movable',
     }
     try:
@@ -310,8 +655,8 @@ def get_watermark_snapshot():
     return zones, counters
 
 
-def watermark_bar(zone, width=30):
-    """Terminal counterpart to the Labs free-meter with min/low markers."""
+def watermark_bar(zone, width=20):
+    """Terminal counterpart to the free-meter with min/low markers."""
     high = max(zone.get('high', 0), 1)
     scale = max(high, zone.get('free', 0), 1)
     free_at = min(width, int(round(zone.get('free', 0) * width / scale)))
@@ -340,14 +685,20 @@ def kswapd_verdict(zones, vmstat_deltas):
     scan = vmstat_deltas.get('pgscan_kswapd')
     if scan is None:
         scan = vmstat_deltas.get('pgscan_kswapd_normal')
+    steal = vmstat_deltas.get('pgsteal_kswapd')
     low_hit = vmstat_deltas.get('kswapd_low_wmark_hit_quickly')
+    direct = vmstat_deltas.get('pgscan_direct')
+
     if min_breached:
-        return f"{BRED}free below min — kswapd thrashing, kills likely{RESET}"
+        return f" {BRED}free below min — kswapd thrashing, kills likely{RESET}"
     if low_breached and (scan or 0) > 0:
-        return f"{BYELLOW}below low watermark — kswapd reclaiming ({scan:.0f} scan/s){RESET}"
+        steal_info = f", {steal:.0f} steal/s" if (steal or 0) > 0 else ""
+        return f" {BYELLOW}below low watermark — kswapd reclaiming ({scan:.0f} scan/s{steal_info}){RESET}"
+    if (direct or 0) > 0:
+        return f" {BYELLOW}direct reclaim active ({direct:.0f} scan/s){RESET}"
     if (low_hit or 0) > 0:
-        return f"{BYELLOW}low watermark hit repeatedly — kswapd waking often ({low_hit:.0f}/s){RESET}"
-    return f"{BGREEN}free above low watermark — kswapd idle{RESET}"
+        return f" {BYELLOW}low watermark hit repeatedly — kswapd waking often ({low_hit:.0f}/s){RESET}"
+    return f" {BGREEN}free above low watermark — kswapd idle{RESET}"
 
 
 def get_loadavg():
@@ -537,11 +888,14 @@ def get_enriched_processes(limit=10):
         rss_file = 0
         rss_shmem = 0
         oom = 0
+        uid = None
         try:
             status_text = _read_proc_field(pid, 'status')
             if status_text:
                 for sline in status_text.split('\n'):
-                    if sline.startswith('VmSwap:'):
+                    if sline.startswith('Uid:'):
+                        uid = int(sline.split()[1])
+                    elif sline.startswith('VmSwap:'):
                         swap = int(sline.split()[1]) * 1024
                     elif sline.startswith('RssAnon:'):
                         rss_anon = int(sline.split()[1]) * 1024
@@ -550,13 +904,28 @@ def get_enriched_processes(limit=10):
                     elif sline.startswith('RssShmem:'):
                         rss_shmem = int(sline.split()[1]) * 1024
         except Exception:
-            pass
+            uid = None
 
         # OOM score
         try:
             oom_str = _read_proc_field(pid, 'oom_score')
             if oom_str:
                 oom = int(oom_str)
+        except Exception:
+            pass
+
+        # Cumulative CPU time (utime + stime from /proc/pid/stat)
+        cputime_s = 0.0
+        try:
+            stat_raw = _read_proc_field(pid, 'stat')
+            if stat_raw:
+                # Split on ')' to skip comm field (may contain spaces)
+                after_comm = stat_raw.split(')', 1)[1].split()
+                # utime is field 14, stime is field 15 (1-indexed from start)
+                # After splitting past comm: index 11=utime, 12=stime
+                utime = int(after_comm[11])
+                stime = int(after_comm[12])
+                cputime_s = (utime + stime) / _CLK_TCK
         except Exception:
             pass
 
@@ -577,6 +946,9 @@ def get_enriched_processes(limit=10):
             'oom_score': oom,
             'elapsed': elapsed,
             'total_mem': rss + swap,
+            'cputime_s': cputime_s,
+            'uid': uid,
+            'owned': uid == os.getuid(),
         })
 
     return processes
@@ -645,62 +1017,69 @@ VIEW_MODES = [
 
 # ── Dashboard Rendering ───────────────────────────────────────────────
 
-def emit(lines_list, text):
-    lines_list.append(f"{text}{ERASE_EOL}")
-
-
 def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                    proc_limit, cpu_pct, temps, loadavg, uptime_s,
                    zones=None, vmstat_deltas=None):
     """Render the complete dashboard, adapting to terminal width AND height."""
     lines = []
     tw, th = get_term_size()
-    is_narrow = tw < 80
-    is_tiny = tw < 55
-    bar_w = max(8, min(25, tw - 55))
+
+    def emit(text):
+        # The dashboard redraws from cursor-home.  Clear the rest of every row
+        # so a shorter next sample cannot leave text or separator fragments
+        # from the preceding frame on screen.
+        lines.append(f"{fit_line(text, tw)}{ERASE_EOL}")
+
+    def emit_packed(prefix, items, separator=" · ", continuation=None):
+        """Wrap ordered telemetry items instead of silently clipping the tail."""
+        if not items:
+            return
+        continuation = prefix if continuation is None else continuation
+        limit = max(1, tw - 1)
+        current = prefix
+        for item in items:
+            candidate = (current + separator + item
+                         if current != prefix else current + item)
+            if current != prefix and visible_len(candidate) > limit:
+                emit(current)
+                current = continuation + item
+            else:
+                current = candidate
+        if current != prefix:
+            emit(current)
+
+    is_tiny = tw < 65
+    is_narrow = 65 <= tw < 90
+    # Reserve room for the labels and telemetry, then let the graph grow with
+    # the terminal instead of freezing it at the old 20/25-cell width.
+    bar_w = max(8, min(120, tw - 85))
     view = VIEW_MODES[view_idx]
     zones = zones or []
     vmstat_deltas = vmstat_deltas or {}
+    vm_knobs = get_vm_knobs()
+    memory_cells = memory_breakdown_cells(mem, mem.get('MemAvailable', 0))
+    memory_grid_lines = memory_grid(memory_cells, tw)
 
-    # Decide what sections to show based on terminal height.
-    # Minimum overhead without breakdown: header(2) + system bars(3-6) + tabs(3) + footer(2) + header_row(1) + safety(1)
-    has_zram = zr['orig'] > 0
-    base_overhead = 2 + (1 if has_zram else 0) + 1 + 3 + 2 + 1 + 1  # ~11
-    if is_tiny:
-        base_overhead += 6  # CPU(2) + RAM(2) + Swap(2)
-    else:
-        base_overhead += 3  # CPU(1) + RAM(1) + Swap(1)
-
-    # Show extended VM and reclaim context only when the terminal has room.
-    show_insights = not is_tiny and tw >= 100 and th >= 42
+    has_zram = zr.get('orig', 0) > 0
+    zram_busy = bool(zr.get('busy'))
     display_zones = sorted(zones, key=lambda z: z.get('managed', 0), reverse=True)[:3]
 
-    # Show breakdown only if terminal is tall enough (>= 30 rows and not tiny)
-    breakdown_lines = 0
-    show_breakdown = False
-    if not is_tiny and th >= 30:
-        show_breakdown = True
-        if is_narrow:
-            breakdown_lines = 2 + 12 + 1  # sep+blank + 12 single-col rows + blank
-        else:
-            breakdown_lines = 2 + 6 + 1  # sep+blank + 6 dual-col rows + blank
-
-    watermark_lines = (2 + len(display_zones)) if show_insights and display_zones else 0
-    insight_lines = (4 + (1 if has_zram else 0) + watermark_lines) if show_insights else 0
-    overhead = base_overhead + breakdown_lines + insight_lines
-    max_procs_by_height = max(1, th - overhead)
-    effective_limit = min(proc_limit, max_procs_by_height)
+    # Section visibility decisions based on terminal size
+    show_sublines = not is_tiny and th >= 28
+    show_top_hogs = not is_tiny and th >= 30
+    show_breakdown = not is_tiny and th >= 32
+    show_dirty_knobs = show_breakdown and th >= 35
+    show_zones = not is_tiny and th >= 40 and tw >= 75 and bool(display_zones)
+    show_zone_knobs = show_zones and th >= 44
 
     # ── Header ──────────────────────────────────────────────────────
-    status = (f"{BRED}⏸  PAUSED{RESET}" if paused
-              else f"{BGREEN}●  LIVE{RESET}")
+    status = (f"{BRED}⏸  PAUSED{RESET}" if paused else f"{BGREEN}●  LIVE{RESET}")
     if is_tiny:
-        emit(lines, f" {BOLD}{BCYAN}⚡vminfo{RESET} {status}")
+        emit(f" {BOLD}{BCYAN}⚡vminfo{RESET} {status}")
     else:
         uptxt = fmt_duration(uptime_s) if uptime_s else ""
-        emit(lines, f" {BOLD}{BCYAN}⚡ vminfo{RESET}  {status}"
-                    f"  {DIM}up {uptxt}{RESET}")
-    emit(lines, f" {CYAN}{'━' * (tw - 2)}{RESET}")
+        emit(f" {BOLD}{BCYAN}⚡ vminfo{RESET}  {status}  {DIM}up {uptxt}{RESET}")
+    emit(f" {CYAN}{'━' * max(1, tw - 2)}{RESET}")
 
     # ── CPU, load, and temperatures ──────────────────────────────────
     ncpu = get_nproc()
@@ -713,11 +1092,8 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
 
     cpu_bar_pct = min(cpu_pct or 0, 100)
     if is_tiny:
-        emit(lines, f" {BOLD}🖥  CPU{RESET}  {make_bar(cpu_bar_pct, bar_w)} "
-                    f"{BWHITE}{cpu_str}{RESET}")
-        emit(lines, f"        {DIM}load{RESET} {load_color}{loadavg['l1']:.1f}{RESET}"
-                    f" {DIM}{loadavg['l5']:.1f} {loadavg['l15']:.1f}{RESET}"
-                    f" {DIM}({ncpu}c){RESET}")
+        emit(f" {BOLD}🖥  CPU{RESET}  {make_bar(cpu_bar_pct, bar_w)} {BWHITE}{cpu_str}{RESET}")
+        emit(f"        {DIM}load{RESET} {load_color}{loadavg['l1']:.1f}{RESET} {DIM}{loadavg['l5']:.1f} {loadavg['l15']:.1f} ({ncpu}c){RESET}")
     else:
         temp_parts = []
         if 'cpu' in temps:
@@ -730,12 +1106,12 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
             temp_parts.append(f"{DIM}gpu{RESET} {tc}{t:.0f}°C{RESET}")
         temp_str = f"  {'  '.join(temp_parts)}" if temp_parts else ""
 
-        emit(lines, f" {BOLD}🖥  CPU{RESET}   {make_bar(cpu_bar_pct, bar_w)}  "
-                    f"{BWHITE}{cpu_str:>5}{RESET}  "
-                    f"{DIM}load{RESET} {load_color}{loadavg['l1']:.2f}{RESET}"
-                    f"/{loadavg['l5']:.2f}/{loadavg['l15']:.2f}"
-                    f" {DIM}({ncpu}c, {loadavg['running']}/{loadavg['total']}){RESET}"
-                    f"{temp_str}")
+        emit(f" {BOLD}🖥  CPU{RESET}   {make_bar(cpu_bar_pct, bar_w)}  "
+             f"{BWHITE}{cpu_str:>5}{RESET}  "
+             f"{DIM}load{RESET} {load_color}{loadavg['l1']:.2f}{RESET}"
+             f"/{loadavg['l5']:.2f}/{loadavg['l15']:.2f}"
+             f" {DIM}({ncpu}c, {loadavg['running']}/{loadavg['total']}){RESET}"
+             f"{temp_str}")
 
     # ── RAM ─────────────────────────────────────────────────────────
     total_ram = mem.get('MemTotal', 1)
@@ -760,15 +1136,13 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
             ram_delta_str = f"{BRED}↘ {to_human(abs(d))}/s{RESET}"
 
     if is_tiny:
-        emit(lines, f" {BOLD}💾 RAM{RESET}  {make_bar(ram_pct, bar_w)} "
-                    f"{BWHITE}{ram_pct:.0f}%{RESET}")
-        emit(lines, f"        {DIM}{to_human(used_ram)}/{to_human(total_ram)}{RESET}"
-                    f" {ram_tag}")
+        emit(f" {BOLD}💾 RAM{RESET}  {make_bar(ram_pct, bar_w)} {BWHITE}{ram_pct:.0f}%{RESET}")
+        emit(f"        {DIM}{to_human(used_ram)}/{to_human(total_ram)}{RESET} {ram_tag}")
     else:
-        emit(lines, f" {BOLD}💾 RAM{RESET}   {make_bar(ram_pct, bar_w)}  "
-                    f"{BWHITE}{ram_pct:5.1f}%{RESET}  "
-                    f"{DIM}{to_human(used_ram)} / {to_human(total_ram)}{RESET}  "
-                    f"{ram_tag}  {ram_delta_str}")
+        emit(f" {BOLD}💾 RAM{RESET}   {make_bar(ram_pct, bar_w)}  "
+             f"{BWHITE}{ram_pct:5.1f}%{RESET}  "
+             f"{DIM}{to_human(used_ram)} / {to_human(total_ram)}{RESET}  "
+             f"{ram_tag}  {ram_delta_str}")
 
     # ── Swap ────────────────────────────────────────────────────────
     total_swap = mem.get('SwapTotal', 0)
@@ -793,43 +1167,57 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
 
     swap_bar = make_bar(swap_pct, bar_w) if total_swap > 0 else f"{GRAY}{'░' * bar_w}{RESET}"
     if is_tiny:
-        emit(lines, f" {BOLD}🔄 Swp{RESET}  {swap_bar} "
-                    f"{BWHITE}{swap_pct:.0f}%{RESET}")
-        emit(lines, f"        {DIM}{to_human(used_swap)}/{to_human(total_swap)}{RESET}"
-                    f" {swap_tag}")
+        emit(f" {BOLD}🔄 Swp{RESET}  {swap_bar} {BWHITE}{swap_pct:.0f}%{RESET}")
+        emit(f"        {DIM}{to_human(used_swap)}/{to_human(total_swap)}{RESET} {swap_tag}")
     else:
-        emit(lines, f" {BOLD}🔄 Swap{RESET}  {swap_bar}  "
-                    f"{BWHITE}{swap_pct:5.1f}%{RESET}  "
-                    f"{DIM}{to_human(used_swap)} / {to_human(total_swap)}{RESET}  "
-                    f"{swap_tag}  {swap_delta_str}")
+        emit(f" {BOLD}🔄 Swap{RESET}  {swap_bar}  "
+             f"{BWHITE}{swap_pct:5.1f}%{RESET}  "
+             f"{DIM}{to_human(used_swap)} / {to_human(total_swap)}{RESET}  "
+             f"{swap_tag}  {swap_delta_str}")
+        if show_sublines:
+            emit(fmt_swap_knobs(vm_knobs, tw))
 
     # ── ZRAM ────────────────────────────────────────────────────────
-    if zr['orig'] > 0:
-        ratio = zr['orig'] / zr['compr'] if zr['compr'] > 0 else 1.0
-        if ratio >= 2.5:
+    if has_zram:
+        raw_ratio = zr['orig'] / zr['compr'] if zr['compr'] > 0 else 1.0
+        phys_ratio = zr['orig'] / zr['mem_used'] if zr['mem_used'] > 0 else 1.0
+        if phys_ratio >= 2.5:
             zr_tag = f"{BGREEN}▲ Efficient{RESET}"
-        elif ratio >= 1.5:
+        elif phys_ratio >= 1.5:
             zr_tag = f"{BYELLOW}▶ Moderate{RESET}"
         else:
             zr_tag = f"{BRED}▼ Inefficient{RESET}"
-        emit(lines, f" {BOLD}🗜  ZRAM{RESET}  "
-                    f"{BWHITE}{ratio:.2f}x{RESET}  "
-                    f"{DIM}{to_human(zr['orig'])} → {to_human(zr['compr'])}{RESET}"
-                    f"  {zr_tag}")
-        if show_insights:
-            chain = zr['primary']
-            if zr['recomp']:
-                chain += f" → {zr['recomp']}"
-            if zr['backing']:
-                backing_name = os.path.basename(zr['backing'])
-                wb = (f"{to_human(zr['backing_bytes'])} on {backing_name}"
-                      if zr['backing_bytes'] else backing_name)
-                if zr['wb_enabled'] and zr['wb_limit_bytes']:
-                    wb += f" · {to_human(zr['wb_limit_bytes'])} budget"
-                wb_text = f"writeback {wb}"
-            else:
-                wb_text = "no writeback tier"
-            emit(lines, f" {DIM}     chain {chain} · {wb_text}{RESET}")
+
+        zram_items = [
+            f"{BWHITE}{phys_ratio:.2f}x phys{RESET} {DIM}({raw_ratio:.2f}x raw){RESET}",
+            f"{DIM}{to_human(zr['orig'])} → {to_human(zr['mem_used'])}{RESET}",
+            zr_tag,
+        ]
+        primary = zr.get('primary') or '?'
+        recomp = zr.get('recomp_tiers') or []
+        if recomp:
+            # Keep the target identity, not the verbose verification prose.
+            target = str(recomp[0]).split(' ', 1)[0]
+            zram_items.append(f"{DIM}{primary}→{target}{RESET}")
+        elif primary != '?':
+            zram_items.append(f"{DIM}{primary}{RESET}")
+        if zr.get('backing'):
+            wb_name = os.path.basename(zr['backing'])
+            wb_state = (f"budget {to_human(zr['wb_limit_bytes'])}"
+                        if zr.get('wb_limit_bytes') else
+                        "locked" if zr.get('wb_enabled') else "unlimited")
+            wb_on_dev = to_human(zr['backing_bytes']) if zr.get('backing_bytes') else '0 B'
+            zram_items.append(f"{DIM}wb {wb_name} {wb_on_dev} {wb_state}{RESET}")
+        if zram_busy:
+            zram_items.append(f"{BYELLOW}⏳ action running; last sample{RESET}")
+        emit_packed(
+            f" {BOLD}🗜  ZRAM{RESET}  ",
+            zram_items,
+            separator="  ",
+            continuation="      ",
+        )
+    elif zram_busy:
+        emit(f" {BOLD}🗜  ZRAM{RESET}  {BYELLOW}⏳ action running; counters will resume when it finishes{RESET}")
 
     # ── PSI ─────────────────────────────────────────────────────────
     s10 = psi['some']['avg10']
@@ -845,139 +1233,124 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
         psi_tag = f"{BGREEN}▲ Smooth{RESET}"
 
     if is_tiny:
-        emit(lines, f" {BOLD}⏱  PSI{RESET}  {BWHITE}{s10:.1f}{RESET}/{s60:.1f}/{s300:.1f}%"
-                    f"  {psi_tag}")
+        emit(f" {BOLD}⏱  PSI{RESET}  {BWHITE}{s10:.1f}{RESET}/{s60:.1f}/{s300:.1f}%  {psi_tag}")
     else:
-        emit(lines, f" {BOLD}⏱  PSI{RESET}   "
-                    f"avg10/60/300: {BWHITE}{s10:.2f}{RESET}/{s60:.2f}/{s300:.2f}%"
-                    f"  {psi_tag}")
+        emit(f" {BOLD}⏱  PSI{RESET}   "
+             f"avg10/60/300: {BWHITE}{s10:.2f}{RESET}/{s60:.2f}/{s300:.2f}%"
+             f"  {psi_tag}")
+
+    # ── Top Hogs (compact one-liner) ─────────────────────────────────
+    if show_top_hogs and processes:
+        top_mem = max(processes, key=lambda p: p.get('total_mem', 0))
+        top_cpu = max(processes, key=lambda p: p.get('pcpu', 0))
+        top_burn = max(processes, key=lambda p: p.get('cputime_s', 0))
+        top_swp = max(processes, key=lambda p: p.get('swap', 0))
+
+        parts = []
+        # Always show heaviest memory consumer
+        parts.append(f"{BWHITE}{top_mem['comm'][:14]}{RESET} {BCYAN}{to_human(top_mem['total_mem'])}{RESET} {DIM}mem{RESET}")
+
+        # CPU% — skip if same process as mem leader
+        if top_cpu['pid'] != top_mem['pid'] and top_cpu.get('pcpu', 0) > 1.0:
+            parts.append(f"{BWHITE}{top_cpu['comm'][:14]}{RESET} {BRED}{top_cpu['pcpu']:.0f}%{RESET} {DIM}cpu{RESET}")
+        elif top_cpu.get('pcpu', 0) > 1.0:
+            parts.append(f"{BRED}{top_cpu['pcpu']:.0f}%{RESET} {DIM}cpu{RESET}")
+
+        # Cumulative CPU burn — skip if same as mem or cpu leader
+        seen_pids = {top_mem['pid'], top_cpu['pid']}
+        if top_burn['pid'] not in seen_pids and top_burn.get('cputime_s', 0) > 60:
+            parts.append(f"{BWHITE}{top_burn['comm'][:14]}{RESET} {BYELLOW}{fmt_duration(top_burn['cputime_s'])}{RESET} {DIM}burn{RESET}")
+        elif top_burn.get('cputime_s', 0) > 60:
+            parts.append(f"{BYELLOW}{fmt_duration(top_burn['cputime_s'])}{RESET} {DIM}burn{RESET}")
+
+        # Swap — only if there's meaningful swap and different process
+        seen_pids.add(top_burn['pid'])
+        if top_swp.get('swap', 0) > 0:
+            if top_swp['pid'] not in seen_pids:
+                parts.append(f"{BWHITE}{top_swp['comm'][:14]}{RESET} {BMAGENTA}{to_human(top_swp['swap'])}{RESET} {DIM}swp{RESET}")
+            else:
+                parts.append(f"{BMAGENTA}{to_human(top_swp['swap'])}{RESET} {DIM}swp{RESET}")
+
+        emit(f" {DIM}🏋 top:{RESET}  {f' {DIM}·{RESET} '.join(parts)}")
 
     # ── Memory Breakdown ────────────────────────────────────────────
     if show_breakdown:
-        emit(lines, "")
-        emit(lines, make_separator("📊 Memory Breakdown", tw))
-        emit(lines, "")
+        emit("")
+        emit(make_separator("📊 Memory Breakdown", tw))
+        for row in memory_grid_lines:
+            emit(row)
 
-        free_mem = mem.get('MemFree', 0)
-        cached = mem.get('Cached', 0)
-        buffers = mem.get('Buffers', 0)
-        active = mem.get('Active', 0)
-        inactive = mem.get('Inactive', 0)
-        dirty = mem.get('Dirty', 0)
-        writeback = mem.get('Writeback', 0)
-        mapped = mem.get('Mapped', 0)
-        sreclaim = mem.get('SReclaimable', 0)
-        sunreclaim = mem.get('SUnreclaim', 0)
+        if show_dirty_knobs:
+            emit(fmt_dirty_knobs(vm_knobs, tw))
 
-        cache_total = buffers + cached + sreclaim
-        anon = mem.get('Active(anon)', 0) + mem.get('Inactive(anon)', 0)
-
-        if dirty > 512 * 1024 * 1024:
-            dirty_c = BRED
-        elif dirty > 256 * 1024 * 1024:
-            dirty_c = BYELLOW
+    # ── Zones & watermarks ───────────────────────────────────────────
+    if show_zones and display_zones:
+        emit(make_separator("🛟 Zones & watermarks", tw))
+        emit(kswapd_verdict(display_zones, vmstat_deltas))
+        if tw >= 135:
+            zw = 25
+        elif tw >= 110:
+            zw = 16
         else:
-            dirty_c = BWHITE
+            zw = 10
 
-        rows = [
-            ("Available", avail_ram, BGREEN, "Free", free_mem, BGREEN),
-            ("Cache tot", cache_total, BGREEN, "Anon", anon, BWHITE),
-            ("Cached", cached, WHITE, "Buffers", buffers, WHITE),
-            ("Slab recl", sreclaim, BGREEN, "Slab pin", sunreclaim, BYELLOW),
-            ("Active", active, BWHITE, "Inactive", inactive, BWHITE),
-            ("Dirty", dirty, dirty_c, "Mapped", mapped, BWHITE),
-        ]
-
-        LW = 12; VW = 12
-        def mem_cell(l, v, c):
-            return f"{CYAN}{l:<{LW}}{RESET} {c}{to_human(v):>{VW}}{RESET}"
-
-        if is_narrow:
-            for l1, v1, c1, l2, v2, c2 in rows:
-                emit(lines, f"   {mem_cell(l1, v1, c1)}")
-                emit(lines, f"   {mem_cell(l2, v2, c2)}")
-        else:
-            GAP = "     "
-            for l1, v1, c1, l2, v2, c2 in rows:
-                emit(lines, f"   {mem_cell(l1, v1, c1)}{GAP}"
-                            f"{mem_cell(l2, v2, c2)}")
-
-    # ── Zone watermarks ───────────────────────────────────────────────
-    if show_insights and display_zones:
-        emit(lines, make_separator("🛟 Zones & watermarks", tw))
-        emit(lines, f" {kswapd_verdict(display_zones, vmstat_deltas)}")
         for zone in display_zones:
             free = zone.get('free', 0)
             minimum = zone.get('min', 0)
             low = zone.get('low', 0)
             high = zone.get('high', 0)
+            managed = zone.get('managed', 0)
+            promo = zone.get('promo', 0)
+            boost = zone.get('boost', 0)
+
             if free <= minimum:
                 state = f"{BRED}min breached{RESET}"
             elif free <= low:
                 state = f"{BYELLOW}below low (kswapd awake){RESET}"
             else:
                 state = f"{BGREEN}comfortable{RESET}"
+
             pages_to_bytes = 4096
-            line = (f" {CYAN}N{zone.get('node', '?')} {zone.get('name', '?'):<7}{RESET} "
-                    f"{watermark_bar(zone)} "
-                    f"F {to_human(free * pages_to_bytes)} · "
-                    f"min {to_human(minimum * pages_to_bytes)} · "
-                    f"low {to_human(low * pages_to_bytes)} · "
-                    f"high {to_human(high * pages_to_bytes)}  {state}")
-            emit(lines, clamp_line(line, tw))
+            zparts = [
+                state,
+                f"F {to_human(free * pages_to_bytes)}",
+                f"min {to_human(minimum * pages_to_bytes)}",
+                f"low {to_human(low * pages_to_bytes)}",
+                f"high {to_human(high * pages_to_bytes)}"
+            ]
+            if boost > 0:
+                zparts.append(f"boost {to_human(boost * pages_to_bytes)}")
+            if tw >= 115 and managed > 0:
+                zparts.append(f"managed {to_human(managed * pages_to_bytes)}")
+            if tw >= 145 and promo > 0:
+                zparts.append(f"promo {to_human(promo * pages_to_bytes)}")
 
-    # ── Roomy-terminal VM posture + app anatomy ─────────────────────
-    if show_insights:
-        posture = get_vm_posture()
-        min_free = posture.get('min_free_kbytes')
-        min_free_text = to_human(min_free * 1024) if min_free is not None else '?'
-        dirty_bg = posture.get('dirty_background_bytes')
-        dirty_limit = posture.get('dirty_bytes')
-        if dirty_bg or dirty_limit:
-            dirty_policy = f"{to_human(dirty_bg or 0)}/{to_human(dirty_limit or 0)}"
-        else:
-            dirty_policy = "ratio mode"
+            z_prefix = (f" {CYAN}N{zone.get('node', '?')} "
+                        f"{zone.get('name', '?'):<7}{RESET} "
+                        f"{watermark_bar(zone, zw)} ")
+            emit_packed(z_prefix, zparts, separator=" · ", continuation="      ")
 
-        emit(lines, make_separator("🧭 VM posture & app anatomy", tw))
-        emit(lines, f" {DIM}vmscope{RESET}  swappiness {BWHITE}{posture.get('swappiness', '?')}{RESET}"
-                    f" · cluster {BWHITE}{posture.get('page-cluster', '?')}{RESET}"
-                    f" · min-free {BWHITE}{min_free_text}{RESET}"
-                    f" · dirty bg/limit {BWHITE}{dirty_policy}{RESET}"
-                    f" · compaction {BWHITE}{posture.get('compaction_proactiveness', '?')}{RESET}")
+        if show_zone_knobs:
+            emit_packed("   ", zone_knob_parts(vm_knobs, tw),
+                        separator=" · ", continuation="   ")
 
-        leaders = sorted(processes, key=lambda p: p.get('total_mem', 0), reverse=True)[:2]
-        leader_parts = []
-        for proc in leaders:
-            resident = (proc.get('rss_anon', 0) + proc.get('rss_file', 0)
-                        + proc.get('rss_shmem', 0))
-            anatomy = (f"{to_human(resident)} RAM "
-                       f"({to_human(proc.get('rss_anon', 0))} anon"
-                       f"/{to_human(proc.get('rss_file', 0))} file)"
-                       f" + {to_human(proc.get('swap', 0))} swap")
-            leader_parts.append(
-                f"{CYAN}{proc['pid']}{RESET} {proc['comm'][:18]} "
-                f"{BWHITE}{to_human(proc['total_mem'])}{RESET} [{anatomy}]"
-            )
-        if leader_parts:
-            emit(lines, clamp_line(f" {BOLD}Footprint{RESET}  " + "  ·  ".join(leader_parts), tw))
-        else:
-            emit(lines, f" {DIM}Footprint  no process accounting available{RESET}")
-        emit(lines, f" {DIM}RSS is resident only; RAM + Swap ranks full per-PID footprint. "
-                    f"Use [4] to inspect parked pages.{RESET}")
+    # The upper dashboard now wraps telemetry according to the live width.
+    # Measure the rendered lines directly so process rows fill only genuinely
+    # unused height instead of relying on stale fixed-line estimates.
+    table_chrome = 6  # blank, tabs, rule, header, blank, footer
+    max_procs_by_height = max(1, th - len(lines) - table_chrome)
+    effective_limit = min(proc_limit, max_procs_by_height)
 
     # ── Process Table ───────────────────────────────────────────────
-    emit(lines, "")
-
-    # View tabs
+    emit("")
     tabs = []
     for i, vm in enumerate(VIEW_MODES):
         if i == view_idx:
             tabs.append(f"{BOLD}{vm['color']}[{vm['key']}]{vm['icon']} {vm['label']}{RESET}")
         else:
             tabs.append(f"{DIM}[{vm['key']}]{RESET}")
-    tab_line = " ".join(tabs)
-    emit(lines, f" {tab_line}")
-    emit(lines, f" {CYAN}{'─' * (tw - 2)}{RESET}")
+    emit(f" {' '.join(tabs)}")
+    emit(f" {CYAN}{'─' * max(1, tw - 2)}{RESET}")
 
     # Sort processes
     sort_key = view['sort']
@@ -993,39 +1366,72 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     display_procs = sorted_procs[:effective_limit]
     total_procs = len(sorted_procs)
 
-    # Adaptive column layout
-    if is_tiny:
-        # Minimal: PID COMMAND VALUE
-        sort_label = sort_key.upper()
-        if sort_label == 'TOTAL_MEM':
-            sort_label = 'TOTAL'
-        emit(lines, f"   {DIM}{'PID':<8}{'CMD':<12}{sort_label:>10}{RESET}")
+    def command_cell(command, width):
+        """Truncate/pad the process name without wasting responsive columns."""
+        command = str(command)
+        if len(command) <= width:
+            return f"{command:<{width}}"
+        if width <= 1:
+            return command[:width]
+        return f"{command[:width - 1]}…"
+
+    if tw < 55:
+        # At genuinely tiny widths, retain a useful PID/command/value view.
+        command_width = max(6, tw - 3 - 8 - 10 - 1)
+        sort_label = 'TOTAL' if sort_key == 'total_mem' else sort_key.upper()
+        emit(f"   {DIM}{'PID':<8}{'CMD':<{command_width}}{sort_label:>10}{RESET}")
         for p in display_procs:
-            if sort_key == 'pcpu':
-                val = f"{p['pcpu']:.1f}%"
-            elif sort_key == 'swap':
-                val = to_human(p['swap'])
-            elif sort_key == 'total_mem':
-                val = to_human(p['total_mem'])
-            else:
-                val = to_human(p['rss'])
-            emit(lines, f"   {CYAN}{p['pid']:<8}{RESET}"
-                        f"{p['comm'][:11]:<12}"
-                        f"{BWHITE}{val:>10}{RESET}")
-    elif is_narrow:
-        # Medium: PID COMMAND RSS CPU% STATE
-        emit(lines, f"   {DIM}{'PID':<8}{'COMMAND':<16}{'RSS':>10}{'CPU%':>7}{'ST':>4}{RESET}")
+            if sort_key == 'pcpu': val = f"{p['pcpu']:.1f}%"
+            elif sort_key == 'swap': val = to_human(p['swap'])
+            elif sort_key == 'total_mem': val = to_human(p['total_mem'])
+            else: val = to_human(p['rss'])
+            emit(f"   {CYAN}{p['pid']:<8}{RESET}"
+                 f"{command_cell(p['comm'], command_width)}"
+                 f"{BWHITE}{val:>10}{RESET}")
+    elif tw < 65:
+        # Preserve the operator-critical process state, OOM score, and age
+        # before optional CPU/thread columns in a cramped pane.
+        fixed_width = 7 + 8 + 8 + 4 + 4 + 7  # PID, RSS, SWAP, ST, OOM, AGE
+        command_width = max(8, tw - 3 - fixed_width - 1)
+        emit(f"   {DIM}{'PID':<7}{'COMMAND':<{command_width}}"
+             f"{'RSS':>8}{'SWAP':>8}{'ST':>4}{'OOM':>4}{'UP':>7}{RESET}")
         for p in display_procs:
-            emit(lines, f"   {CYAN}{p['pid']:<8}{RESET}"
-                        f"{p['comm'][:15]:<16}"
-                        f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
-                        f"{BWHITE}{p['pcpu']:>6.1f}{RESET}%"
-                        f" {fmt_state(p['state'])}")
+            oom = p['oom_score']
+            oom_c = BRED if oom > 800 else (BYELLOW if oom > 400 else GRAY)
+            swap_c = BMAGENTA if p['swap'] > 0 else DIM
+            emit(f"   {CYAN}{p['pid']:<7}{RESET}"
+                 f"{command_cell(p['comm'], command_width)}"
+                 f"{BWHITE}{to_human(p['rss']):>8}{RESET}"
+                 f"{swap_c}{to_human(p['swap']):>8}{RESET}"
+                 f" {fmt_state(p['state'])}"
+                 f"{oom_c}{oom:>4}{RESET}"
+                 f"{DIM}{fmt_duration(p['elapsed']):>7}{RESET}")
+    elif tw < 90:
+        # In the normal split-pane range, keep ST/OOM/AGE and drop MEM%/THR;
+        # those are less actionable than knowing whether a process is stopped,
+        # OOM-prioritized, and how long it has been alive.
+        fixed_width = 8 + 10 + 10 + 7 + 4 + 5 + 8
+        command_width = max(8, tw - 3 - fixed_width - 1)
+        emit(f"   {DIM}{'PID':<8}{'COMMAND':<{command_width}}"
+             f"{'RSS':>10}{'SWAP':>10}{'CPU%':>7}{'ST':>4}{'OOM':>5}{'UPTIME':>8}{RESET}")
+        for p in display_procs:
+            oom = p['oom_score']
+            oom_c = BRED if oom > 800 else (BYELLOW if oom > 400 else GRAY)
+            swap_c = BMAGENTA if p['swap'] > 0 else DIM
+            emit(f"   {CYAN}{p['pid']:<8}{RESET}"
+                 f"{command_cell(p['comm'], command_width)}"
+                 f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
+                 f"{swap_c}{to_human(p['swap']):>10}{RESET}"
+                 f"{BWHITE}{p['pcpu']:>6.1f}{RESET}%"
+                 f" {fmt_state(p['state'])}"
+                 f" {oom_c}{oom:>4}{RESET}"
+                 f"{DIM}{fmt_duration(p['elapsed']):>8}{RESET}")
     else:
-        # Full: PID COMMAND RSS SWAP CPU% MEM% THR STATE OOM AGE
-        emit(lines, f"   {DIM}{'PID':<8}{'COMMAND':<18}{'RSS':>10}{'SWAP':>10}"
-                    f"{'CPU%':>7}{'MEM%':>7}{'THR':>5}{'ST':>5}"
-                    f"{'OOM':>5}{'AGE':>8}{RESET}")
+        fixed_width = 8 + 10 + 10 + 7 + 7 + 5 + 5 + 5 + 8
+        command_width = max(8, tw - 3 - fixed_width - 1)
+        emit(f"   {DIM}{'PID':<8}{'COMMAND':<{command_width}}"
+             f"{'RSS':>10}{'SWAP':>10}{'CPU%':>7}{'MEM%':>7}"
+             f"{'THR':>5}{'ST':>5}{'OOM':>5}{'UPTIME':>8}{RESET}")
         for p in display_procs:
             oom = p['oom_score']
             if oom > 800:
@@ -1037,36 +1443,33 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
 
             swap_c = BMAGENTA if p['swap'] > 0 else DIM
 
-            emit(lines, f"   {CYAN}{p['pid']:<8}{RESET}"
-                        f"{p['comm'][:17]:<18}"
-                        f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
-                        f"{swap_c}{to_human(p['swap']):>10}{RESET}"
-                        f"{BWHITE}{p['pcpu']:>6.1f}{RESET}%"
-                        f"{DIM}{p['pmem']:>6.1f}{RESET}%"
-                        f"{DIM}{p['threads']:>5}{RESET}"
-                        f" {fmt_state(p['state'])}"
-                        f"  {oom_c}{oom:>4}{RESET}"
-                        f"{DIM}{fmt_duration(p['elapsed']):>8}{RESET}")
+            emit(f"   {CYAN}{p['pid']:<8}{RESET}"
+                 f"{command_cell(p['comm'], command_width)}"
+                 f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
+                 f"{swap_c}{to_human(p['swap']):>10}{RESET}"
+                 f"{BWHITE}{p['pcpu']:>6.1f}{RESET}%"
+                 f"{DIM}{p['pmem']:>6.1f}{RESET}%"
+                 f"{DIM}{p['threads']:>5}{RESET}"
+                 f" {fmt_state(p['state'])}"
+                 f"  {oom_c}{oom:>4}{RESET}"
+                 f"{DIM}{fmt_duration(p['elapsed']):>8}{RESET}")
 
     if not display_procs:
-        emit(lines, f"   {GRAY}(no processes found){RESET}")
+        emit(f"   {GRAY}(no processes found){RESET}")
 
     # ── Footer ──────────────────────────────────────────────────────
-    emit(lines, "")
+    emit("")
     shown = len(display_procs)
-    count_info = f"{shown}"
-    if shown < total_procs:
-        count_info += f"/{total_procs}"
+    count_info = f"{shown}" if shown == total_procs else f"{shown}/{total_procs}"
     if is_tiny:
-        emit(lines, f" {DIM}q{RESET}Quit {DIM}1-4{RESET}View {DIM}+/-{RESET}{count_info} "
-                    f"{BMAGENTA}f{RESET}swap {BGREEN}u{RESET}nsw {DIM}⎵{RESET}Pse")
+        if tw < 55:
+            emit(f" {DIM}q{RESET}Quit {DIM}1-4{RESET}View {DIM}v{RESET}Filter {DIM}+/-{RESET}{count_info} {BMAGENTA}f{RESET}/{BGREEN}u{RESET} {BRED}k{RESET} {BMAGENTA}r{RESET}/{BCYAN}w{RESET} {DIM}⎵{RESET}Pause")
+        else:
+            emit(f" {DIM}[q]{RESET} Quit {DIM}[1-4]{RESET} View {DIM}[v]{RESET} Filter {DIM}[+/-]{RESET} {count_info} {BMAGENTA}[f]{RESET} swap {BGREEN}[u]{RESET} unsw {BRED}[k]{RESET} sig {BMAGENTA}[r]{RESET} recomp {BCYAN}[w]{RESET} wb {DIM}[⎵]{RESET} pause")
+    elif tw < 90:
+        emit(f" {DIM}[q]{RESET} Quit  {DIM}[1-4]{RESET} View  {DIM}[v]{RESET} Filter  {DIM}[+/-]{RESET} {count_info}  {BMAGENTA}[f]{RESET} swap  {BGREEN}[u]{RESET} unsw  {BRED}[k]{RESET} sig  {BMAGENTA}[r]{RESET} recomp  {BCYAN}[w]{RESET} wb  {DIM}[⎵]{RESET} pause")
     else:
-        emit(lines, f" {DIM}[q]{RESET} Quit  "
-                    f"{DIM}[1-4]{RESET} View  "
-                    f"{DIM}[+/-]{RESET} Showing {count_info}  "
-                    f"{BMAGENTA}[f]{RESET} Force-swap  "
-                    f"{BGREEN}[u]{RESET} Unswap  "
-                    f"{DIM}[Space]{RESET} Pause")
+        emit(f" {DIM}[q]{RESET} Quit  {DIM}[1-4]{RESET} View  {DIM}[v]{RESET} Filter  {DIM}[+/-]{RESET} Showing {count_info}  {BMAGENTA}[f]{RESET} swap  {BGREEN}[u]{RESET} unsw  {BRED}[k]{RESET} sig  {BMAGENTA}[r]{RESET} recomp  {BCYAN}[w]{RESET} wb  {DIM}[Space]{RESET} pause")
 
     return "\n".join(lines)
 
@@ -1299,10 +1702,99 @@ def run_swap_action(op, processes, view_idx, proc_limit, term):
         term.resume()
 
 
+def run_signal_action(processes, view_idx, proc_limit, term):
+    """Send one explicitly chosen signal to selected caller-owned PIDs."""
+    shown = sort_processes(processes, view_idx)[:proc_limit]
+    term.suspend()
+    try:
+        print(f"\n{BOLD}{BRED}== Signal process =={RESET}")
+        print(f"{DIM}Enter PID/name/all, then a signal (default TERM). Empty cancels.{RESET}")
+        raw = input("signal which? ").strip()
+        pids = resolve_selection(raw, shown)
+        if not pids:
+            print("Cancelled.")
+            return
+        sig_raw = input("signal [TERM]: ").strip().upper() or "TERM"
+        if sig_raw.startswith("SIG"):
+            sig_raw = sig_raw[3:]
+        sig = getattr(signal, f"SIG{sig_raw}", None)
+        if not isinstance(sig, signal.Signals):
+            print(f"[-] Unknown signal: {sig_raw}")
+            return
+        print(f"[!] Sending SIG{sig_raw} to {len(pids)} PID(s): {' '.join(map(str, pids))}")
+        if input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
+            print("Cancelled.")
+            return
+        result = subprocess.run(["sudo", "kill", f"-{sig.value}"] + [str(p) for p in pids],
+                                text=True, capture_output=True)
+        if result.returncode:
+            print(result.stderr.strip() or f"[-] kill exited {result.returncode}")
+        else:
+            print(f"[+] SIG{sig_raw} sent to {len(pids)} PID(s).")
+    except (EOFError, KeyboardInterrupt):
+        print("Cancelled.")
+    finally:
+        try:
+            input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+        term.resume()
+
+
+def run_zram_action(kind, term):
+    """Run a concise, explicit ZRAM action through the installed helper."""
+    term.suspend()
+    try:
+        print(f"\n{BOLD}{BMAGENTA}== ZRAM {kind} =={RESET}")
+        if kind == "recompress":
+            mode = (input("mode [tier1/tier2/tier3/all]: ").strip().casefold()
+                    or "tier1")
+            if mode not in {"tier1", "tier2", "tier3", "idle", "huge", "huge-idle", "all"}:
+                print("[-] Unknown recompression mode.")
+                return
+            command = ["sudo", "/usr/local/bin/memory-tool-apply", "recompress", mode]
+        else:
+            mode = (input("mode [idle/huge/huge-idle]: ").strip().casefold()
+                    or "idle")
+            if mode not in {"idle", "huge", "huge-idle", "cold", "incompressible"}:
+                print("[-] Unknown writeback mode.")
+                return
+            command = ["sudo", "/usr/local/bin/memory-tool-apply", "writeback", mode]
+        print(f"[>] {' '.join(command)}")
+        if input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
+            print("Cancelled.")
+            return
+        result = subprocess.run(command, text=True, capture_output=True)
+        output = (result.stdout + result.stderr).strip()
+        if output:
+            print(output)
+        if result.returncode == 0:
+            print("[+] ZRAM action finished.")
+        else:
+            print(f"[-] ZRAM action exited {result.returncode}.")
+    except (EOFError, KeyboardInterrupt):
+        print("Cancelled.")
+    finally:
+        try:
+            input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+        term.resume()
+
+
 def preferred_proc_limit():
-    """Use spare rows by default, while preserving the compact first view."""
-    width, height = get_term_size()
-    return 30 if width >= 100 and height >= 42 else 10
+    """Use the available vertical space instead of an arbitrary width gate."""
+    _, height = get_term_size()
+    return max(10, min(30, height - 30))
+
+
+def filtered_processes(processes, mode):
+    """Match avminfo's quick process filter: all, user-owned, or system."""
+    if mode == 1:
+        return [p for p in processes if p.get('owned')]
+    if mode == 2:
+        return [p for p in processes if not p.get('owned')]
+    return processes
 
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -1326,6 +1818,7 @@ def main():
     # Interactive live mode
     view_idx = 0
     paused = False
+    proc_filter = 0
     proc_limit = preferred_proc_limit()
     auto_proc_limit = True
     tracker = DeltaTracker(alpha=0.3)
@@ -1384,11 +1877,20 @@ def main():
                         auto_proc_limit = False
                         proc_limit = max(3, proc_limit - 5)
                     elif ch in ('f', 'F'):
-                        run_swap_action('forceswap', processes, view_idx, proc_limit, term)
+                        run_swap_action('forceswap', filtered_processes(processes, proc_filter), view_idx, proc_limit, term)
                         processes = get_enriched_processes(50)
                     elif ch in ('u', 'U'):
-                        run_swap_action('unswap', processes, view_idx, proc_limit, term)
+                        run_swap_action('unswap', filtered_processes(processes, proc_filter), view_idx, proc_limit, term)
                         processes = get_enriched_processes(50)
+                    elif ch in ('v', 'V'):
+                        proc_filter = (proc_filter + 1) % 3
+                    elif ch in ('k', 'K'):
+                        run_signal_action(filtered_processes(processes, proc_filter), view_idx, proc_limit, term)
+                        processes = get_enriched_processes(50)
+                    elif ch in ('r', 'R'):
+                        run_zram_action('recompress', term)
+                    elif ch in ('w', 'W'):
+                        run_zram_action('writeback', term)
                     elif ch == ' ':
                         paused = not paused
 
@@ -1436,7 +1938,7 @@ def main():
                 # Redraw
                 sys.stdout.write("\033[H")
                 output = draw_dashboard(mem, psi, zr, view_idx, paused, deltas,
-                                        processes, proc_limit, cpu_pct, temps,
+                                        filtered_processes(processes, proc_filter), proc_limit, cpu_pct, temps,
                                         loadavg, uptime_s, zones, vmstat_deltas)
                 sys.stdout.write(output)
                 sys.stdout.write(f"\n{ERASE_BELOW}")

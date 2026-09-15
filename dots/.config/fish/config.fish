@@ -36,7 +36,9 @@ if status is-interactive
     if test "$TERM" != "linux"
         alias ls 'eza --icons'
     end
-    if test "$TERM" = "xterm-kitty"
-        alias ssh 'kitten ssh'
-    end
+    
 end
+
+
+# Added by Antigravity CLI installer
+set -gx PATH "/home/gus/.local/bin" $PATH

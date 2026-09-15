@@ -1,6 +1,6 @@
 [ColorEffects:Disabled]
 ChangeSelectionColor=
-Color=#191e24
+Color=#1d1d1e
 ColorAmount=0.5
 ColorEffect=3
 ContrastAmount=0
@@ -11,7 +11,7 @@ IntensityEffect=0
 
 [ColorEffects:Inactive]
 ChangeSelectionColor=true
-Color=#0a0f14
+Color=#0b0b0b
 ColorAmount=0.025
 ColorEffect=0
 ContrastAmount=0.1
@@ -21,131 +21,131 @@ IntensityAmount=0
 IntensityEffect=0
 
 [Colors:Button]
-BackgroundAlternate=#3d4551
-BackgroundNormal=#24282f
-DecorationFocus=#bdcb72
-DecorationHover=#bdcb72
-ForegroundActive=#dfe2eb
-ForegroundInactive=#89919e
+BackgroundAlternate=#474747
+BackgroundNormal=#2a2a2a
+DecorationFocus=#cdbafc
+DecorationHover=#cdbafc
+ForegroundActive=#e2e2e2
+ForegroundInactive=#919191
 ForegroundLink=#8fc9fc
 ForegroundNegative=#ffb3b4
 ForegroundNeutral=#fcb38a
-ForegroundNormal=#dfe2eb
+ForegroundNormal=#e2e2e2
 ForegroundPositive=#00e479
 ForegroundVisited=#ebb2ff
 
 [Colors:Complementary]
-BackgroundAlternate=#0f141a
-BackgroundNormal=#191e24
-DecorationFocus=#bdcb72
-DecorationHover=#bdcb72
-ForegroundActive=#dfe2eb
-ForegroundInactive=#89919e
+BackgroundAlternate=#111111
+BackgroundNormal=#1d1d1e
+DecorationFocus=#cdbafc
+DecorationHover=#cdbafc
+ForegroundActive=#e2e2e2
+ForegroundInactive=#919191
 ForegroundLink=#8fc9fc
 ForegroundNegative=#ffb3b4
 ForegroundNeutral=#fcb38a
-ForegroundNormal=#bfc7d5
+ForegroundNormal=#c6c6c6
 ForegroundPositive=#00e479
 ForegroundVisited=#ebb2ff
 
 [Colors:Header]
-BackgroundAlternate=#191e24
-BackgroundNormal=#191e24
-DecorationFocus=#bdcb72
-DecorationHover=#bdcb72
-ForegroundActive=#dfe2eb
-ForegroundInactive=#89919e
+BackgroundAlternate=#1d1d1e
+BackgroundNormal=#1d1d1e
+DecorationFocus=#cdbafc
+DecorationHover=#cdbafc
+ForegroundActive=#e2e2e2
+ForegroundInactive=#919191
 ForegroundLink=#8fc9fc
 ForegroundNegative=#ffb3b4
 ForegroundNeutral=#fcb38a
-ForegroundNormal=#bfc7d5
+ForegroundNormal=#c6c6c6
 ForegroundPositive=#00e479
 ForegroundVisited=#ebb2ff
 
 [Colors:Header][Inactive]
-BackgroundAlternate=#3d4551
-BackgroundNormal=#191e24
-DecorationFocus=#bdcb72
-DecorationHover=#bdcb72
+BackgroundAlternate=#474747
+BackgroundNormal=#1d1d1e
+DecorationFocus=#cdbafc
+DecorationHover=#cdbafc
 ForegroundActive=#8fc9fc
-ForegroundInactive=#89919e
+ForegroundInactive=#919191
 ForegroundLink=#8fc9fc
 ForegroundNegative=#ffb3b4
 ForegroundNeutral=#fcb38a
-ForegroundNormal=#bfc7d5
+ForegroundNormal=#c6c6c6
 ForegroundPositive=#00e479
 ForegroundVisited=#ebb2ff
 
 [Colors:Selection]
-BackgroundAlternate=#bdcb72
-BackgroundNormal=#bdcb72
-DecorationFocus=#bdcb72
-DecorationHover=#ddb8da
-ForegroundActive=#2c3400
-ForegroundInactive=#2c3400
+BackgroundAlternate=#cdbafc
+BackgroundNormal=#cdbafc
+DecorationFocus=#cdbafc
+DecorationHover=#c9bfd8
+ForegroundActive=#381e72
+ForegroundInactive=#381e72
 ForegroundLink=#004b73
 ForegroundNegative=#920023
 ForegroundNeutral=#753400
-ForegroundNormal=#2c3400
+ForegroundNormal=#381e72
 ForegroundPositive=#005228
 ForegroundVisited=#74009f
 
 [Colors:Tooltip]
-BackgroundAlternate=#3d4551
-BackgroundNormal=#191e24
-DecorationFocus=#bdcb72
-DecorationHover=#bdcb72
-ForegroundActive=#dfe2eb
-ForegroundInactive=#89919e
+BackgroundAlternate=#474747
+BackgroundNormal=#1d1d1e
+DecorationFocus=#cdbafc
+DecorationHover=#cdbafc
+ForegroundActive=#e2e2e2
+ForegroundInactive=#919191
 ForegroundLink=#8fc9fc
 ForegroundNegative=#ffb3b4
 ForegroundNeutral=#fcb38a
-ForegroundNormal=#dfe2eb
+ForegroundNormal=#e2e2e2
 ForegroundPositive=#00e479
 ForegroundVisited=#ebb2ff
 
 [Colors:View]
-BackgroundAlternate=#191e24
-BackgroundNormal=#0f141a
-DecorationFocus=#bdcb72
-DecorationHover=#596415
-ForegroundActive=#dfe2eb
-ForegroundInactive=#89919e
+BackgroundAlternate=#1d1d1e
+BackgroundNormal=#111111
+DecorationFocus=#cdbafc
+DecorationHover=#6750a4
+ForegroundActive=#e2e2e2
+ForegroundInactive=#919191
 ForegroundLink=#8fc9fc
 ForegroundNegative=#ffb3b4
 ForegroundNeutral=#fcb38a
-ForegroundNormal=#dfe2eb
+ForegroundNormal=#e2e2e2
 ForegroundPositive=#00e479
 ForegroundVisited=#ebb2ff
 
 [Colors:Window]
-BackgroundAlternate=#3d4551
-BackgroundNormal=#191e24
-DecorationFocus=#bdcb72
-DecorationHover=#bdcb72
+BackgroundAlternate=#474747
+BackgroundNormal=#1d1d1e
+DecorationFocus=#cdbafc
+DecorationHover=#cdbafc
 ForegroundActive=#8fc9fc
-ForegroundInactive=#89919e
+ForegroundInactive=#919191
 ForegroundLink=#8fc9fc
 ForegroundNegative=#ffb3b4
 ForegroundNeutral=#fcb38a
-ForegroundNormal=#bfc7d5
+ForegroundNormal=#c6c6c6
 ForegroundPositive=#00e479
 ForegroundVisited=#ebb2ff
 
 [General]
 ColorScheme=MaterialYouDark
-ColorSchemeHash=1cfb53c1c97752f914db1c356fe02b062c8e810a
+ColorSchemeHash=3544ddda033ecd2e8ade70a7ec1de2e9291d5b99
 LastUsedCustomAccentColor=184,117,220
 MiddleClickPaste=false
 TerminalApplication=kitty -1
 XftAntialias=true
 XftHintStyle=hintfull
 XftSubPixel=rgb
-fixed=JetBrainsMono Nerd Font Mono,12,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
-font=Readex Pro,13,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
-menuFont=Readex Pro,13,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
-smallestReadableFont=Readex Pro,10,-1,5,455,0,0,0,0,0,0,0,0,0,0,1,Regular,0,0
-toolBarFont=Readex Pro,13,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
+fixed=JetBrainsMono Nerd Font Mono,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
+font=Roboto Flex,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
+menuFont=Roboto Flex,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
+smallestReadableFont=Roboto Flex,10,-1,5,455,0,0,0,0,0,0,0,0,0,0,1,Regular,0,0
+toolBarFont=Roboto Flex,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1,,0,0
 
 [Icons]
 Theme=breeze-plus-dark
@@ -169,7 +169,7 @@ Show Full Path=false
 Show Inline Previews=true
 Show Preview=false
 Show Speedbar=true
-Show hidden files=false
+Show hidden files=true
 Sort by=Name
 Sort directories first=true
 Sort hidden files last=false
@@ -188,10 +188,10 @@ MaximumRemoteSize=10485758951424
 Theme=freedesktop
 
 [WM]
-activeBackground=49,53,60
+activeBackground=53,53,53
 activeBlend=252,252,252
-activeFont=Readex Pro,12,-1,5,700,0,0,0,0,0,0,0,0,0,0,1,Bold,0,0
-activeForeground=223,226,235
-inactiveBackground=87,59,87
+activeFont=Roboto Flex,10,-1,5,700,0,0,0,0,0,0,0,0,0,0,1,Bold,0,0
+activeForeground=226,226,226
+inactiveBackground=76,70,90
 inactiveBlend=161,169,177
-inactiveForeground=253,215,250
+inactiveForeground=232,222,248

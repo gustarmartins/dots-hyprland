@@ -20,7 +20,7 @@ import qs.modules.ii.sidebarRight.wifiNetworks
 Item {
     id: root
     property int sidebarWidth: Appearance.sizes.sidebarWidth
-    property int sidebarPadding: 10
+    property int sidebarPadding: 16
     property string settingsQmlPath: Quickshell.shellPath("settings.qml")
     property bool showAudioOutputDialog: false
     property bool showAudioInputDialog: false
@@ -29,6 +29,7 @@ Item {
     property bool showWifiDialog: false
     property bool editMode: false
     property bool showingNotifications: false
+    property bool showingWidgets: false
 
     Connections {
         target: GlobalStates
@@ -56,15 +57,38 @@ Item {
         anchors.fill: parent
         implicitHeight: parent.height - Appearance.sizes.hyprlandGapsOut * 2
         implicitWidth: sidebarWidth - Appearance.sizes.hyprlandGapsOut * 2
-        color: Appearance.colors.colLayer0
+        color: Qt.alpha(Appearance.m3colors.m3surfaceContainerLow, (DesktopEffects.settings.panel_opacity ?? 94) / 100)
         border.width: 1
         border.color: Appearance.colors.colLayer0Border
-        radius: Appearance.rounding.screenRounding - Appearance.sizes.hyprlandGapsOut + 1
+        radius: 28
 
         ColumnLayout {
             anchors.fill: parent
             anchors.margins: sidebarPadding
             spacing: sidebarPadding
+
+            RowLayout {
+                Layout.fillWidth: true
+                ColumnLayout {
+                    spacing: 2
+                    StyledText {
+                        text: "Control center"
+                        font.pixelSize: 26
+                        font.weight: Font.Medium
+                        color: Appearance.m3colors.m3onSurface
+                    }
+                    StyledText {
+                        text: Qt.formatDateTime(DateTime.clock.date, "dddd, d MMMM")
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        color: Appearance.m3colors.m3onSurfaceVariant
+                    }
+                }
+                Item { Layout.fillWidth: true }
+                QuickToggleButton {
+                    buttonIcon: "close"
+                    onClicked: GlobalStates.sidebarRightOpen = false
+                }
+            }
 
             SystemButtonRow {
                 Layout.fillHeight: false
@@ -74,10 +98,28 @@ Item {
                 Layout.bottomMargin: 0
             }
 
+            ConfigSelectionArray {
+                currentValue: root.showingNotifications ? "inbox" : root.showingWidgets ? "agenda" : "controls"
+                options: [
+                    {displayName: "Controls", icon: "tune", value: "controls"},
+                    {displayName: "Inbox · " + Notifications.list.length, icon: "notifications", value: "inbox"},
+                    {displayName: "Agenda", icon: "calendar_month", value: "agenda"}
+                ]
+                onSelected: value => {
+                    root.showingNotifications = value === "inbox";
+                    root.showingWidgets = value === "agenda";
+                }
+            }
+
+            DesktopMood {
+                Layout.fillWidth: true
+                visible: !root.showingNotifications && !root.showingWidgets
+            }
+
             Loader {
                 id: slidersLoader
                 Layout.fillWidth: true
-                visible: active
+                visible: active && !root.showingNotifications && !root.showingWidgets
                 active: {
                     const configQuickSliders = Config.options.sidebar.quickSliders
                     if (!configQuickSliders.enable) return false
@@ -108,8 +150,10 @@ Item {
             }
 
             BottomWidgetGroup {
+                visible: root.showingWidgets
+                forceExpanded: root.showingWidgets
                 Layout.alignment: Qt.AlignHCenter
-                Layout.fillHeight: false
+                Layout.fillHeight: true
                 Layout.fillWidth: true
                 Layout.preferredHeight: implicitHeight
             }
@@ -192,7 +236,7 @@ Item {
         Layout.fillWidth: item?.Layout.fillWidth ?? false
         Layout.fillHeight: item?.Layout.fillHeight ?? false
         Layout.minimumHeight: item?.Layout.minimumHeight ?? 0
-        visible: active && (styleName !== "android" || !root.showingNotifications)
+        visible: active && !root.showingNotifications && !root.showingWidgets
         active: Config.options.sidebar.quickToggles.style === styleName
         Connections {
             target: quickPanelImplLoader.item
@@ -213,6 +257,7 @@ Item {
             }
             function onOpenNotifications() {
                 root.showingNotifications = true;
+                root.showingWidgets = false;
             }
         }
     }

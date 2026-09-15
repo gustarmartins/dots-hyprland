@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -u
+
+tool=/usr/local/bin/build-memory-profile
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/memory-tools"
+log_file="$state_dir/build-cache-toggle.log"
+
+notify_result() {
+    local urgency=$1 title=$2 body=$3
+    command -v notify-send >/dev/null 2>&1 \
+        && notify-send -a 'Build Cache' -u "$urgency" -t 12000 "$title" "$body" \
+        || true
+}
+
+run_toggle() {
+    mkdir -p -- "$state_dir"
+    printf '\n[%s] Build-cache toggle requested\n' "$(date --iso-8601=seconds)" | tee -a "$log_file"
+    set -o pipefail
+    "$tool" cache-toggle 2>&1 | tee -a "$log_file"
+    local rc=${PIPESTATUS[0]}
+    local state
+    state=$($tool cache-state 2>/dev/null || printf 'error')
+    if (( rc == 0 )); then
+        notify_result normal 'Build cache switched' "State: $state. Full log: $log_file"
+    else
+        notify_result critical 'Build cache switch refused' "No unsafe switch was made. See $log_file"
+    fi
+    return "$rc"
+}
+
+open_toggle_terminal() {
+    local runner='"$1" toggle; rc=$?; if (( rc != 0 )); then printf "\nPress Enter to close..."; read -r; fi; exit "$rc"'
+    if command -v kitty >/dev/null 2>&1; then
+        exec kitty --title 'Build Cache RAM toggle' bash -lc "$runner" bash "$0"
+    elif command -v foot >/dev/null 2>&1; then
+        exec foot --title='Build Cache RAM toggle' bash -lc "$runner" bash "$0"
+    elif command -v konsole >/dev/null 2>&1; then
+        exec konsole -p tabtitle='Build Cache RAM toggle' -e bash -lc "$runner" bash "$0"
+    fi
+    run_toggle
+}
+
+case "${1:-report}" in
+    get_state)
+        exec "$tool" cache-state
+        ;;
+    report|status)
+        report=$($tool cache-status 2>&1)
+        printf '%s\n' "$report"
+        notify_result normal 'Build cache status' "$report"
+        ;;
+    toggle)
+        run_toggle
+        ;;
+    toggle-gui)
+        open_toggle_terminal
+        ;;
+    *)
+        printf 'usage: build-cache-mode {get_state|status|toggle|toggle-gui}\n' >&2
+        exit 2
+        ;;
+esac

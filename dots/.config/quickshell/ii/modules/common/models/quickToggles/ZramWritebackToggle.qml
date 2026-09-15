@@ -21,11 +21,8 @@ QuickToggleModel {
     }
 
     altAction: () => {
-        Quickshell.execDetached([
-            "notify-send", "-a", "Memory Tools", "-u", "critical", "-t", "20000",
-            "Emergency writeback is terminal-only",
-            "Run: ~/.local/bin/memory-tools.sh writeback-all CONFIRM-DRAIN-ALL"
-        ])
+        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" writeback-all"])
+        refreshDelay.restart()
     }
 
     Process {
@@ -54,5 +51,5 @@ QuickToggleModel {
         onTriggered: fetchBudget.running = true
     }
 
-    tooltipText: Translation.tr("L: one guarded pass (max 256 MiB, pages idle 24h, 4 GiB/boot cap). R: show the explicit emergency terminal command.")
+    tooltipText: Translation.tr("Left: guarded 24h-idle pass. Right: emergency writeback; warning is shown, action proceeds.")
 }

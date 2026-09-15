@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Keep End-4's hyprsunset control path healthy. A hyprsunset process may
+# Keep End-4's hyprsunset control path healthy.  A hyprsunset process may
 # remain alive after its IPC accept thread has died, in which case `pidof`
 # succeeds forever while every `hyprctl hyprsunset ...` command fails.
 
@@ -22,7 +22,7 @@ ensure_healthy() {
     fi
 
     # Stop a legacy End-4 daemon that was launched directly rather than by
-    # the user service. It can otherwise retain the compositor's single CTM
+    # the user service.  It can otherwise retain the compositor's single CTM
     # manager and prevent the replacement from starting.
     systemctl --user stop hyprsunset.service >/dev/null 2>&1 || true
     mapfile -t stale_pids < <(pgrep -u "$(id -u)" -x hyprsunset || true)

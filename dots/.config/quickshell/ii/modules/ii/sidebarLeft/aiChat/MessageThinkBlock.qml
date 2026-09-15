@@ -25,7 +25,9 @@ Item {
     property real thinkBlockComponentSpacing: 2
 
     property var collapseAnimation: messageTextBlock.implicitHeight > 40 ? Appearance.animation.elementMoveEnter : Appearance.animation.elementMoveFast
-    property bool collapsed: true /* should be root.completed but its kinda buggy rn so nope */
+    property bool userToggled: false
+    property bool userCollapsed: false
+    property bool collapsed: userToggled ? userCollapsed : (root.completed ? true : false)
 
     Layout.fillWidth: true
     implicitHeight: collapsed ? header.implicitHeight : columnLayout.implicitHeight
@@ -39,7 +41,7 @@ Item {
     }
 
     Behavior on implicitHeight {
-        enabled: root.completed ?? false
+        enabled: true
         NumberAnimation {
             duration: collapseAnimation.duration
             easing.type: collapseAnimation.type
@@ -62,12 +64,13 @@ Item {
 
             MouseArea { // Click to reveal
                 id: headerMouseArea
-                enabled: root.completed
+                enabled: true
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 hoverEnabled: true
                 onClicked: {
-                    root.collapsed = !root.collapsed
+                    root.userCollapsed = !root.collapsed
+                    root.userToggled = true
                 }
             }
 
@@ -91,12 +94,12 @@ Item {
                     id: thinkBlockLanguage
                     Layout.fillWidth: false
                     Layout.alignment: Qt.AlignLeft
-                    text: root.completed ? Translation.tr("Thought") : (Translation.tr("Thinking") + ".".repeat(Math.random() * 4))
+                    text: root.completed ? Translation.tr("Thought") : Translation.tr("Thinking...")
                 }
                 Item { Layout.fillWidth: true }
                 RippleButton { // Expand button
                     id: expandButton
-                    visible: root.completed
+                    visible: true
                     implicitWidth: 22
                     implicitHeight: 22
                     colBackground: headerMouseArea.containsMouse ? Appearance.colors.colLayer2Hover
@@ -104,7 +107,10 @@ Item {
                     colBackgroundHover: Appearance.colors.colLayer2Hover
                     colRipple: Appearance.colors.colLayer2Active
 
-                    onClicked: { root.collapsed = !root.collapsed }
+                    onClicked: {
+                        root.userCollapsed = !root.collapsed
+                        root.userToggled = true
+                    }
                     
                     contentItem: MaterialSymbol {
                         anchors.centerIn: parent

@@ -3,23 +3,12 @@
 set -euo pipefail
 
 APPLY=/usr/local/bin/focus-mode-apply
-WATCH="$HOME/.local/bin/focus-mode-watch"
-WATCH_UNIT=focus-mode-watch.service
 DMA_UNIT=focus-dma-latency
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/focus-mode"
-WATCH_PID="$STATE_DIR/watch.pid"
-LEGACY_WATCH_PID="${XDG_RUNTIME_DIR:-/tmp}/focus-mode-watch.pid"
 
 is_on() {
     systemctl is-active --quiet "$DMA_UNIT" &&
-        systemctl --user is-active --quiet "$WATCH_UNIT"
-}
-
-watch_pid_is_valid() {
-    local pid=${1:-} cmdline
-    [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || return 1
-    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
-    [[ "$cmdline" == *"$WATCH"* ]]
+        [ -f "/run/focus-mode/enabled-$UID" ]
 }
 
 active_pid() {
@@ -34,34 +23,12 @@ active_kind() {
     '
 }
 
-start_watch() {
-    mkdir -p "$STATE_DIR"
-    if [ -f "$LEGACY_WATCH_PID" ] && watch_pid_is_valid "$(cat "$LEGACY_WATCH_PID" 2>/dev/null)"; then
-        kill "$(cat "$LEGACY_WATCH_PID" 2>/dev/null)" 2>/dev/null || true
-        rm -f "$LEGACY_WATCH_PID"
-    fi
-    if [ -f "$WATCH_PID" ] && watch_pid_is_valid "$(cat "$WATCH_PID" 2>/dev/null)"; then
-        kill "$(cat "$WATCH_PID" 2>/dev/null)" 2>/dev/null || true
-    fi
-    rm -f "$WATCH_PID"
-    # The user manager receives the current Hyprland socket variables after
-    # login. Restarting avoids reusing a watcher started before that import.
-    systemctl --user restart "$WATCH_UNIT"
-}
-
-stop_watch() {
-    systemctl --user stop "$WATCH_UNIT" 2>/dev/null || true
-    for pidfile in "$WATCH_PID" "$LEGACY_WATCH_PID"; do
-        [ -f "$pidfile" ] || continue
-        pid=$(cat "$pidfile" 2>/dev/null || true)
-        watch_pid_is_valid "$pid" && kill "$pid" 2>/dev/null || true
-        rm -f "$pidfile"
-    done
-}
-
 turn_on() {
-    start_watch
+    local pid kind
+    pid=$(active_pid)
+    kind=$(active_kind)
     sudo -n "$APPLY" on
+    [ -n "$pid" ] && sudo -n "$APPLY" focus "$pid" "$kind"
 }
 
 turn_off() {
@@ -71,10 +38,8 @@ turn_off() {
 
 show_status() {
     printf 'mode=%s\n' "$(is_on && echo on || echo off)"
-    printf 'selector=%s\n' "$("$WATCH" select 2>/dev/null || echo unavailable)"
+    printf 'selector=%s\n' "$(active_pid) $(active_kind)"
     printf 'hypr_active=%s\n' "$(hyprctl activewindow -j 2>/dev/null | jq -r '"\(.pid // 0) \(.class // "none")"')"
-    systemctl --user show "$WATCH_UNIT" \
-        -p ActiveState -p SubState -p MainPID -p NRestarts --no-pager
     sudo -n "$APPLY" status
 }
 

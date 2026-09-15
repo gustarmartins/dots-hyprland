@@ -11,6 +11,8 @@ import Quickshell.Services.Notifications
 
 Item { // Notification item area
     id: root
+    objectName: "notificationCard"
+    readonly property string formattedBody: NotificationUtils.processNotificationBody(String(notificationObject?.body ?? ""), notificationObject?.appName || notificationObject?.summary).replace(/\n/g, "<br/>")
     property var notificationObject
     property bool expanded: false
     property bool popup: false
@@ -116,7 +118,7 @@ Item { // Notification item area
         id: background
         width: parent.width
         anchors.left: parent.left
-        radius: Appearance.rounding.small
+        radius: 16
         anchors.leftMargin: root.xOffset
 
         Behavior on anchors.leftMargin {
@@ -178,16 +180,21 @@ Item { // Notification item area
                     maximumLineCount: root.compactBodyLineCount
                     textFormat: Text.StyledText
                     text: {
-                        return NotificationUtils.processNotificationBody(notificationObject.body, notificationObject.appName || notificationObject.summary).replace(/\n/g, "<br/>")
+                        return root.expanded ? "" : root.formattedBody
                     }
                 }
             }
 
-            ColumnLayout { // Expanded content
+            Loader {
+                Layout.fillWidth: true
+                active: root.expanded
+                asynchronous: true
+                visible: active
+                Layout.preferredHeight: item?.implicitHeight ?? 48
+                sourceComponent: ColumnLayout { // Expanded content
                 id: expandedContentColumn
                 Layout.fillWidth: true
-                opacity: root.expanded ? 1 : 0
-                visible: opacity > 0
+
 
                 StyledText { // Notification body (expanded)
                     id: notificationBodyText
@@ -200,10 +207,9 @@ Item { // Notification item area
                     wrapMode: Text.Wrap
                     elide: Text.ElideRight
                     maximumLineCount: root.expandedBodyLineCount
-                    textFormat: Text.RichText
+                    textFormat: Text.StyledText
                     text: {
-                        return `<style>img{max-width:${expandedContentColumn.width}px;}</style>` + 
-                            `${NotificationUtils.processNotificationBody(notificationObject.body, notificationObject.appName || notificationObject.summary).replace(/\n/g, "<br/>")}`
+                        return root.formattedBody
                     }
 
                     onLinkActivated: (link) => {
@@ -219,12 +225,12 @@ Item { // Notification item area
                     implicitWidth: actionsFlickable.implicitWidth
                     implicitHeight: actionsFlickable.implicitHeight
 
-                    layer.enabled: true
+                    layer.enabled: false
                     layer.effect: OpacityMask {
                         maskSource: Rectangle {
                             width: actionsFlickable.width
                             height: actionsFlickable.height
-                            radius: Appearance.rounding.small
+                            radius: 16
                         }
                     }
 
@@ -322,6 +328,7 @@ Item { // Notification item area
                         }
                     }
                 }
+            }
             }
         }
     }

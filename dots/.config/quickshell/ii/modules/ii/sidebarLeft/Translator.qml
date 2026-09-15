@@ -69,8 +69,8 @@ Item {
             + ` '${StringUtils.shellSingleQuoteEscape(root.inputField.text.trim())}'`]
         property string buffer: ""
         stdout: SplitParser {
-            onRead: data => {
-                translateProc.buffer += data + "\n";
+            onRead: (line) => {
+                translateProc.buffer += line + "\n";
             }
         }
         onExited: (exitCode, exitStatus) => {
@@ -85,8 +85,8 @@ Item {
         property list<string> bufferList: ["auto"]
         running: true
         stdout: SplitParser {
-            onRead: data => {
-                getLanguagesProc.bufferList.push(data.trim());
+            onRead: (line) => {
+                getLanguagesProc.bufferList = [...getLanguagesProc.bufferList, line.trim()];
             }
         }
         onExited: (exitCode, exitStatus) => {

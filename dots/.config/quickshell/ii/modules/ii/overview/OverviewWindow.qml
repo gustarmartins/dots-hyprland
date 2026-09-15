@@ -46,7 +46,7 @@ Item { // Window
 
     property bool centerIcons: Config.options.overview.centerIcons
     property real iconGapRatio: 0.06
-    property real iconToWindowRatio: centerIcons ? 0.35 : 0.15
+    property real iconToWindowRatio: centerIcons ? 0.23 : 0.15
     property real xwaylandIndicatorToIconRatio: 0.35
     property real iconToWindowRatioCompact: 0.6
     property string iconPath: Quickshell.iconPath(AppSearch.guessIcon(windowData?.class), "image-missing")
@@ -58,7 +58,7 @@ Item { // Window
     y: initY
     width: targetWindowWidth
     height: targetWindowHeight
-    opacity: windowData.monitor == widgetMonitorId ? 1 : 0.4
+    opacity: windowData.monitor == widgetMonitorId ? 1 : 0.72
 
     property real topLeftRadius
     property real topRightRadius
@@ -113,6 +113,7 @@ Item { // Window
                 ColorUtils.transparentize(Appearance.colors.colLayer2)
             border.color : ColorUtils.transparentize(Appearance.m3colors.m3outline, 0.88)
             border.width : 1
+            Behavior on color { ColorAnimation { duration: 140 } }
         }
 
         StyledImage {

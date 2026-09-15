@@ -90,6 +90,20 @@ DelegateChooser {
         }
     }
     DelegateChoice {
+        roleValue: "vrr"
+        ActionCenterToggleButton {
+            toggleModel: VrrToggle {}
+            icon: "sync"
+        }
+    }
+    DelegateChoice {
+        roleValue: "lsfg"
+        ActionCenterToggleButton {
+            toggleModel: LsfgToggle {}
+            icon: "auto_awesome"
+        }
+    }
+    DelegateChoice {
         roleValue: "tripleBuffer"
         ActionCenterToggleButton {
             toggleModel: TripleBufferToggle {}

@@ -141,10 +141,10 @@ Scope { // Scope
                 anchors.leftMargin: Appearance.sizes.hyprlandGapsOut
                 width: panelWindow.sidebarWidth - Appearance.sizes.hyprlandGapsOut - Appearance.sizes.elevationMargin
                 height: parent.height - Appearance.sizes.hyprlandGapsOut * 2
-                color: Appearance.colors.colLayer0
+                color: Qt.alpha(Appearance.m3colors.m3surfaceContainerLow, (DesktopEffects.settings.panel_opacity ?? 94) / 100)
                 border.width: 1
                 border.color: Appearance.colors.colLayer0Border
-                radius: Appearance.rounding.screenRounding - Appearance.sizes.hyprlandGapsOut + 1
+                radius: 28
 
                 Behavior on width {
                     animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
@@ -186,7 +186,7 @@ Scope { // Scope
             Rectangle {
                 id: detachedSidebarBackground
                 anchors.fill: parent
-                color: Appearance.colors.colLayer0
+                color: Qt.alpha(Appearance.m3colors.m3surfaceContainerLow, (DesktopEffects.settings.panel_opacity ?? 94) / 100)
 
                 Keys.onPressed: (event) => {
                     if (event.modifiers === Qt.ControlModifier) {

@@ -18,7 +18,7 @@ get_state() {
 report() {
     local atlas scope body
     atlas=$(NO_COLOR=1 "$HOME/.local/bin/vmatlas" 2>&1)
-    scope=$(NO_COLOR=1 "$HOME/.local/bin/vmscope" 2>&1)
+    scope=$(NO_COLOR=1 "$HOME/.local/bin/vmscope" status 2>&1)
     body="$atlas
 
 $scope"

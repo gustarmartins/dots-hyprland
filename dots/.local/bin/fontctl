@@ -171,8 +171,8 @@ XMLEOF
     log_ok "fontconfig (user): ${ui_font}, ${hintstyle}, ${subpixel}"
 }
 
-# Late user override. This intentionally sorts after legacy 99-roboto rules so
-# the family requested through fontctl is also the family fontconfig resolves.
+# Replace only the matched generic family. Replacing the entire family list
+# hijacks explicit fonts because Fontconfig appends generic fallbacks to them.
 update_fontconfig_selected() {
     local ui_font="$1" mono_font="$2"
     mkdir -p "$(dirname "$FONTCONFIG_SELECTED_USER")"
@@ -184,33 +184,29 @@ update_fontconfig_selected() {
   <!-- Managed by fontctl. Do not edit manually. -->
   <match target="pattern">
     <test qual="any" name="family"><string>monospace</string></test>
-    <edit name="family" mode="assign_replace" binding="strong"><string>${mono_font}</string></edit>
+    <edit name="family" mode="assign" binding="strong"><string>${mono_font}</string></edit>
     <edit name="family" mode="append"><string>Symbols Nerd Font Mono</string></edit>
   </match>
   <match target="pattern">
     <test qual="any" name="family"><string>ui-monospace</string></test>
-    <edit name="family" mode="assign_replace" binding="strong"><string>${mono_font}</string></edit>
+    <edit name="family" mode="assign" binding="strong"><string>${mono_font}</string></edit>
     <edit name="family" mode="append"><string>Symbols Nerd Font Mono</string></edit>
   </match>
   <match target="pattern">
     <test qual="any" name="family"><string>sans-serif</string></test>
-    <edit name="family" mode="assign_replace" binding="strong"><string>${ui_font}</string></edit>
+    <edit name="family" mode="assign" binding="strong"><string>${ui_font}</string></edit>
   </match>
   <match target="pattern">
     <test qual="any" name="family"><string>system-ui</string></test>
-    <edit name="family" mode="assign_replace" binding="strong"><string>${ui_font}</string></edit>
+    <edit name="family" mode="assign" binding="strong"><string>${ui_font}</string></edit>
   </match>
   <match target="pattern">
     <test qual="any" name="family"><string>ui-sans-serif</string></test>
-    <edit name="family" mode="assign_replace" binding="strong"><string>${ui_font}</string></edit>
+    <edit name="family" mode="assign" binding="strong"><string>${ui_font}</string></edit>
   </match>
   <match target="pattern">
     <test qual="any" name="family"><string>ui-rounded</string></test>
-    <edit name="family" mode="assign_replace" binding="strong"><string>${ui_font}</string></edit>
-  </match>
-  <match target="pattern">
-    <test qual="any" name="family"><string>${ui_font}</string></test>
-    <edit name="family" mode="prepend_first" binding="strong"><string>${ui_font}</string></edit>
+    <edit name="family" mode="assign" binding="strong"><string>${ui_font}</string></edit>
   </match>
 </fontconfig>
 XMLEOF
@@ -237,57 +233,41 @@ verify_fontconfig_selection() {
 
 # 2. /etc/fonts/local.conf (system — needs privilege escalation)
 update_fontconfig_system() {
-    local ui_font="$1" mono_font="$2" hintstyle="$3" subpixel="$4" lcdfilter="$5"
-    
-    local tmpfile
-    tmpfile=$(mktemp /tmp/fontctl_local.conf.XXXXXX)
-    
-    cat > "$tmpfile" << XMLEOF
+    local tmpdir
+    tmpdir=$(mktemp -d /tmp/fontctl-system.XXXXXX)
+    cat > "$tmpdir/local.conf" <<'XML'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig><!-- fontctl: rendering and family selection belong to each user. --></fontconfig>
+XML
+    cat > "$tmpdir/selected.conf" <<'XML'
 <?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
-  <!-- Managed by fontctl. Do not edit manually. -->
-  <match target="font">
-    <edit name="antialias" mode="assign"><bool>true</bool></edit>
-    <edit name="hinting" mode="assign"><bool>true</bool></edit>
-    <edit name="hintstyle" mode="assign"><const>${hintstyle}</const></edit>
-    <edit name="rgba" mode="assign"><const>${subpixel}</const></edit>
-    <edit name="lcdfilter" mode="assign"><const>${lcdfilter}</const></edit>
-    <edit name="autohint" mode="assign"><bool>false</bool></edit>
-  </match>
-
-  <match target="pattern">
-    <test qual="any" name="family"><string>sans-serif</string></test>
-    <edit name="family" mode="prepend" binding="strong"><string>${ui_font}</string></edit>
-  </match>
-  <match target="pattern">
-    <test qual="any" name="family"><string>ui-rounded</string></test>
-    <edit name="family" mode="prepend" binding="strong"><string>${ui_font}</string></edit>
-  </match>
-  <match target="pattern">
-    <test qual="any" name="family"><string>system-ui</string></test>
-    <edit name="family" mode="prepend" binding="strong"><string>${ui_font}</string></edit>
-  </match>
-  <match target="pattern">
-    <test qual="any" name="family"><string>monospace</string></test>
-    <edit name="family" mode="prepend" binding="strong"><string>${mono_font}</string></edit>
-  </match>
+  <!-- fontctl: preserve per-user selections across every preset update. -->
+  <include ignore_missing="yes" prefix="xdg">fontconfig/fonts.conf</include>
+  <include ignore_missing="yes" prefix="xdg">fontconfig/conf.d/99-zz-fontctl-selected.conf</include>
 </fontconfig>
-XMLEOF
-    
-    if [[ -w "$FONTCONFIG_SYSTEM" ]] || [[ -w "$(dirname "$FONTCONFIG_SYSTEM")" ]]; then
-        cp "$tmpfile" "$FONTCONFIG_SYSTEM"
-        cp "$FONTCONFIG_SELECTED_USER" "$FONTCONFIG_SELECTED_SYSTEM"
-        log_ok "fontconfig (system): synced"
-    elif command -v pkexec &>/dev/null; then
-        pkexec cp "$tmpfile" "$FONTCONFIG_SYSTEM" 2>/dev/null && \
-            pkexec cp "$FONTCONFIG_SELECTED_USER" "$FONTCONFIG_SELECTED_SYSTEM" 2>/dev/null && \
-            log_ok "fontconfig (system): synced (via pkexec)" || \
-            log_warn "fontconfig (system): skipped (auth denied)"
-    else
-        log_warn "fontconfig (system): skipped (no write access, no pkexec)"
+XML
+    if ! xmlstarlet val "$tmpdir/local.conf" "$tmpdir/selected.conf" >/dev/null; then
+        rm -rf "$tmpdir"
+        die "Generated system Fontconfig XML is invalid"
     fi
-    rm -f "$tmpfile"
+    local elevate=()
+    if [[ ! -w "$FONTCONFIG_SYSTEM" ]]; then
+        if sudo -n true 2>/dev/null; then
+            elevate=(sudo -n)
+        else
+            elevate=(pkexec)
+        fi
+    fi
+    if "${elevate[@]}" install -m 644 "$tmpdir/local.conf" "$FONTCONFIG_SYSTEM" &&
+       "${elevate[@]}" install -m 644 "$tmpdir/selected.conf" "$FONTCONFIG_SELECTED_SYSTEM"; then
+        log_ok "fontconfig (system): per-user precedence installed"
+    else
+        log_warn "fontconfig (system): sync failed; check effective matches"
+    fi
+    rm -rf "$tmpdir"
 }
 
 # 3. GTK3 settings.ini
@@ -423,6 +403,7 @@ update_gsettings() {
 update_ii_config() {
     local ui_font="$1" mono_font="$2" title_font="$3" \
           numbers_font="$4" reading_font="$5" expressive_font="$6"
+    local ui_size="${7:-}" mono_size="${8:-}" title_size="${9:-}"
     local file="$II_CONFIG"
     [[ -f "$file" ]] || { log_warn "II config not found: $file"; return 0; }
     
@@ -435,12 +416,20 @@ update_ii_config() {
        --arg numbers "$numbers_font" \
        --arg reading "$reading_font" \
        --arg expressive "$expressive_font" \
+       --arg ui_size "$ui_size" \
+       --arg mono_size "$mono_size" \
+       --arg title_size "$title_size" \
        '.appearance.fonts.main = $main |
         .appearance.fonts.monospace = $mono |
         .appearance.fonts.title = $title |
         .appearance.fonts.numbers = $numbers |
         .appearance.fonts.reading = $reading |
-        .appearance.fonts.expressive = $expressive' \
+        .appearance.fonts.expressive = $expressive |
+        if $ui_size != "" then
+            .appearance.fontSizes.ui = ($ui_size | tonumber) |
+            .appearance.fontSizes.mono = ($mono_size | tonumber) |
+            .appearance.fontSizes.title = ($title_size | tonumber)
+        else . end' \
        "$file" > "$tmpfile"
 
     if cmp -s <(jq -S -c . "$file") <(jq -S -c . "$tmpfile"); then
@@ -452,6 +441,9 @@ update_ii_config() {
     mv "$tmpfile" "$file"
     
     log_ok "illogical-impulse: main=${ui_font}, title=${title_font}, mono=${mono_font}"
+    if [[ -n "$ui_size" ]]; then
+        log_dim "QS base sizes: UI=${ui_size}pt, mono=${mono_size}pt, title=${title_size}pt"
+    fi
 }
 
 # 10. Kitty
@@ -470,21 +462,13 @@ update_kitty() {
 
 # 11. Firefox user.js
 update_firefox() {
-    local ff_userjs
+    local subpixel="$1" ff_userjs force=false
     ff_userjs=$(find_firefox_userjs 2>/dev/null) || { log_warn "Firefox profile not found"; return 0; }
-    [[ -f "$ff_userjs" ]] || { log_warn "Firefox user.js not found"; return 0; }
-    
-    # Ensure subpixel AA is forced
-    if ! grep -q "force-subpixel-aa-where-possible" "$ff_userjs" 2>/dev/null; then
-        {
-            echo ''
-            echo '// Force subpixel AA even when Wayland reports unknown subpixel layout'
-            echo 'user_pref("gfx.webrender.quality.force-subpixel-aa-where-possible", true);'
-        } >> "$ff_userjs"
-        log_ok "Firefox: added subpixel AA fix"
-    else
-        log_ok "Firefox: subpixel AA fix already present"
-    fi
+    [[ "$subpixel" == rgb || "$subpixel" == bgr ]] && force=true
+    touch "$ff_userjs"
+    sed -i '/^[[:space:]]*user_pref("gfx.webrender.quality.force-subpixel-aa-where-possible",/d' "$ff_userjs"
+    printf '\nuser_pref("gfx.webrender.quality.force-subpixel-aa-where-possible", %s);\n' "$force" >> "$ff_userjs"
+    log_ok "Firefox: subpixel force=$force (takes effect after Firefox restart)"
 }
 
 # ── Post-Apply Hooks ───────────────────────────────────────────────────────────
@@ -651,6 +635,8 @@ cmd_status() {
         printf "%-24s %-26s %-14s %-10s\n" "II (main)" "$ii_main" "—" "—"
         printf "%-24s %-26s %-14s %-10s\n" "II (title)" "$ii_title" "—" "—"
         printf "%-24s %-26s %-14s %-10s\n" "II (mono)" "$ii_mono" "—" "—"
+        jq -r '(.appearance.fontSizes // {}) |
+            "  QS base sizes (pt; 0 = original): UI=\(.ui // 0), mono=\(.mono // 0), title=\(.title // 0)"' "$II_CONFIG"
     fi
     
     # 10. Kitty
@@ -668,20 +654,25 @@ cmd_status() {
         local ff_subpix="no"
         grep -q "force-subpixel-aa-where-possible.*true" "$ff_userjs" 2>/dev/null && ff_subpix="forced"
         printf "%-24s %-26s %-14s %-10s\n" "Firefox" "—" "—" "subpx=$ff_subpix"
-    fi
-    
-    # Wayland subpixel
-    echo ""
-    local wl_subpix
-    wl_subpix=$(wayland-info 2>/dev/null | grep -A8 "wl_output" | grep "subpixel_orientation" | head -1 | awk '{print $NF}' | tr -d ',')
-    if [[ -n "$wl_subpix" ]]; then
-        if [[ "$wl_subpix" == "unknown" ]]; then
-            echo -e "  ${YELLOW}Wayland subpixel: ${wl_subpix}${NC} (EDID doesn't report it — fontconfig rgba=rgb overrides for GTK/Qt)"
-        else
-            echo -e "  ${GREEN}Wayland subpixel: ${wl_subpix}${NC}"
+        local ff_family
+        ff_family=$(sed -n 's/^user_pref("font.name.sans-serif.x-western", "\(.*\)");/\1/p' "${ff_userjs%user.js}prefs.js" 2>/dev/null | tail -1)
+        if [[ -n "$ff_family" ]]; then
+            log_dim "Firefox saved local font: ${ff_family} -> $(fontconfig_family "$ff_family")"
         fi
     fi
+    
     echo ""
+    wayland-info 2>/dev/null | awk '
+        /interface: .wl_output./ { output="" }
+        /^[[:space:]]*name:/ { output=$2 }
+        /subpixel_orientation:/ {
+            sub(/^.*subpixel_orientation: /, ""); sub(/,.*/, "");
+            printf "  Wayland %s subpixel: %s\n", output, $0
+        }' || true
+    log_dim "Fontconfig preferences are not proof of the renderer used by a running app."
+    log_dim "Kitty and Qt Quick distance-field text do not use RGB LCD antialiasing."
+    echo ""
+
 }
 
 # ── Set Command ────────────────────────────────────────────────────────────────
@@ -736,6 +727,22 @@ cmd_set() {
         [[ -z "$ui_font" ]] && die "Could not determine current UI font"
     fi
 
+    case "$hintstyle" in hintnone|hintslight|hintmedium|hintfull) ;; *) die "Invalid hintstyle: $hintstyle" ;; esac
+    case "$subpixel" in rgb|bgr|vrgb|vbgr|none) ;; *) die "Invalid subpixel order: $subpixel" ;; esac
+    case "$lcdfilter" in lcdnone|lcddefault|lcdlight|lcdlegacy) ;; *) die "Invalid LCD filter: $lcdfilter" ;; esac
+    [[ -z "$dpi" || "$dpi" =~ ^[1-9][0-9]*$ ]] || die "DPI must be a positive integer in units of 1/1024"
+    ui_font=$(echo "$ui_font" | sed -E 's/,[[:space:]]*$//; s/[[:space:]]+$//')
+
+    local family
+    for family in "$ui_font" "$mono_font" "$title_font" "$numbers_font" "$reading_font" "$expressive_font"; do
+        [[ "$family" != *[\<\>\&\"\\/]* && "$family" != *$'\n'* ]] || die "Unsupported special character in font family"
+    done
+
+    # Reject invalid sizes before any configuration files are changed.
+    jq -en --arg ui "$ui_size" --arg mono "$mono_size" --arg title "$title_size" \
+        '[$ui, $mono, $title] | all(.[]; (tonumber | . > 0))' >/dev/null 2>&1 \
+        || die "Font sizes must be positive numbers"
+
     # Defaults: inherit from ui_font if not set
     [[ -z "$title_font" ]] && title_font="${ui_font}"
     [[ -z "$numbers_font" ]] && numbers_font="${ui_font}"
@@ -777,7 +784,7 @@ cmd_set() {
         update_kitty "$mono_font" "$mono_size"
     fi
     
-    update_firefox
+    update_firefox "$subpixel"
 
     local qs_was_running=false qs_pid=""
     qs_pid=$(qs_instance_pid 2>/dev/null || true)
@@ -785,7 +792,11 @@ cmd_set() {
         qs_was_running=true
         stop_quickshell_for_update "$qs_pid"
     fi
-    update_ii_config "$ui_font" "$mono_font" "$title_font" "$numbers_font" "$reading_font" "$expressive_font"
+    local qs_sizes=()
+    if [[ "$rendering_only" == false ]]; then
+        qs_sizes=("$ui_size" "$mono_size" "$title_size")
+    fi
+    update_ii_config "$ui_font" "$mono_font" "$title_font" "$numbers_font" "$reading_font" "$expressive_font" "${qs_sizes[@]}"
 
     post_apply "$qs_was_running"
 }
@@ -796,6 +807,20 @@ cmd_preset() {
     shift || true
     
     case "$name" in
+        aoc|sharp)
+            # AOC DDC B2=01 confirms vertical RGB stripes, native 1080p scale 1.
+            cmd_set --rendering-only --hintstyle hintfull --subpixel rgb --lcdfilter lcddefault --dpi 98304 "$@"
+            ;;
+        arzopa|portable)
+            # Arzopa DDC is unavailable: no verified panel stripe order.
+            cmd_set --rendering-only --hintstyle hintfull --subpixel none --lcdfilter lcddefault --dpi 98304 "$@"
+            ;;
+        profile-10pt|apple-10pt|google-10pt|inter-10pt|noto-10pt|roboto-flex-10pt)
+            # Match the live Kitty size captured on 2026-09-04. Keep this
+            # fixed so later terminal zoom does not change these presets.
+            cmd_preset "${name%-10pt}" \
+                --ui-size 10 --mono-size 10 --title-size 10 "$@"
+            ;;
         profile)
             echo -e "${BOLD}Preset: Profile${NC} — Readex Pro + JetBrains Mono Nerd Font"
             cmd_set --ui "Readex Pro" --ui-size 13 \
@@ -812,7 +837,15 @@ cmd_preset() {
                     --mono "SF Mono" --mono-size 13 \
                     --title "SF Pro Display" --title-size 12 \
                     --numbers "SF Pro" \
-                    --hintstyle hintslight --subpixel rgb "$@"
+                    --hintstyle hintfull --subpixel rgb "$@"
+            ;;
+        roboto-flex)
+            echo -e "${BOLD}Preset: Roboto Flex${NC} — Roboto Flex + JetBrains Mono NF"
+            cmd_set --ui "Roboto Flex" --ui-size 11 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 \
+                    --title "Roboto Flex" --title-size 12 \
+                    --numbers "Roboto Flex" --reading "Roboto Flex" \
+                    --hintstyle hintfull --subpixel rgb "$@"
             ;;
         google)
             echo -e "${BOLD}Preset: Google${NC} — Google Sans Flex + JetBrains Mono NF"
@@ -820,7 +853,7 @@ cmd_preset() {
                     --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 \
                     --title "Google Sans Flex" --title-size 12 \
                     --numbers "Fira Sans Heavy" \
-                    --hintstyle hintslight --subpixel rgb "$@"
+                    --hintstyle hintfull --subpixel rgb "$@"
             ;;
         inter)
             echo -e "${BOLD}Preset: Inter${NC} — Inter + JetBrains Mono NF"
@@ -828,7 +861,7 @@ cmd_preset() {
                     --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 \
                     --title "Inter Variable" --title-size 12 \
                     --numbers "Inter Variable" \
-                    --hintstyle hintslight --subpixel rgb "$@"
+                    --hintstyle hintfull --subpixel rgb "$@"
             ;;
         noto)
             echo -e "${BOLD}Preset: Noto${NC} — Noto Sans + Noto Sans Mono"
@@ -836,15 +869,23 @@ cmd_preset() {
                     --mono "Noto Sans Mono" --mono-size 13 \
                     --title "Noto Sans" --title-size 12 \
                     --numbers "Noto Sans" \
-                    --hintstyle hintslight --subpixel rgb "$@"
+                    --hintstyle hintfull --subpixel rgb "$@"
             ;;
         list)
-            echo -e "${BOLD}Available presets:${NC}"
+            echo -e "${BOLD}Rendering presets (preserve families and sizes; apply desktop-wide):${NC}"
+            echo "  aoc / sharp      Full hinting + RGB (DDC-verified AOC stripes)"
+            echo "  arzopa / portable Full hinting + grayscale (unverified stripe order)"
+            echo ""
+            echo -e "${BOLD}Available font presets (full hinting + RGB):${NC}"
             echo -e "  ${CYAN}profile${NC} — This fork: Readex Pro + JetBrains Mono Nerd Font"
             echo -e "  ${CYAN}apple${NC}   — SF Pro + SF Mono"
             echo -e "  ${CYAN}google${NC}  — Google Sans Flex + JetBrains Mono NF"
             echo -e "  ${CYAN}inter${NC}   — Inter Variable + JetBrains Mono NF"
+            echo "  roboto-flex — Roboto Flex + JetBrains Mono Nerd Font"
             echo -e "  ${CYAN}noto${NC}    — Noto Sans + Noto Sans Mono"
+            echo ""
+            echo -e "${BOLD}10 pt variants (UI, monospace, and titles):${NC}"
+            echo "  profile-10pt, apple-10pt, google-10pt, inter-10pt, noto-10pt, roboto-flex-10pt"
             ;;
         "")
             die "Usage: fontctl preset <name|list>"
@@ -860,7 +901,7 @@ cmd_fix_rendering() {
     echo -e "\n${BOLD}fontctl fix-rendering${NC} — Apply rendering fixes only\n"
 
     cmd_set --rendering-only \
-            --hintstyle hintslight --subpixel rgb --lcdfilter lcddefault
+            --hintstyle hintfull --subpixel rgb --lcdfilter lcddefault "$@"
 }
 
 # ── Help ───────────────────────────────────────────────────────────────────────
@@ -895,7 +936,7 @@ cmd_help() {
 
   TARGETS UPDATED
     1.  ~/.config/fontconfig/fonts.conf + selected-family override
-    2.  /etc/fonts/local.conf + selected-family override (with pkexec)
+    2.  /etc/fonts/local.conf + late per-user include (sudo or pkexec)
     3.  ~/.config/gtk-3.0/settings.ini
     4.  ~/.config/gtk-4.0/settings.ini
     5.  ~/.gtkrc-2.0
@@ -908,9 +949,20 @@ cmd_help() {
 
   Quickshell is restarted when running; Hyprland is intentionally not reloaded.
 
+  PRESET SIZES
+    Add -10pt to any preset name to use the Kitty size captured on 2026-09-04:
+    10 pt for UI, monospace, and titles. Families and rendering follow the base
+    preset. Explicit size options after the name override these defaults.
+    Applications can render the same point size differently across fonts.
+    Quickshell uses these as base sizes, rounding to logical pixels and keeping
+    smaller labels and larger text proportional. Bar auto-fit still applies.
+
   EXAMPLES
+    fontctl preset aoc             # Rendering only; RGB, full hinting
+    fontctl preset arzopa          # Rendering only; grayscale, full hinting
     fontctl preset profile
     fontctl preset profile --user-only
+    fontctl preset inter-10pt
     fontctl set --ui "SF Pro" --mono "SF Mono" --mono-size 13
     fontctl preset apple
     fontctl preset list
@@ -931,7 +983,7 @@ main() {
         set)            cmd_set "$@" ;;
         status)         cmd_status ;;
         preset)         cmd_preset "$@" ;;
-        fix-rendering)  cmd_fix_rendering ;;
+        fix-rendering)  cmd_fix_rendering "$@" ;;
         help|--help|-h) cmd_help ;;
         *)              die "Unknown command: $cmd (try 'fontctl help')" ;;
     esac

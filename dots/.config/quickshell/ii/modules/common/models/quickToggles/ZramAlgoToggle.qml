@@ -12,7 +12,7 @@ QuickToggleModel {
     name: Translation.tr("ZRAM Algo")
 
     property string algoState: "zstd"
-    readonly property string liveAlgo: algoState.indexOf("->") >= 0 ? algoState.split("->")[0] : algoState
+    readonly property string liveAlgo: algoState.split("->")[0].split(" + ")[0]
 
     icon: switch(liveAlgo) {
         case "zstd":  return "compress"
@@ -59,5 +59,5 @@ QuickToggleModel {
         onTriggered: fetchActiveState.running = true
     }
 
-    tooltipText: Translation.tr("Left: stage next boot zstd/lz4/lz4hc. Right or hold: guarded live apply.")
+    tooltipText: Translation.tr("Left: stage next primary. Right: rebuild now; warnings never block the requested action. Status includes verified secondary levels.")
 }

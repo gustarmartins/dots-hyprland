@@ -7,6 +7,7 @@ set -euo pipefail
 STAGE=/usr/local/bin/zram-profile-stage
 LIVE=/usr/local/bin/zram-algo-live
 CONF=/etc/systemd/zram-generator.conf
+LEVELS=/run/vmatlas-tier/levels
 CYCLE=(zstd lz4 lz4hc)
 
 selected() {
@@ -29,6 +30,10 @@ staged() {
         print a[1]
         exit
     }' "$CONF" 2>/dev/null
+}
+
+tiers() {
+    awk -F= '/^tier[123]=/ {v[++n]=$2} END {for(i=1;i<=n;i++) printf "%s%s", (i>1?"/":""), v[i]}' "$LEVELS" 2>/dev/null
 }
 
 notify_result() {
@@ -73,10 +78,14 @@ case "${1:-}" in
         next=$(staged)
         [ -n "$live" ] || live=unknown
         [ -n "$next" ] || next=unknown
+        chain=$(tiers)
+        [ -z "$chain" ] || chain=" + $chain"
+        backing=$(cat /sys/block/zram0/backing_dev 2>/dev/null || echo none)
+        [ "$backing" = none ] || chain="$chain + NVMe"
         if [ "$live" = "$next" ]; then
-            echo "$live"
+            echo "$live$chain"
         else
-            echo "$live->$next"
+            echo "$live->$next$chain"
         fi
         ;;
     next|toggle)

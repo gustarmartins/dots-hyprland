@@ -1,25 +1,284 @@
-#!/bin/bash
-# kate: mode syntax Bash;
+#!/usr/bin/env bash
+# ==============================================================================
+# S23 Ultra Advanced SCRCPY & Control Utility
+# Designed for Galaxy S23 Ultra (SM-S918B / dm3q)
+# Supports: Mirror Mode, Samsung DeX Desktop Mode, OTG HID, Root Shell & Unlock
+# ==============================================================================
 
-DEVICE="${1:-${S23_ADB_TARGET:-}}"
-TARGET_FLAG=(-d)
+set -euo pipefail
 
-if [[ -n "$DEVICE" ]]; then
-    echo "Connecting to S23 Ultra ($DEVICE)..."
-    adb connect "$DEVICE"
-    TARGET_FLAG=(-s "$DEVICE")
-else
-    echo "Launching the USB-connected S23 Ultra..."
-fi
+# Known S23 targets
+USB_SERIAL="RQCX800N5EM"
+WIFI_TARGET="192.168.0.110:6666"
+WIFI_FALLBACK="192.168.0.110:5555"
 
-echo "Launching scrcpy in 720p High-Bitrate mode for Hyprland..."
-scrcpy "${TARGET_FLAG[@]}" \
-    --window-title="S23_Ultra" \
-    --max-fps=120 \
-    -m 1280 \
-    -b 24M \
-    -S \
-    -w \
-    --keyboard=uhid \
-    --mouse=uhid \
-    --audio-bit-rate=128K
+# Auto-detect target
+find_target() {
+    if [[ -n "${S23_SERIAL:-}" ]]; then
+        echo "$S23_SERIAL"
+        return 0
+    fi
+
+    local devices
+    devices=$(adb devices -l)
+
+    if echo "$devices" | grep -q "$USB_SERIAL"; then
+        echo "$USB_SERIAL"
+        return 0
+    fi
+
+    if echo "$devices" | grep -q "$WIFI_TARGET"; then
+        echo "$WIFI_TARGET"
+        return 0
+    fi
+
+    # Try connecting over Wi-Fi if USB is not connected
+    echo "[*] USB S23 not detected, attempting wireless ADB connection..." >&2
+    if adb connect "$WIFI_TARGET" >/dev/null 2>&1; then
+        echo "$WIFI_TARGET"
+        return 0
+    fi
+
+    if adb connect "$WIFI_FALLBACK" >/dev/null 2>&1; then
+        echo "$WIFI_FALLBACK"
+        return 0
+    fi
+
+    # Fallback to single USB device flag or prompt
+    if echo "$devices" | grep -q "model:SM_S918B"; then
+        echo "$devices" | grep "model:SM_S918B" | awk '{print $1}' | head -n 1
+        return 0
+    fi
+
+    echo "$USB_SERIAL"
+}
+
+TARGET=$(find_target)
+echo "============================================================"
+echo " Samsung Galaxy S23 Ultra SCRCPY Hub"
+echo " Target: $TARGET"
+echo "============================================================"
+
+show_help() {
+    cat <<EOF
+Usage: $(basename "$0") [MODE] [OPTIONS...]
+
+Modes:
+  mirror [RES]       Standard screen mirroring (default)
+                     Turns physical OLED screen OFF to save battery/heat.
+                     Full UHID hardware mouse & keyboard input.
+                     Example: s23 mirror [1080|1440|native]
+
+  dex [RES]          Samsung DeX / Desktop Mode in a dedicated window!
+                     Creates a secondary virtual desktop display.
+                     Options:
+                       1080p (default): 1920x1080 @ 240 dpi
+                       1440p / 2k:     2560x1440 @ 280 dpi
+                       4k:             3840x2160 @ 320 dpi
+                     Example: s23 dex 1440p
+
+  brightness [VAL]   Set physical OLED brightness to fix green screen / flicker.
+                     Presets:
+                       max (default): 100% brightness (stops PWM flickering)
+                       low / min:    Lowest brightness (0.01 / 1)
+                       <0.0 - 1.0> or <1 - 255>
+                     Example: s23 brightness max
+                              s23 brightness low
+
+  otg                Direct USB OTG Keyboard & Mouse hardware mode (no video).
+                     Passes PC mouse & keyboard directly to phone via USB HID.
+
+  unlock [PIN]       Wakes screen and enters PIN if provided.
+
+  root               Launches Root shell via ksud-selected debug su.
+
+  help               Show this help message.
+
+Additional scrcpy arguments can be appended to any mode.
+EOF
+}
+
+SCRIPT_NAME=$(basename "$0")
+case "$SCRIPT_NAME" in
+    s23-dex)
+        MODE="dex"
+        ;;
+    s23-mirror)
+        MODE="mirror"
+        ;;
+    s23-otg)
+        MODE="otg"
+        ;;
+    s23-brightness|s23-b)
+        MODE="brightness"
+        ;;
+    *)
+        MODE="${1:-mirror}"
+        if [[ $# -gt 0 ]]; then shift; fi
+        ;;
+esac
+
+case "$MODE" in
+    mirror|m|"")
+        RES_ARG="${1:-1440}"
+        if [[ "$RES_ARG" =~ ^[0-9]+$ ]]; then
+            shift || true
+            MAX_SIZE="-m $RES_ARG"
+        elif [[ "$RES_ARG" == "native" ]]; then
+            shift || true
+            MAX_SIZE=""
+        else
+            MAX_SIZE="-m 1440"
+        fi
+
+        echo "[+] Launching S23 Ultra Mirroring (120 FPS, H.265, UHID Input, Screen Off)..."
+        exec scrcpy \
+            -s "$TARGET" \
+            --window-title="S23 Ultra (Mirror)" \
+            --video-codec=h265 \
+            --max-fps=120 \
+            -b 32M \
+            $MAX_SIZE \
+            --turn-screen-off \
+            --stay-awake \
+            --keyboard=uhid \
+            --mouse=uhid \
+            --audio-codec=opus \
+            --audio-bit-rate=192K \
+            --power-off-on-close \
+            "$@"
+        ;;
+
+    dex|d|desktop)
+        PRESET="${1:-1080p}"
+        case "$PRESET" in
+            1080p|1080|fhd)
+                DISP="1920x1080/240"
+                shift || true
+                ;;
+            1440p|1440|2k|qhd)
+                DISP="2560x1440/280"
+                shift || true
+                ;;
+            4k|uhd|2160p)
+                DISP="3840x2160/320"
+                shift || true
+                ;;
+            *x*/*|*x*)
+                DISP="$PRESET"
+                shift || true
+                ;;
+            *)
+                DISP="1920x1080/240"
+                ;;
+        esac
+
+        echo "[+] Launching Samsung DeX Mode on Virtual Display ($DISP)..."
+        # Ensure DeX on external displays is set
+        adb -s "$TARGET" shell '
+            settings put global force_desktop_mode_on_external_displays 1 2>/dev/null || true
+            settings put system dex_on_external_display 1 2>/dev/null || true
+        ' >/dev/null 2>&1 || true
+
+        exec scrcpy \
+            -s "$TARGET" \
+            --window-title="Samsung DeX Desktop ($DISP)" \
+            --new-display="$DISP" \
+            --video-codec=h265 \
+            --max-fps=120 \
+            -b 36M \
+            --stay-awake \
+            --keyboard=uhid \
+            --mouse=uhid \
+            --audio-codec=opus \
+            --audio-bit-rate=192K \
+            "$@"
+        ;;
+
+    brightness|b|bright)
+        VAL="${1:-max}"
+        case "$VAL" in
+            max|100%|full|hbm)
+                FLOAT="1.0"
+                INT="255"
+                ;;
+            min|low|lowest|1%)
+                FLOAT="0.01"
+                INT="1"
+                ;;
+            med|medium|50%)
+                FLOAT="0.5"
+                INT="128"
+                ;;
+            0.*|1.0)
+                FLOAT="$VAL"
+                INT=$(python3 -c "print(int(float('$VAL') * 255))")
+                ;;
+            [0-9]*)
+                INT="$VAL"
+                FLOAT=$(python3 -c "print(round(float('$VAL') / 255.0, 4))")
+                ;;
+            *)
+                FLOAT="1.0"
+                INT="255"
+                ;;
+        esac
+        echo "[+] Setting S23 Ultra brightness to $VAL (float: $FLOAT, int: $INT)..."
+        adb -s "$TARGET" shell "
+            cmd display set-brightness $FLOAT 2>/dev/null || true
+            settings put system screen_brightness $INT 2>/dev/null || true
+            settings put system screen_brightness_mode 0 2>/dev/null || true
+            settings put system refresh_rate_mode 0 2>/dev/null || true
+            settings put system screen_extra_brightness 1 2>/dev/null || true
+            input keyevent KEYCODE_WAKEUP 2>/dev/null || true
+        "
+        echo "[✓] Display brightness set to $VAL ($INT/255, float: $FLOAT) with 60Hz fixed!"
+        ;;
+
+    otg)
+        echo "[+] Starting USB OTG HID Hardware Mode..."
+        echo "    (PC keyboard and mouse will control S23 directly via USB HID)"
+        exec scrcpy \
+            -s "$TARGET" \
+            --otg \
+            "$@"
+        ;;
+
+    unlock)
+        PIN="${1:-}"
+        echo "[+] Waking up device..."
+        adb -s "$TARGET" shell input keyevent KEYCODE_WAKEUP
+        adb -s "$TARGET" shell input keyevent KEYCODE_MENU
+        if [[ -n "$PIN" ]]; then
+            echo "[+] Entering PIN..."
+            sleep 0.5
+            adb -s "$TARGET" shell input text "$PIN"
+            adb -s "$TARGET" shell input keyevent KEYCODE_ENTER
+        fi
+        ;;
+
+    root)
+        echo "[+] Spawning interactive root shell..."
+        exec adb -s "$TARGET" shell -t '/data/local/tmp/ksud-selected debug su'
+        ;;
+
+    help|-h|--help)
+        show_help
+        ;;
+
+    *)
+        # If the argument is an unknown flag or option, pass it directly to mirror
+        echo "[*] Passing arguments directly to scrcpy mirror..."
+        exec scrcpy \
+            -s "$TARGET" \
+            --window-title="S23 Ultra" \
+            --video-codec=h265 \
+            --max-fps=120 \
+            -b 32M \
+            --turn-screen-off \
+            --stay-awake \
+            --keyboard=uhid \
+            --mouse=uhid \
+            "$MODE" "$@"
+        ;;
+esac

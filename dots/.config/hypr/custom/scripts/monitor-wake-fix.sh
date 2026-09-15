@@ -1,38 +1,5 @@
 #!/usr/bin/env bash
-# monitor-wake-fix.sh
-# Aggressive fix for blurry AOC 27G2G4 (DP-1).
-# 
-# Uses 'monitor disable' to force the driver to kill the link entirely,
-# which is more effective than DPMS for resetting the monitor's internal scaler.
-
-MONITOR="DP-1"
-LOG_TAG="monitor-wake-fix"
-
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | systemd-cat -t "$LOG_TAG" 2>/dev/null
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-}
-
-log "Aggressive monitor wake fix triggered for $MONITOR"
-
-# Step 1: Disable the monitor entirely (kills the signal/link)
-hyprctl eval 'hl.monitor({ output = "DP-1", disabled = true })'
-log "Monitor $MONITOR disabled (signal dropped)"
-
-# Wait for driver/monitor to realize the link is gone
-sleep 3
-
-# Step 2: Re-enable with full config
-hyprctl eval 'hl.monitor(require("monitors").aoc_recovery)'
-log "Monitor $MONITOR re-enabled with the Lua recovery profile"
-
-# Step 3: Give the AOC scaler time to wake up and lock
-sleep 4
-
-# Step 4: Final config re-apply to fix any missed handshake parameters (like 10-bit)
-hyprctl eval 'hl.monitor(require("monitors").aoc_recovery)'
-log "Final config re-apply sent"
-
-# Verification
-current_format=$(hyprctl monitors -j | jq -r ".[] | select(.name == \"$MONITOR\") | .currentFormat" 2>/dev/null)
-log "Fix complete — Current format: $current_format"
+set -euo pipefail
+# Use the shared, verified profile without disabling the output or moving its
+# workspaces. Bit depth is not a sharpness control; this AOC advertises 8 bpc.
+exec "$HOME/.local/bin/refresh-displays" cycle DP-1

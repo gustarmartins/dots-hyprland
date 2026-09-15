@@ -17,19 +17,21 @@ AbstractQuickPanel {
     Layout.minimumHeight: root.baseCellHeight * 2 + root.padding * 2 + 36 + root.spacing
 
     // Sizes
-    property real spacing: 6
+    property real spacing: 8
     property real padding: 6
     readonly property real baseCellWidth: {
-        // This is the wrong calculation, but it looks correct in reality???
-        // (theoretically spacing should be multiplied by 1 column less)
-        const availableWidth = root.width - (root.padding * 2) - (root.spacing * (root.columns))
+        // Subtract only the gaps between cells.
+        const availableWidth = root.width - (root.padding * 2) - (root.spacing * (root.columns - 1))
         return availableWidth / root.columns
     }
-    readonly property real baseCellHeight: 56
+    readonly property real baseCellHeight: 72
 
     // Toggles
-    readonly property list<string> availableToggleTypes: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "cloudflareWarp", "gameMode", "tearing", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile","musicRecognition", "antiFlashbang", "memoryMode", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
-    readonly property int columns: Config.options.sidebar.quickToggles.android.columns
+    readonly property list<string> availableToggleTypes: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "cloudflareWarp", "gameMode", "tearing", "vrr", "lsfg", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile","musicRecognition", "antiFlashbang", "memoryMode", "buildCache", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
+    // A cell is an icon target; text tiles span two cells. Keep a text tile
+    // around 180px wide instead of squeezing labels into 40px remnants.
+    readonly property int columns: Math.max(2, Math.min(Config.options.sidebar.quickToggles.android.columns,
+        Math.floor((root.width - root.padding * 2 + root.spacing) / (86 + root.spacing))))
     readonly property list<var> toggles: Config.ready ? Config.options.sidebar.quickToggles.android.toggles : []
     readonly property list<var> toggleRows: toggleRowsForList(toggles)
     readonly property list<var> unusedToggles: {

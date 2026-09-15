@@ -1,131 +1,196 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Re-arm Hyprland outputs without unbinding amdgpu or killing the session.
-# With no mode argument, each connected output is DPMS-cycled sequentially so
-# at least one display remains usable throughout the recovery.
-
+# Reconcile the same native SDR profiles used at login, without restarting
+# Hyprland or removing outputs/workspaces from the layout.
 runtime_dir=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+monitor_config="$HOME/.config/hypr/monitors.lua"
 exec 9>"$runtime_dir/refresh-displays.lock"
-flock -n 9 || {
-    printf 'A display refresh is already running.\n' >&2
-    exit 1
-}
+flock -n 9 || { echo 'A display refresh is already running.' >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-Usage: refresh-displays [cycle|sleep|wake|status]
-
-  cycle   Sequentially DPMS-cycle every connected output (default)
-  sleep   Stop all outputs cleanly before switching monitor plugs off
-  wake    Wake all outputs and reconcile the current color transform
-  status  Show output, refresh, DPMS, VRR, and color-transform state
+Usage: refresh-displays [cycle|sleep|wake|apply|status|verify] [OUTPUT]
+  cycle   Reapply profiles, then sequentially DPMS-cycle outputs (default)
+  sleep   Put outputs to sleep before switching their power off
+  wake    Wake outputs, reload profiles, and restore the current color transform
+  apply   Reload profiles without blanking either display
+  status  Read current mode, scale, format, VRR and color state; changes nothing
+  verify  Compare connected outputs with the saved profiles; fail on mismatch
+OUTPUT optionally selects one active output for cycle/sleep/wake.
+Profiles: ~/.config/hypr/monitors.lua
 EOF
 }
 
-lua_dpms() {
-    local action=$1
-    local monitor=${2:-}
+eval_checked() {
+    local result
+    result=$(hyprctl eval "$1") || return
+    [[ "$result" == ok ]] || { printf 'Hyprland rejected operation: %s\n' "$result" >&2; return 1; }
+}
 
-    if [[ -n $monitor ]]; then
-        [[ $monitor =~ ^[A-Za-z0-9_.:-]+$ ]] || {
-            printf 'Refusing unexpected monitor name: %s\n' "$monitor" >&2
-            return 1
-        }
-        hyprctl eval "hl.dispatch(hl.dsp.dpms({ action = \"$action\", monitor = \"$monitor\" }))" >/dev/null
+lua_dpms() {
+    local action=$1 monitor=${2:-}
+    if [[ -n "$monitor" ]]; then
+        eval_checked "hl.dispatch(hl.dsp.dpms({ action = \"$action\", monitor = \"$monitor\" }))"
     else
-        hyprctl eval "hl.dispatch(hl.dsp.dpms({ action = \"$action\" }))" >/dev/null
+        eval_checked "hl.dispatch(hl.dsp.dpms({ action = \"$action\" }))"
     fi
 }
 
 wait_dpms() {
     local monitor=$1 expected=$2 current
     for _ in {1..30}; do
-        current=$(hyprctl monitors -j | jq -r --arg monitor "$monitor" '.[] | select(.name == $monitor) | .dpmsStatus')
-        [[ $current == "$expected" ]] && return 0
+        current=$(hyprctl monitors -j | jq -r --arg m "$monitor" '.[] | select(.name == $m) | .dpmsStatus')
+        [[ "$current" == "$expected" ]] && return 0
         sleep 0.1
     done
     printf 'Timed out waiting for %s DPMS=%s\n' "$monitor" "$expected" >&2
     return 1
 }
 
-snapshot_color() {
-    color_identity=true
-    color_temperature=6000
-    color_gamma=100
-
-    if "$HOME/.local/bin/hyprsunsetctl" ensure >/dev/null 2>&1; then
-        color_identity=$("$HOME/.local/bin/hyprsunsetctl" identity get 2>/dev/null || printf true)
-        color_temperature=$("$HOME/.local/bin/hyprsunsetctl" temperature 2>/dev/null || printf 6000)
-        color_gamma=$("$HOME/.local/bin/hyprsunsetctl" gamma 2>/dev/null || printf 100)
-    fi
+# Evaluate the actual Lua profiles with a no-op hl.monitor, not duplicated
+# hard-coded mode/scale/VRR constants in this script.
+read_profiles() {
+    lua - "$monitor_config" <<'LUA'
+hl = { monitor = function() end }
+local m = dofile(arg[1])
+for _, key in ipairs({"aoc_recovery", "arzopa"}) do
+    local p = assert(m[key])
+    io.write(string.format('%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n',
+        p.output, p.mode, p.position, p.scale, p.bitdepth, p.cm, p.vrr, p.transform or 0))
+end
+LUA
 }
 
+verify_profiles() {
+    local profiles
+    profiles=$(read_profiles) || return
+    hyprctl monitors -j | python3 -c '
+import json,sys
+profiles={p[0]:p[1:] for line in sys.argv[1].splitlines() if (p:=line.split("\t"))}
+failed=False
+monitors=json.load(sys.stdin)
+if not monitors:
+    print("No active monitors to verify", file=sys.stderr); sys.exit(1)
+for m in monitors:
+    if m["name"] not in profiles:
+        print(m["name"]+": unmanaged output; skipped"); continue
+    mode,pos,scale,bits,cm,vrr,transform=profiles[m["name"]]
+    size,hz=mode.split("@"); w,h=map(int,size.split("x")); x,y=map(int,pos.split("x"))
+    expected={"width":w,"height":h,"x":x,"y":y,"scale":float(scale),"transform":int(transform),"colorManagementPreset":cm,"disabled":False}
+    if bits=="8": expected["currentFormat"]="XRGB8888"
+    if vrr in ("0","1"): expected["vrr"]=vrr=="1"
+    mismatch=[f"{k}={m.get(k)!r}, expected {v!r}" for k,v in expected.items() if m.get(k)!=v]
+    if abs(m["refreshRate"]-float(hz))>0.1: mismatch.append("refresh rate differs from "+hz)
+    print(m["name"]+": "+("; ".join(mismatch) if mismatch else "matches saved profile"))
+    failed |= bool(mismatch)
+sys.exit(int(failed))
+' "$profiles"
+}
+
+apply_profiles() {
+    read_profiles >/dev/null
+    # require() is cached inside the compositor: explicitly invalidate it.
+    eval_checked 'package.loaded["monitors"] = nil; require("monitors")'
+    for _ in {1..20}; do
+        if verify_profiles >/dev/null; then return 0; fi
+        sleep 0.1
+    done
+    verify_profiles
+}
+
+color_saved=false
+snapshot_color() {
+    # Read before calling ensure: status must not silently reset a dead service.
+    if color_identity=$(timeout 2 hyprctl hyprsunset identity get 2>/dev/null) &&
+       color_temperature=$(timeout 2 hyprctl hyprsunset temperature 2>/dev/null) &&
+       color_gamma=$(timeout 2 hyprctl hyprsunset gamma 2>/dev/null); then
+        color_saved=true
+    else
+        echo 'Color IPC unavailable; preserving the transform without inventing defaults.' >&2
+    fi
+}
 restore_color() {
-    "$HOME/.local/bin/hyprsunsetctl" ensure >/dev/null
-    if [[ $color_identity == true ]]; then
+    [[ "$color_saved" == true ]] || return 0
+    if [[ "$color_identity" == true ]]; then
         "$HOME/.local/bin/hyprsunsetctl" identity true >/dev/null
     else
         "$HOME/.local/bin/hyprsunsetctl" temperature "$color_temperature" >/dev/null
     fi
     "$HOME/.local/bin/hyprsunsetctl" gamma "$color_gamma" >/dev/null
 }
-
 show_status() {
-    hyprctl monitors -j | jq -r '.[] | "\(.name): \(.width)x\(.height) @ \(.refreshRate) Hz, DPMS=\(.dpmsStatus), VRR=\(.vrr), format=\(.currentFormat)"'
-    if "$HOME/.local/bin/hyprsunsetctl" ensure >/dev/null 2>&1; then
-        printf 'Color: identity=%s, temperature=%s K, gamma=%s%% (global across outputs)\n' \
-            "$("$HOME/.local/bin/hyprsunsetctl" identity get)" \
-            "$("$HOME/.local/bin/hyprsunsetctl" temperature)" \
-            "$("$HOME/.local/bin/hyprsunsetctl" gamma)"
+    hyprctl monitors -j | jq -r '.[] | "\(.name): \(.width)x\(.height) @ \(.refreshRate) Hz, scale=\(.scale), transform=\(.transform), DPMS=\(.dpmsStatus), VRR=\(.vrr), format=\(.currentFormat), color=\(.colorManagementPreset)"'
+    local identity gamma temperature
+    if identity=$(timeout 2 hyprctl hyprsunset identity get 2>/dev/null) &&
+       temperature=$(timeout 2 hyprctl hyprsunset temperature 2>/dev/null) &&
+       gamma=$(timeout 2 hyprctl hyprsunset gamma 2>/dev/null); then
+        printf 'Color: identity=%s, temperature=%s K, gamma=%s%%\n' "$identity" "$temperature" "$gamma"
     else
-        printf 'Color: hyprsunset unavailable\n'
+        echo 'Color: IPC unavailable (status made no changes)'
     fi
 }
 
 mode=${1:-cycle}
-case $mode in
+target=${2:-}
+[[ $# -le 2 ]] || { usage >&2; exit 2; }
+case "$mode" in cycle|sleep|wake|apply|status|verify) ;; -h|--help|help) usage; exit 0 ;; *) usage >&2; exit 2 ;; esac
+if [[ -n "$target" ]]; then
+    [[ "$target" =~ ^[A-Za-z0-9_.:-]+$ ]] || { echo 'Invalid output name' >&2; exit 2; }
+    case "$mode" in cycle|sleep|wake) ;; *) echo 'OUTPUT is only supported for cycle/sleep/wake.' >&2; exit 2 ;; esac
+    hyprctl monitors -j | jq -e --arg m "$target" 'any(.[]; .name == $m)' >/dev/null || { echo 'Output is not active.' >&2; exit 1; }
+fi
+
+pending_wake=""
+cleanup() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$pending_wake" ]]; then
+        lua_dpms on "$pending_wake" || true
+        restore_color || true
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+case "$mode" in
+    status) show_status ;;
+    verify) verify_profiles ;;
+    apply) snapshot_color; apply_profiles; restore_color; show_status ;;
     cycle)
         snapshot_color
-        mapfile -t monitors < <(hyprctl monitors -j | jq -r '.[].name')
-        ((${#monitors[@]})) || {
-            printf 'Hyprland reports no connected monitors.\n' >&2
-            exit 1
-        }
-
+        apply_profiles
+        if [[ -n "$target" ]]; then monitors=("$target")
+        else mapfile -t monitors < <(hyprctl monitors -j | jq -r '.[] | select(.dpmsStatus) | .name'); fi
+        ((${#monitors[@]})) || { echo 'No awake outputs to cycle.' >&2; exit 1; }
         for monitor in "${monitors[@]}"; do
             printf 'Cycling %s...\n' "$monitor"
+            pending_wake=$monitor
             lua_dpms off "$monitor"
             wait_dpms "$monitor" false
             sleep 0.5
             lua_dpms on "$monitor"
             wait_dpms "$monitor" true
+            pending_wake=""
             sleep 0.5
         done
+        apply_profiles
         restore_color
         show_status
         ;;
     sleep)
-        # Let in-flight frames drain before the physical connectors disappear.
-        lua_dpms off
+        lua_dpms off "$target"
         sleep 1
-        printf 'Outputs are cleanly asleep; it is now safe to switch the monitor plugs off.\n'
+        echo 'Outputs put to sleep.'
         ;;
     wake)
         snapshot_color
-        lua_dpms on
+        lua_dpms on "$target"
         sleep 1
+        apply_profiles
         restore_color
         show_status
-        ;;
-    status)
-        show_status
-        ;;
-    -h|--help|help)
-        usage
-        ;;
-    *)
-        usage >&2
-        exit 2
         ;;
 esac
