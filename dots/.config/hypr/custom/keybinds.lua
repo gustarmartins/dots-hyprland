@@ -5,6 +5,13 @@ hl.bind("CTRL + SUPER + ALT + Slash", hl.dsp.exec_cmd("xdg-open ~/.config/hypr/c
 hl.bind("SUPER + Space", hl.dsp.exec_cmd("hyprctl switchxkblayout all next"),
     { description = "User: Toggle keyboard layout" })
 
+hl.unbind("SUPER + C")
+hl.unbind("SUPER + SHIFT + C")
+hl.bind("SUPER + C", hl.dsp.exec_cmd("flatpak run com.danklinux.dankcalendar"),
+    { description = "Calendar: Open DankCalendar" })
+hl.bind("SUPER + SHIFT + C", hl.dsp.exec_cmd("flatpak run com.danklinux.dankcalendar show --view agenda"),
+    { description = "Calendar: Open agenda view" })
+
 hl.bind("SUPER + F11", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/toggle-float.sh"),
     { description = "User: Toggle master float" })
 hl.bind("SUPER + F12", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/exempt-float-size.py"),

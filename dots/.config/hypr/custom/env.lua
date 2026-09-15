@@ -1,5 +1,6 @@
 hl.env("EDITOR", "kate")
 hl.env("LIBVA_DRIVER_NAME", "radeonsi")
+hl.env("MOZ_ENABLE_WAYLAND", "1")
 hl.env("MOZ_WAYLAND_USE_VAAPI", "1")
 hl.env("GTK_IM_MODULE", "xim")
 

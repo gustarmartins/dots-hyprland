@@ -2,4 +2,4 @@
 -- In other words, I ain't writing a lua parser for this, so please be a good boi/girl/whatever
 hl.config({render={direct_scanout=2}})
 hl.config({render={new_render_scheduling=0}})
-hl.config({general={allow_tearing=0}})
+hl.config({general={allow_tearing=1}})

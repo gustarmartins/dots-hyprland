@@ -208,21 +208,22 @@ start_daemon() {
         }
 
         # Apply geometry with deferred resize to prevent transparent rendering.
-        # Phase 1: suppress animations (no_anim) + float immediately (prevents tiling).
-        # Phase 2: 50ms sleep lets Hyprland finish the initial surface commit,
-        #          then resize/move/raise instantly, then re-enable animations.
+        # Phase 1: float immediately (prevents tiling) — animations stay ON so the
+        #          window's normal open/appear animation still plays.
+        # Phase 2: 50ms sleep lets Hyprland finish the initial surface commit, then
+        #          briefly suppress animations (no_anim) only for the instant
+        #          resize/move/raise snap, then re-enable animations right after.
         apply_saved_geometry() {
             local addr="$1" w="$2" h="$3" rel_x="$4" rel_y="$5"
             local mon_x="$6" mon_y="$7"
             local gx=$(( rel_x + mon_x ))
             local gy=$(( rel_y + mon_y ))
-            hyprctl eval \
-                "hl.dispatch(hl.dsp.window.set_prop({ prop = \"no_anim\", value = \"1\", window = \"address:$addr\" })); \
-                 hl.dispatch(hl.dsp.window.float({ action = \"enable\", window = \"address:$addr\" }))" &>/dev/null
+            hyprctl dispatch "hl.dsp.window.float({ action = \"enable\", window = \"address:$addr\" })" &>/dev/null
             {
                 sleep 0.05
                 hyprctl eval \
-                    "hl.dispatch(hl.dsp.window.resize({ x = $w, y = $h, window = \"address:$addr\" })); \
+                    "hl.dispatch(hl.dsp.window.set_prop({ prop = \"no_anim\", value = \"1\", window = \"address:$addr\" })); \
+                     hl.dispatch(hl.dsp.window.resize({ x = $w, y = $h, window = \"address:$addr\" })); \
                      hl.dispatch(hl.dsp.window.move({ x = $gx, y = $gy, window = \"address:$addr\" })); \
                      hl.dispatch(hl.dsp.window.alter_zorder({ mode = \"top\", window = \"address:$addr\" }))" &>/dev/null
                 sleep 0.05

@@ -17,19 +17,17 @@ hl.config({
         focus_on_activate = false,
         middle_click_paste = false,
         animate_mouse_windowdragging = true,
-        vrr = 2,
+        vrr = 1,
     },
     cursor = {
-        no_break_fs_vrr = 0,
+        no_break_fs_vrr = 1,
         min_refresh_rate = 48,
-        inactive_timeout = 3.0,
+        inactive_timeout = 5.0,
     },
 })
 
--- The animation switcher atomically replaces this module.
 require("custom.animations.active.active")
 
--- Disabled named rules retained for compatibility with the master-float tooling.
 hl.window_rule({
     name = "master_float",
     enabled = false,
@@ -40,5 +38,5 @@ hl.window_rule({
     name = "master_float_size",
     enabled = false,
     match = { class = "", title = "" },
-    size = { 1400, 900 },
+    size = { 1366, 768 },
 })

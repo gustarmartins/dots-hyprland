@@ -8,4 +8,3 @@ for group = 0, 2 do
     end
 end
 
-hl.workspace_rule({ workspace = "31", monitor = "DP-1" })
