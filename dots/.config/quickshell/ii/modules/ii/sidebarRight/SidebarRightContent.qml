@@ -19,6 +19,7 @@ import qs.modules.ii.sidebarRight.wifiNetworks
 
 Item {
     id: root
+    property alias glassSurface: sidebarRightBackground
     property int sidebarWidth: Appearance.sizes.sidebarWidth
     property int sidebarPadding: 16
     property string settingsQmlPath: Quickshell.shellPath("settings.qml")
@@ -51,16 +52,16 @@ Item {
     StyledRectangularShadow {
         target: sidebarRightBackground
     }
-    Rectangle {
+    GlassSurface {
         id: sidebarRightBackground
 
         anchors.fill: parent
         implicitHeight: parent.height - Appearance.sizes.hyprlandGapsOut * 2
         implicitWidth: sidebarWidth - Appearance.sizes.hyprlandGapsOut * 2
-        color: Qt.alpha(Appearance.m3colors.m3surfaceContainerLow, (DesktopEffects.settings.panel_opacity ?? 94) / 100)
-        border.width: 1
-        border.color: Appearance.colors.colLayer0Border
+        surfaceOpacity: (DesktopEffects.settings.panel_opacity ?? 94) / 100
         radius: 28
+        topRightRadius: 12
+        bottomRightRadius: 12
 
         ColumnLayout {
             anchors.fill: parent

@@ -114,8 +114,14 @@ Scope {
                 bottom: Config.options.bar.bottom
             }
             mask: Region {
-                item: osdValuesWrapper
+                id: osdRegion
+                SurfaceRegion { surface: osdIndicatorLoader.item?.glassSurface ?? null }
+                Region {
+                    item: root.protectionMessage !== "" ? protectionMessageBackground : null
+                    radius: Math.round(protectionMessageBackground.radius)
+                }
             }
+            BackgroundEffect.blurRegion: osdIndicatorLoader.item?.glassSurface?.glassEnabled ? osdRegion : null
 
             exclusionMode: ExclusionMode.Ignore
             exclusiveZone: 0

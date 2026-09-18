@@ -6,6 +6,7 @@ import Quickshell.Widgets
 
 Item {
     id: root
+    property alias glassSurface: valueIndicator
     required property real value
     required property string icon
     required property string name
@@ -24,14 +25,17 @@ Item {
     StyledRectangularShadow {
         target: valueIndicator
     }
-    Rectangle {
+    GlassSurface {
         id: valueIndicator
         anchors {
             fill: parent
             margins: Appearance.sizes.elevationMargin
         }
-        radius: Appearance.rounding.full
-        color: Appearance.colors.colLayer0
+        radius: 26
+        topLeftRadius: !Config.options.bar.bottom ? 12 : 26
+        topRightRadius: !Config.options.bar.bottom ? 12 : 26
+        bottomLeftRadius: Config.options.bar.bottom ? 12 : 26
+        bottomRightRadius: Config.options.bar.bottom ? 12 : 26
 
         implicitWidth: valueRow.implicitWidth
         implicitHeight: valueRow.implicitHeight

@@ -1,6 +1,7 @@
 import qs
 import qs.services
 import qs.modules.common
+import qs.modules.common.widgets
 import QtQuick
 import Quickshell.Io
 import Quickshell
@@ -30,6 +31,12 @@ Scope {
             right: true
             bottom: true
         }
+
+        mask: SurfaceRegion {
+            id: sidebarRegion
+            surface: sidebarContentLoader.item?.glassSurface ?? null
+        }
+        BackgroundEffect.blurRegion: sidebarContentLoader.item?.glassSurface?.glassEnabled ? sidebarRegion : null
 
         onVisibleChanged: {
             if (visible) {

@@ -43,3 +43,11 @@ rule({ match = { class = "^(dev.eden_emu.eden|eden|Eden)$" }, content = "game", 
 -- rule({ match = { class = "^(solaar)$" }, float = true, size = { 951, 569 }, center = true })
 -- rule({ match = { class = "^(Windscribe)$" }, float = true, center = true, no_anim = true })
 -- rule({ match = { class = "^(vmscope-float)$" }, float = true, size = { 980, 720 }, center = true })
+
+-- Native Quickshell blur regions already exclude rounded corners and shadows.
+-- Permit the translucent material instead of the old alpha=1 popup exclusion.
+hl.layer_rule({
+    name = "mekki_native_glass",
+    match = { namespace = "^quickshell:(popup|sidebarLeft|sidebarRight|onScreenDisplay)$" },
+    ignore_alpha = 0.01,
+})

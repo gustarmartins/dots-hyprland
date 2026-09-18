@@ -27,9 +27,11 @@ LazyLoader {
         implicitWidth: popupBackground.implicitWidth + Appearance.sizes.elevationMargin * 2 + root.popupBackgroundMargin
         implicitHeight: popupBackground.implicitHeight + Appearance.sizes.elevationMargin * 2 + root.popupBackgroundMargin
 
-        mask: Region {
-            item: popupBackground
+        mask: SurfaceRegion {
+            id: popupRegion
+            surface: popupBackground
         }
+        BackgroundEffect.blurRegion: popupBackground.glassEnabled ? popupRegion : null
 
         exclusionMode: ExclusionMode.Ignore
         exclusiveZone: 0
@@ -65,7 +67,7 @@ LazyLoader {
             target: popupBackground
         }
 
-        Rectangle {
+        GlassSurface {
             id: popupBackground
             readonly property real margin: 10
             anchors {
@@ -77,12 +79,14 @@ LazyLoader {
             }
             implicitWidth: root.contentItem.implicitWidth + margin * 2
             implicitHeight: root.contentItem.implicitHeight + margin * 2
-            color: Appearance.m3colors.m3surfaceContainer
-            radius: Appearance.rounding.small
+            baseColor: Appearance.m3colors.m3surfaceContainer
+            radius: 24
+            topLeftRadius: !Config.options.bar.bottom ? 12 : 24
+            topRightRadius: !Config.options.bar.bottom ? 12 : 24
+            bottomLeftRadius: Config.options.bar.bottom ? 12 : 24
+            bottomRightRadius: Config.options.bar.bottom ? 12 : 24
             children: [root.contentItem]
 
-            border.width: 1
-            border.color: Appearance.colors.colLayer0Border
         }
     }
 }

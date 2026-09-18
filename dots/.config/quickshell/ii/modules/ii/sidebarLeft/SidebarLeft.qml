@@ -110,9 +110,11 @@ Scope { // Scope
                 bottom: true
             }
 
-            mask: Region {
-                item: sidebarLeftBackground
+            mask: SurfaceRegion {
+                id: sidebarRegion
+                surface: sidebarLeftBackground
             }
+            BackgroundEffect.blurRegion: sidebarLeftBackground.glassEnabled ? sidebarRegion : null
 
             onVisibleChanged: {
                 if (visible) {
@@ -133,7 +135,7 @@ Scope { // Scope
                 target: sidebarLeftBackground
                 radius: sidebarLeftBackground.radius
             }
-            Rectangle {
+            GlassSurface {
                 id: sidebarLeftBackground
                 anchors.top: parent.top
                 anchors.left: parent.left
@@ -141,10 +143,10 @@ Scope { // Scope
                 anchors.leftMargin: Appearance.sizes.hyprlandGapsOut
                 width: panelWindow.sidebarWidth - Appearance.sizes.hyprlandGapsOut - Appearance.sizes.elevationMargin
                 height: parent.height - Appearance.sizes.hyprlandGapsOut * 2
-                color: Qt.alpha(Appearance.m3colors.m3surfaceContainerLow, (DesktopEffects.settings.panel_opacity ?? 94) / 100)
-                border.width: 1
-                border.color: Appearance.colors.colLayer0Border
+                surfaceOpacity: (DesktopEffects.settings.panel_opacity ?? 94) / 100
                 radius: 28
+                topLeftRadius: 12
+                bottomLeftRadius: 12
 
                 Behavior on width {
                     animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
