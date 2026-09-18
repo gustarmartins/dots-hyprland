@@ -14,6 +14,8 @@ import os
 import re
 import json
 import subprocess
+import fcntl
+import tempfile
 
 EXEMPT_FILE = os.path.expanduser("~/.config/hypr/custom/autofloat_exemptions.txt")
 
@@ -65,10 +67,16 @@ def write_exemptions(entries):
                 break
         header = ''.join(header_lines)
 
-    with open(EXEMPT_FILE, "w") as f:
-        f.write(header)
-        for entry in entries:
-            f.write(entry + '\n')
+    fd, temporary = tempfile.mkstemp(dir=os.path.dirname(EXEMPT_FILE), prefix='.exemptions-')
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(header)
+            for entry in entries:
+                f.write(entry + '\n')
+        os.replace(temporary, EXEMPT_FILE)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def cmd_list():
@@ -87,6 +95,12 @@ def cmd_list():
 
 def toggle_entry(pattern, is_title=False):
     """Add or remove a pattern from the exemption list."""
+    with open(EXEMPT_FILE + '.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _toggle_entry_locked(pattern, is_title)
+
+
+def _toggle_entry_locked(pattern, is_title):
     entries = read_exemptions()
     escaped = escape_for_regex(pattern)
 
@@ -100,6 +114,8 @@ def toggle_entry(pattern, is_title=False):
     # Check if already exempt (match escaped or raw)
     found = None
     for entry in entries:
+        if entry.startswith('title:') != is_title:
+            continue
         raw = entry.removeprefix('title:') if is_title else entry
         if raw == escaped or raw == pattern:
             found = entry

@@ -119,10 +119,8 @@ MouseArea { // Notification group area
         }
     }
 
-    StyledRectangularShadow {
-        target: background
-        visible: popup
-    }
+    // A translucent shadow gets blurred by the compositor into a thick halo.
+    // Keep the popup silhouette to the antialiased card and its fine outline.
     Rectangle { // Background of the notification
         id: background
         anchors.left: parent.left
@@ -131,6 +129,7 @@ MouseArea { // Notification group area
         border.width: 1
         border.color: Qt.alpha(Appearance.m3colors.m3outlineVariant, 0.35)
         radius: 24
+        antialiasing: true
         anchors.leftMargin: root.xOffset
 
         Behavior on anchors.leftMargin {

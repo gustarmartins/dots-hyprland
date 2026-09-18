@@ -23,15 +23,18 @@ Toolbar {
     // Signals
     signal dismiss()
 
-    ToolbarTabBar {
-        id: tabBar
-        tabButtonList: [
-            {"icon": "activity_zone", "name": Translation.tr("Rect")},
-            {"icon": "gesture", "name": Translation.tr("Circle")}
-        ]
-        currentIndex: root.selectionMode === RegionSelection.SelectionMode.RectCorners ? 0 : 1
-        onCurrentIndexChanged: {
-            root.selectionMode = currentIndex === 0 ? RegionSelection.SelectionMode.RectCorners : RegionSelection.SelectionMode.Circle;
-        }
+    ToolbarTabButton {
+        text: Translation.tr("Rect")
+        materialSymbol: "activity_zone"
+        current: root.selectionMode === RegionSelection.SelectionMode.RectCorners
+        toggled: current
+        onClicked: root.selectionMode = RegionSelection.SelectionMode.RectCorners
+    }
+    ToolbarTabButton {
+        text: Translation.tr("Circle")
+        materialSymbol: "gesture"
+        current: root.selectionMode === RegionSelection.SelectionMode.Circle
+        toggled: current
+        onClicked: root.selectionMode = RegionSelection.SelectionMode.Circle
     }
 }

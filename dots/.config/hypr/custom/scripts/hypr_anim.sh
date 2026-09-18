@@ -37,10 +37,11 @@ notify_user() {
     fi
 }
 
-reload_hyprland() {
-    # Silence output to prevent polluting Rofi's stream
-    if command -v hyprctl &>/dev/null; then
-        hyprctl reload &>/dev/null
+apply_animation() {
+    local name="${1##*/}" output
+    if ! output=$("$HOME/.local/bin/desktop-effects" animation "$name" 2>&1); then
+        notify_user "Animation not applied" "$output" "critical"
+        return 1
     fi
 }
 
@@ -86,21 +87,12 @@ if [[ "${1:-}" == "--current" ]]; then
         fi
     fi
 
-    # 3. Apply target_anim and save state
-    mkdir -p -- "$LINK_DIR" 2>/dev/null
-    rm -f -- "$DEST_FILE"
-    
-    if cp -- "$target_anim" "$DEST_FILE"; then
-        # Ensure state directory exists and write current state
-        mkdir -p -- "${STATE_FILE%/*}" 2>/dev/null
-        printf '%s\n' "${target_anim##*/}" > "$STATE_FILE"
-
-        reload_hyprland
-        exit 0
-    else
-        notify_user "Failure" "Could not re-apply configuration." "critical"
+    # Startup restoration must not switch a saved custom-motion look to profile mode.
+    if ! output=$("$HOME/.local/bin/desktop-effects" refresh 2>&1); then
+        notify_user "Animation restore failed" "$output" "critical"
         exit 1
     fi
+    exit 0
 fi
 
 selection="${ROFI_INFO:-}"
@@ -118,29 +110,11 @@ if [[ -n "$selection" ]]; then
         exit 1
     fi
 
-    # Ensure target directory exists
-    if ! mkdir -p -- "$LINK_DIR" 2>/dev/null; then
-        notify_user "Error" "Cannot create directory: $LINK_DIR" "critical"
-        exit 1
-    fi
-
-    # ATOMIC-ISH UPDATE
-    rm -f -- "$DEST_FILE"
-
-    if cp -- "$selection" "$DEST_FILE"; then
-        # Save state for the --current flag
-        mkdir -p -- "${STATE_FILE%/*}" 2>/dev/null
-        printf '%s\n' "${selection##*/}" > "$STATE_FILE"
-
-        # Use parameter expansion for basename (faster than subshell)
-        filename="${selection##*/}"
-        reload_hyprland
-        notify_user "Success" "Switched to: $filename"
+    if apply_animation "$selection"; then
+        notify_user "Animation selected" "${selection##*/} — fine-tune in Super+I > Desktop effects."
         exit 0
-    else
-        notify_user "Failure" "Could not copy configuration." "critical"
-        exit 1
     fi
+    exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -151,7 +125,7 @@ fi
 printf '\0prompt\x1fAnimations\n'
 printf '\0markup-rows\x1ftrue\n'
 printf '\0no-custom\x1ftrue\n'
-printf '\0message\x1fSelect a configuration to apply instantly\n'
+printf '\0message\x1fChoose base motion; visual effects stay active. Fine-tune in Super+I.\n'
 
 # Validate Source Directory
 if [[ ! -d "$ANIM_DIR" ]]; then
@@ -194,7 +168,7 @@ for i in "${!files[@]}"; do
     escaped_name=$(escape_markup "$filename")
 
     if (( i == active_index )); then
-        printf "<span weight='bold'>%s</span> <span size='small' style='italic'>(Active)</span>\0icon\x1f%s\x1finfo\x1f%s\n" \
+        printf "<span weight='bold'>%s</span> <span size='small' style='italic'>(Selected)</span>\0icon\x1f%s\x1finfo\x1f%s\n" \
             "$escaped_name" "$ICON_ACTIVE" "$file"
     else
         printf '%s\0icon\x1f%s\x1finfo\x1f%s\n' \

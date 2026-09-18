@@ -11,14 +11,27 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
+import "SelectionGeometry.js" as Geometry
 
 PanelWindow {
     id: root
-    visible: false
+    property bool sessionReady: false
+    property bool sessionBusy: false
+    property bool sessionHidden: false
+    property bool inputReady: false
+    property string sessionId: ""
+    property var selectedRegion: null
+    property string hint: ""
+    signal processing(bool running, bool hidePanels)
+    signal recordingStarted()
+    signal preparationFailed(string message)
+    visible: root.sessionReady && root.preparationDone && !root.sessionHidden
     color: "transparent"
     WlrLayershell.namespace: "quickshell:regionSelector"
     WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+    // Take focus immediately while selecting; release it during recording.
+    WlrLayershell.keyboardFocus: root.visible && root.phase === RegionSelection.Phase.Select
+        ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
     exclusionMode: ExclusionMode.Ignore
     anchors {
         left: true
@@ -36,6 +49,9 @@ PanelWindow {
     property var selectionMode: RegionSelection.SelectionMode.RectCorners
     property var phase: RegionSelection.Phase.Select
     signal dismiss()
+    Component.onDestruction: Quickshell.execDetached(["rm", "-f", root.screenshotPath])
+    function cancelGesture() { mouseArea.cancelGesture(); }
+    onSelectionModeChanged: { if (mouseArea) mouseArea.reset(); root.selectedRegion = null; }
 
     // Styles
     property string screenshotDir: Directories.screenshotTemp
@@ -56,7 +72,7 @@ PanelWindow {
     // Vars for indicators
     readonly property var windows: [...HyprlandData.windowList].sort((a, b) => {
         // Sort floating=true windows before others
-        if (a.floating === b.floating) return 0;
+        if (a.floating === b.floating) return (a.focusHistoryID ?? 999) - (b.focusHistoryID ?? 999);
         return a.floating ? -1 : 1;
     })
     readonly property var layers: HyprlandData.layers
@@ -64,35 +80,27 @@ PanelWindow {
 
     // Screen & interaction vars
     readonly property HyprlandMonitor hyprlandMonitor: Hyprland.monitorFor(screen)
-    readonly property real monitorScale: hyprlandMonitor.scale
-    readonly property real monitorOffsetX: hyprlandMonitor.x
-    readonly property real monitorOffsetY: hyprlandMonitor.y
-    property int activeWorkspaceId: hyprlandMonitor.activeWorkspace?.id ?? 0
-    property string screenshotPath: `${root.screenshotDir}/image-${screen.name}`
-    property real dragStartX: 0
-    property real dragStartY: 0
-    property real draggingX: 0
-    property real draggingY: 0
-    property real dragDiffX: 0
-    property real dragDiffY: 0
-    property bool draggedAway: (dragDiffX !== 0 || dragDiffY !== 0)
-    property bool dragging: false
-    property list<point> points: []
+    readonly property real monitorScale: frozenImage.sourceSize.width > 0 && root.screen.width > 0
+        ? frozenImage.sourceSize.width / root.screen.width : (hyprlandMonitor?.scale > 0 ? hyprlandMonitor.scale : 1)
+    readonly property real monitorOffsetX: hyprlandMonitor?.x ?? root.screen.x
+    readonly property real monitorOffsetY: hyprlandMonitor?.y ?? root.screen.y
+    property int activeWorkspaceId: hyprlandMonitor?.activeWorkspace?.id ?? 0
+    property string screenshotPath: `${root.screenshotDir}/region-${root.sessionId}-${screen.name}.png`
+    readonly property bool draggedAway: mouseArea.moved
+    readonly property bool dragging: mouseArea.dragging
+    readonly property var points: mouseArea.points
     property var mouseButton: null
     property var imageRegions: []
-    readonly property list<var> windowRegions: RegionFunctions.filterWindowRegionsByLayers(
-        root.windows.filter(w => w.workspace.id === root.activeWorkspaceId),
-        root.layerRegions
-    ).map(window => {
-        return {
-            at: [window.at[0] - root.monitorOffsetX, window.at[1] - root.monitorOffsetY],
-            size: [window.size[0], window.size[1]],
-            class: window.class,
-            title: window.title,
-        }
-    })
+    readonly property int specialWorkspaceId: HyprlandData.monitors.find(m => m.name === root.screen.name)?.specialWorkspace?.id ?? 0
+    readonly property list<var> windowRegions: root.windows.filter(w =>
+        w.mapped !== false && !w.hidden && (w.workspace.id === root.activeWorkspaceId || w.pinned ||
+        (root.specialWorkspaceId !== 0 && w.workspace.id === root.specialWorkspaceId))
+    ).map(window => ({
+        at: [window.at[0] - root.monitorOffsetX, window.at[1] - root.monitorOffsetY],
+        size: window.size, class: window.class, title: window.title
+    })).filter(w => Geometry.clip({x: w.at[0], y: w.at[1], width: w.size[0], height: w.size[1]}, root.screen.width, root.screen.height))
     readonly property list<var> layerRegions: {
-        const layersOfThisMonitor = root.layers[root.hyprlandMonitor.name]
+        const layersOfThisMonitor = root.layers[root.screen.name]
         const topLayers = layersOfThisMonitor?.levels["2"]
         if (!topLayers) return [];
         const nonBarTopLayers = topLayers
@@ -126,19 +134,17 @@ PanelWindow {
     property real targetedRegionWidth: 0
     property real targetedRegionHeight: 0
     function targetedRegionValid() {
-        return (root.targetedRegionX >= 0 && root.targetedRegionY >= 0)
+        return root.targetedRegionWidth > 0 && root.targetedRegionHeight > 0
     }
-    function setRegionToTargeted() {
-        const padding = Config.options.regionSelector.targetRegions.selectionPadding; // Make borders not cut off n stuff
-        root.regionX = root.targetedRegionX - padding;
-        root.regionY = root.targetedRegionY - padding;
-        root.regionWidth = root.targetedRegionWidth + padding * 2;
-        root.regionHeight = root.targetedRegionHeight + padding * 2;
+    function targetedRect() {
+        const padding = Config.options.regionSelector.targetRegions.selectionPadding;
+        return {x: root.targetedRegionX - padding, y: root.targetedRegionY - padding,
+            width: root.targetedRegionWidth + padding * 2, height: root.targetedRegionHeight + padding * 2};
     }
 
     function updateTargetedRegion(x, y) {
         // Image regions
-        const clickedRegion = root.imageRegions.find(region => {
+        const clickedRegion = (root.enableContentRegions ? root.imageRegions : []).find(region => {
             return region.at[0] <= x && x <= region.at[0] + region.size[0] && region.at[1] <= y && y <= region.at[1] + region.size[1];
         });
         if (clickedRegion) {
@@ -150,7 +156,7 @@ PanelWindow {
         }
 
         // Layer regions
-        const clickedLayer = root.layerRegions.find(region => {
+        const clickedLayer = (root.enableLayerRegions ? root.layerRegions : []).find(region => {
             return region.at[0] <= x && x <= region.at[0] + region.size[0] && region.at[1] <= y && y <= region.at[1] + region.size[1];
         });
         if (clickedLayer) {
@@ -162,7 +168,7 @@ PanelWindow {
         }
 
         // Window regions
-        const clickedWindow = root.windowRegions.find(region => {
+        const clickedWindow = (root.enableWindowRegions ? root.windowRegions : []).find(region => {
             return region.at[0] <= x && x <= region.at[0] + region.size[0] && region.at[1] <= y && y <= region.at[1] + region.size[1];
         });
         if (clickedWindow) {
@@ -179,10 +185,10 @@ PanelWindow {
         root.targetedRegionHeight = 0;
     }
 
-    property real regionWidth: Math.abs(draggingX - dragStartX)
-    property real regionHeight: Math.abs(draggingY - dragStartY)
-    property real regionX: Math.min(dragStartX, draggingX)
-    property real regionY: Math.min(dragStartY, draggingY)
+    readonly property real regionWidth: root.selectedRegion?.width ?? mouseArea.regionWidth
+    readonly property real regionHeight: root.selectedRegion?.height ?? mouseArea.regionHeight
+    readonly property real regionX: root.selectedRegion?.x ?? mouseArea.regionX
+    readonly property real regionY: root.selectedRegion?.y ?? mouseArea.regionY
 
     // Screenshot stuff
     TempScreenshotProcess {
@@ -192,31 +198,17 @@ PanelWindow {
         screenshotDir: root.screenshotDir
         screenshotPath: root.screenshotPath
         onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) {
+                root.preparationFailed("Could not capture " + root.screen.name + ". Try again.");
+                return;
+            }
+            root.captureReady = true;
             if (root.enableContentRegions) imageDetectionProcess.running = true;
-            root.preparationDone = !checkRecordingProc.running;
         }
     }
     property bool isRecording: root.action === RegionSelection.SnipAction.Record || root.action === RegionSelection.SnipAction.RecordWithSound
-    property bool recordingShouldStop: false
-    Process {
-        id: checkRecordingProc
-        running: isRecording
-        command: ["pidof", "wf-recorder"]
-        onExited: (exitCode, exitStatus) => {
-            root.preparationDone = !screenshotProc.running
-            root.recordingShouldStop = (exitCode === 0);
-        }
-    }
-    property bool preparationDone: false
-    onPreparationDoneChanged: {
-        if (!preparationDone) return;
-        if (root.isRecording && root.recordingShouldStop) {
-            Quickshell.execDetached([Directories.recordScriptPath]);
-            root.dismiss();
-            return;
-        }
-        root.visible = true;
-    }
+    property bool captureReady: false
+    readonly property bool preparationDone: root.captureReady && frozenImage.status === Image.Ready
 
     Process {
         id: imageDetectionProcess
@@ -228,72 +220,66 @@ PanelWindow {
         stdout: StdioCollector {
             id: imageDimensionCollector
             onStreamFinished: {
-                imageRegions = RegionFunctions.filterImageRegions(
-                    JSON.parse(imageDimensionCollector.text),
-                    root.windowRegions
-                );
+                try {
+                    const regions = JSON.parse(imageDimensionCollector.text);
+                    if (!Array.isArray(regions)) return;
+                    imageRegions = RegionFunctions.filterImageRegions(
+                        regions.filter(r => Array.isArray(r.at) && Array.isArray(r.size)), root.windowRegions);
+                } catch (e) { console.warn("[Region Selector] Content detection unavailable:", e); }
             }
         }
     }
 
-    function getScreenshotAction() {
-        switch(root.action) {
-            case RegionSelection.SnipAction.Copy:
-                return ScreenshotAction.Action.Copy;
-            case RegionSelection.SnipAction.Edit:
-                return ScreenshotAction.Action.Edit;
-            case RegionSelection.SnipAction.Search:
-                return ScreenshotAction.Action.Search;
-            case RegionSelection.SnipAction.CharRecognition:
-                return ScreenshotAction.Action.CharRecognition;
-            case RegionSelection.SnipAction.Record:
-                return ScreenshotAction.Action.Record;
-            case RegionSelection.SnipAction.RecordWithSound:
-                return ScreenshotAction.Action.RecordWithSound;
-            default:
-                console.warn("[Region Selector] Unknown snip action, skipping snip.");
-                root.dismiss();
-                return;
+    function snip(rect) {
+        if (root.sessionBusy) return;
+        const clipped = Geometry.clip(rect, root.screen.width, root.screen.height);
+        if (!clipped) {
+            root.selectedRegion = null;
+            mouseArea.reset();
+            root.hint = "Drag an area to capture, or click a highlighted target.";
+            return;
         }
+        root.selectedRegion = clipped;
+        let action = root.action;
+        if (action === RegionSelection.SnipAction.Copy || action === RegionSelection.SnipAction.Edit)
+            action = root.mouseButton === Qt.RightButton ? RegionSelection.SnipAction.Edit : RegionSelection.SnipAction.Copy;
+        if (root.isRecording) {
+            // wf-recorder takes global logical coordinates, not screenshot pixels.
+            const region = `${Math.round(clipped.x + root.monitorOffsetX)},${Math.round(clipped.y + root.monitorOffsetY)} ${Math.round(clipped.width)}x${Math.round(clipped.height)}`;
+            let args = [Directories.recordScriptPath, "--region", region];
+            if (action === RegionSelection.SnipAction.RecordWithSound) args.push("--sound");
+            Quickshell.execDetached(args);
+            root.phase = RegionSelection.Phase.Post;
+            root.selectionMode = RegionSelection.SelectionMode.RectCorners;
+            root.selectedRegion = clipped;
+            root.recordingStarted();
+            return;
+        }
+        const pixels = Geometry.pixels(clipped, root.monitorScale, root.screen.width, root.screen.height);
+        const names = ["copy", "edit", "search", "ocr"];
+        if (!pixels || !names[action]) { root.hint = "This capture action is unavailable."; return; }
+        root.hint = action === RegionSelection.SnipAction.Search ? "Searching image…" : "Processing selection…";
+        actionProc.command = ["python3", Directories.scriptPath + "/images/region-action.py",
+            "--action", names[action], "--image", root.screenshotPath,
+            "--geometry", String(pixels.x), String(pixels.y), String(pixels.width), String(pixels.height),
+            "--save-dir", Config.options.screenSnip.savePath,
+            "--search-url", Config.options.search.imageSearch.imageSearchEngineBaseUrl,
+            "--editor", Config.options.regionSelector.annotation.useSatty ? "satty" : "swappy"];
+        root.processing(true, action === RegionSelection.SnipAction.Edit);
+        actionProc.running = true;
     }
-
-    // Execution after selection
-    function snip() {
-        // Validity check
-        if (root.regionWidth <= 0 || root.regionHeight <= 0) {
-            console.warn("[Region Selector] Invalid region size, skipping snip.");
-            root.dismiss();
-        }
-
-        // Clamp region to screen bounds
-        root.regionX = Math.max(0, Math.min(root.regionX, root.screen.width - root.regionWidth));
-        root.regionY = Math.max(0, Math.min(root.regionY, root.screen.height - root.regionHeight));
-        root.regionWidth = Math.max(0, Math.min(root.regionWidth, root.screen.width - root.regionX));
-        root.regionHeight = Math.max(0, Math.min(root.regionHeight, root.screen.height - root.regionY));
-
-        // Adjust action
-        if (root.action === RegionSelection.SnipAction.Copy || root.action === RegionSelection.SnipAction.Edit) {
-            root.action = root.mouseButton === Qt.RightButton ? RegionSelection.SnipAction.Edit : RegionSelection.SnipAction.Copy;
-        }
-        
-        const screenshotDir = Config.options.screenSnip.savePath !== "" ? //
-            Config.options.screenSnip.savePath : "";
-        var screenshotAction = root.getScreenshotAction();
-        const command = ScreenshotAction.getCommand(
-            root.regionX * root.monitorScale, //
-            root.regionY * root.monitorScale, //
-            root.regionWidth * root.monitorScale,// 
-            root.regionHeight * root.monitorScale, //
-            root.screenshotPath, //
-            screenshotAction, //
-            screenshotDir
-        )
-        Quickshell.execDetached(command);
-        if (root.action == RegionSelection.SnipAction.Record || root.action == RegionSelection.SnipAction.RecordWithSound) {
-            root.phase = RegionSelection.Phase.Post
-            root.selectionMode = RegionSelection.SelectionMode.RectCorners
-        } else {
-            root.dismiss();
+    Process {
+        id: actionProc
+        stderr: StdioCollector { id: actionError }
+        onExited: (exitCode, exitStatus) => {
+            root.processing(false, false);
+            if (exitCode === 0) root.dismiss();
+            else {
+                root.selectedRegion = null;
+                mouseArea.reset();
+                root.hint = "Capture failed: " + actionError.text.trim() + " Drag again to retry.";
+                console.warn("[Region Selector]", root.hint);
+            }
         }
     }
 
@@ -305,73 +291,43 @@ PanelWindow {
         }
     }
 
-    ScreencopyView { // For freezing
+    Image { // Display the same frozen frame that the action will crop.
+        id: frozenImage
+        onStatusChanged: if (status === Image.Error) root.preparationFailed("Could not read the captured image. Try again.")
         anchors.fill: parent
-        live: false
-        captureSource: root.screen
+        source: root.captureReady ? "file://" + root.screenshotPath : ""
+        cache: false
+        fillMode: Image.Stretch
         visible: root.phase === RegionSelection.Phase.Select
 
         focus: root.visible
         Keys.onPressed: (event) => { // Esc to close
-            if (event.key === Qt.Key_Escape) {
+            if (event.key === Qt.Key_Escape && !root.sessionBusy) {
                 root.dismiss();
             }
         }
     }
 
-    MouseArea {
+    SelectionGesture {
         id: mouseArea
         anchors.fill: parent
-        cursorShape: Qt.CrossCursor
-        acceptedButtons: Qt.LeftButton | Qt.RightButton
-        hoverEnabled: true
-
-        // Controls
-        onPressed: (mouse) => {
-            root.dragStartX = mouse.x;
-            root.dragStartY = mouse.y;
-            root.draggingX = mouse.x;
-            root.draggingY = mouse.y;
-            root.dragging = true;
-            root.mouseButton = mouse.button;
-        }
-        onReleased: (mouse) => {
-            // [gus patch] Ignore a release with no matching press (a focus grab can swallow
-            // the press but let the release through -> phantom zero-area snip -> instant
-            // dismiss). A real click/drag always sets dragging=true in onPressed.
-            if (!root.dragging) return;
-            root.dragging = false;
-            // Detect if it was a click -> Try to select targeted region
-            if (root.draggingX === root.dragStartX && root.draggingY === root.dragStartY) {
-                if (root.targetedRegionValid()) {
-                    root.setRegionToTargeted();
-                }
-            }
-            // Circle dragging?
-            else if (root.selectionMode === RegionSelection.SelectionMode.Circle) {
+        accepting: root.inputReady && !root.sessionBusy && root.phase === RegionSelection.Phase.Select
+        onStarted: { root.hint = ""; root.selectedRegion = null; }
+        onInterrupted: reason => { root.selectedRegion = null; root.hint = reason; }
+        onPointerMoved: (px, py) => root.updateTargetedRegion(px, py)
+        onFinished: (px, py, button, wasMoved) => {
+            root.mouseButton = button;
+            let rect = null;
+            if (!wasMoved) {
+                root.updateTargetedRegion(px, py);
+                if (root.targetedRegionValid()) rect = root.targetedRect();
+            } else if (root.isCircleSelection) {
                 const padding = Config.options.regionSelector.circle.padding + Config.options.regionSelector.circle.strokeWidth / 2;
-                const dragPoints = (root.points.length > 0) ? root.points : [{ x: mouseArea.mouseX, y: mouseArea.mouseY }];
-                const maxX = Math.max(...dragPoints.map(p => p.x));
-                const minX = Math.min(...dragPoints.map(p => p.x));
-                const maxY = Math.max(...dragPoints.map(p => p.y));
-                const minY = Math.min(...dragPoints.map(p => p.y));
-                root.regionX = minX - padding;
-                root.regionY = minY - padding;
-                root.regionWidth = maxX - minX + padding * 2;
-                root.regionHeight = maxY - minY + padding * 2;
-            }
-            root.snip();
+                rect = Geometry.bounds(mouseArea.points, padding);
+            } else rect = {x: mouseArea.regionX, y: mouseArea.regionY, width: mouseArea.regionWidth, height: mouseArea.regionHeight};
+            root.snip(rect);
         }
-        onPositionChanged: (mouse) => {
-            root.updateTargetedRegion(mouse.x, mouse.y);
-            if (!root.dragging) return;
-            root.draggingX = mouse.x;
-            root.draggingY = mouse.y;
-            root.dragDiffX = mouse.x - root.dragStartX;
-            root.dragDiffY = mouse.y - root.dragStartY;
-            root.points.push({ x: mouse.x, y: mouse.y });
-        }
-        
+
         Loader {
             z: 2
             anchors.fill: parent
@@ -497,11 +453,33 @@ PanelWindow {
             }
         }
 
+        Rectangle {
+            z: 11
+            visible: root.hint.length > 0
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: regionSelectionControls.top
+            anchors.bottomMargin: 12
+            width: Math.min(parent.width - 40, 640)
+            height: hintText.implicitHeight + 20
+            radius: 12
+            color: Appearance.m3colors.m3surfaceContainerHigh
+            StyledText {
+                id: hintText
+                anchors.fill: parent
+                anchors.margins: 10
+                wrapMode: Text.WordWrap
+                horizontalAlignment: Text.AlignHCenter
+                textFormat: Text.PlainText
+                text: root.hint
+            }
+        }
+
         // Controls
         Row {
             id: regionSelectionControls
             z: 10
             visible: root.phase === RegionSelection.Phase.Select
+            enabled: root.inputReady && !root.sessionBusy
             anchors {
                 horizontalCenter: parent.horizontalCenter
                 bottom: parent.bottom

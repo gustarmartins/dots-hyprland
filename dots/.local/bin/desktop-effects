@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Persistent desktop effects; validate compositor settings before applying."""
-import argparse, fcntl, json, os, subprocess, sys, tempfile
+import argparse, fcntl, json, os, subprocess, sys, tempfile, uuid
 from pathlib import Path
 HOME=Path.home()
 STATE=HOME/'.local/state/desktop-effects'
 MODULE=HOME/'.config/hypr/custom/cinematic-effects.lua'
+SAVED=HOME/'.config/desktop-effects/presets.json'
+ANIM_DIR=HOME/'.config/hypr/custom/animations'
+ACTIVE=ANIM_DIR/'active/active.lua'
+ANIM_STATE=ANIM_DIR/'state'
 DEFAULT=dict(preset='cinematic',blur=True,passes=4,blur_size=8,live_blur=True,motion=True,samples=12,glow=True,glow_strength=20,shadow=True,rotate=True,border=2,rounding=18,gaps=6,tempo=100,travel=40,workspace_style='slidefade',window_style='popin',bounce=22,palette='aurora',aurora=False,stars=False,ambient_strength=35,ambient_speed=100,parallax=True,popup_opacity=82,panel_opacity=94)
+DEFAULT.update(motion_source='custom',animation_profile='',profile_tempo=100,profile_travel=-1,profile_bounce=0,profile_workspace_style='preset',profile_window_style='preset')
 PRESETS={
  'light':dict(blur=False,motion=False,glow=False,shadow=False,rotate=False,aurora=False,stars=False,parallax=False,popup_opacity=100,panel_opacity=100,tempo=75,travel=15,gaps=6),
  'balanced':dict(passes=2,live_blur=False,motion=False,rotate=False,glow_strength=10,aurora=False,stars=False,tempo=85,travel=25,gaps=8),
@@ -14,10 +19,31 @@ PRESETS={
 }
 RANGES={'passes':(1,5),'blur_size':(2,16),'samples':(3,24),'glow_strength':(0,60),'border':(1,5),'rounding':(0,20),'gaps':(0,30),'tempo':(50,160),'travel':(0,100),'bounce':(16,32),'ambient_strength':(0,80),'ambient_speed':(40,200),'popup_opacity':(65,100),'panel_opacity':(80,100)}
 CHOICES={'workspace_style':['slidefade','slidefadevert','slide','fade'],'window_style':['popin','slide','gnomed'],'palette':['aurora','sunset','ocean','emerald']}
+RANGES.update(profile_tempo=(50,160),profile_travel=(-1,100),profile_bounce=(0,32))
+CHOICES.update(motion_source=['profile','custom'],profile_workspace_style=['preset','slidefade','slidefadevert','slide','fade'],profile_window_style=['preset','popin','slide','gnomed'])
 PALETTES={'aurora':['b8a1ff','7bdfff','f4b8dc'],'sunset':['ffb86c','ff6b9d','c792ea'],'ocean':['59d8ff','6b8bff','a5f3fc'],'emerald':['65e6b4','c5f57c','60c9d9']}
+def selected_profile():
+ if ANIM_STATE.exists():
+  name=Path(ANIM_STATE.read_text().strip()).name
+  if name.endswith('.conf'):name=name[:-5]+'.lua'
+  if (ANIM_DIR/name).is_file():return name
+ if ACTIVE.exists():
+  for path in sorted(ANIM_DIR.glob('*.lua')):
+   if path.read_bytes()==ACTIVE.read_bytes():return path.name
+ return 'horizontal_dusky.lua'
+def normalize(s):
+ return DEFAULT | {'animation_profile':selected_profile()} | s
+def profile_path(name):
+ if not isinstance(name,str) or Path(name).name!=name or not name.endswith('.lua'):
+  raise ValueError('Choose an installed animation profile')
+ path=ANIM_DIR/name
+ if not path.is_file() or path.resolve().parent!=ANIM_DIR.resolve():
+  raise ValueError('Animation profile is missing: '+name)
+ return path
 def state():
- return DEFAULT | (json.loads((STATE/'state.json').read_text()) if (STATE/'state.json').exists() else {})
+ return normalize(json.loads((STATE/'state.json').read_text()) if (STATE/'state.json').exists() else {})
 def validate(s):
+ profile_path(s['animation_profile'])
  if set(s)-set(DEFAULT): raise ValueError('Unknown settings')
  for k,v in DEFAULT.items():
   if isinstance(v,bool) and type(s[k]) is not bool: raise ValueError(k+' must be boolean')
@@ -27,34 +53,143 @@ def validate(s):
   if s[k] not in choices: raise ValueError('Invalid '+k)
  if s['preset'] not in [*PRESETS,'custom']: raise ValueError('Invalid preset')
  return s
+def saved_presets(normalized=True):
+ entries=json.loads(SAVED.read_text()) if SAVED.exists() else []
+ if not isinstance(entries,list):raise ValueError('Invalid saved presets file')
+ for entry in entries:
+  uuid.UUID(entry['id'])
+  settings=validate(normalize(entry['settings']))
+  if normalized:entry['settings']=settings
+  if not isinstance(entry['name'],str):raise ValueError('Invalid preset name')
+ return entries
+def save_preset(name):
+ name=(name or '').strip()
+ if not name or len(name)>32 or any(ord(c)<32 or ord(c)==127 for c in name):
+  raise ValueError('Use a preset name with 1–32 characters')
+ entries=saved_presets(normalized=False)
+ if name.casefold() in {n.casefold() for n in PRESETS} | {e['name'].casefold() for e in entries}:
+  raise ValueError('That preset name already exists. Choose another name.')
+ entry={'id':str(uuid.uuid4()),'name':name,'settings':validate(state()|{'preset':'custom'})}
+ atomic(SAVED,json.dumps(entries+[entry],indent=2,ensure_ascii=False)+'\n')
+ return entry
+def delete_preset(value):
+ # Called only after the UI confirmation; UUID identity prevents deleting a
+ # different entry after a rename, reorder, or another process's save.
+ entries=saved_presets(normalized=False)
+ match=next((e for e in entries if e['id']==value),None)
+ if match is None:raise ValueError('Saved preset no longer exists')
+ atomic(SAVED,json.dumps([e for e in entries if e['id']!=value],indent=2,ensure_ascii=False)+'\n')
+ return {'deleted':value,'name':match['name']}
+def animation_profiles():
+ return [{'value':p.name,'icon':'animation','displayName':p.stem.replace('_',' ').replace('-',' ').title()} for p in sorted(ANIM_DIR.glob('*.lua'))]
+def preset_settings(value):
+ if value in PRESETS:
+  current=state()
+  motion={k:v for k,v in current.items() if k in ('motion_source','animation_profile') or k.startswith('profile_')}
+  return DEFAULT|PRESETS[value]|motion|{'preset':value}
+ if value and value.startswith('saved:'):
+  for entry in saved_presets():
+   if entry['id']==value[6:]:return entry['settings']|{'preset':'custom'}
+ raise ValueError('Unknown preset')
 def lua(v):
  if isinstance(v,bool):return str(v).lower()
  if isinstance(v,str):return json.dumps(v)
  if isinstance(v,dict):return '{'+','.join(k+'='+lua(x) for k,x in v.items())+'}'
  if isinstance(v,list):return '{'+','.join(map(lua,v))+'}'
  return str(v)
+def profile_motion(s):
+ # Capture the chosen profile's animation declarations without replacing hl
+ # globally. Replay its own curves, adjusting only controls the user opted into.
+ options={k:s['profile_'+k] for k in ['tempo','travel','bounce','workspace_style','window_style']}
+ return '''do
+ local api = hl
+ local options = OPTIONS
+ local nodes, order = {}, {}
+ local function copy(t)
+  local out = {}; for k,v in pairs(t) do out[k]=v end; return out
+ end
+ local hl = setmetatable({
+  animation = function(a)
+   if not nodes[a.leaf] then table.insert(order, a.leaf) end
+   nodes[a.leaf] = copy(a)
+  end,
+  curve = function(name, c)
+   c = copy(c)
+   if c.type == "spring" and options.bounce > 0 then c.dampening = options.bounce end
+   api.curve(name, c)
+  end,
+  -- Gestures were already loaded by the active profile in custom/general.lua.
+  gesture = function() end,
+ }, {__index=api})
+ PROFILE
+ -- Materialize children of profile parents so earlier desktop defaults cannot
+ -- silently override a profile that only declares windows/fade/workspaces.
+ local families = {
+  windows={"windowsIn","windowsOut","windowsMove"},
+  layers={"layersIn","layersOut"},
+  workspaces={"workspacesIn","workspacesOut"},
+  specialWorkspace={"specialWorkspaceIn","specialWorkspaceOut"},
+  fade={"fadeIn","fadeOut","fadeSwitch","fadeShadow","fadeGlow","fadeDim","fadeLayers","fadePopups","fadeDpms"},
+  fadeLayers={"fadeLayersIn","fadeLayersOut"},
+  fadePopups={"fadePopupsIn","fadePopupsOut"},
+ }
+ for _,parent in ipairs({"windows","layers","workspaces","specialWorkspace","fade","fadeLayers","fadePopups"}) do
+  for _,child in ipairs(families[parent]) do
+   if nodes[parent] and not nodes[child] then
+    nodes[child]=copy(nodes[parent]); nodes[child].leaf=child
+    if child == "windowsMove" then nodes[child].style=nil end
+    table.insert(order,child)
+   end
+  end
+ end
+ for _,leaf in ipairs(order) do
+  local a = nodes[leaf]
+  if a.enabled ~= false then
+   if a.speed and not leaf:match("angle$") then a.speed = math.min(100, a.speed * options.tempo / 100) end
+   if leaf == "workspaces" or leaf == "workspacesIn" or leaf == "workspacesOut" then
+    if options.workspace_style ~= "preset" then a.style=options.workspace_style end
+    local style = (a.style or ""):match("^(%S+)")
+    if options.travel >= 0 and (style == "slide" or style == "slidevert" or style == "slidefade" or style == "slidefadevert") then
+     a.style = style .. " " .. options.travel .. "%"
+    end
+   elseif leaf == "windowsIn" and options.window_style ~= "preset" then
+    a.style = options.window_style == "popin" and "popin 72%" or options.window_style
+   end
+  end
+  api.animation(a)
+ end
+end'''.replace('OPTIONS',lua(options)).replace('PROFILE',profile_path(s['animation_profile']).read_text())
+
 def render(s):
  colors=PALETTES[s['palette']]; accent=colors[0]
  cfg={'general':{'border_size':s['border'],'gaps_in':s['gaps']//2,'gaps_out':s['gaps'],'col':{'active_border':{'colors':['rgba('+c+'e6)' for c in colors],'angle':45},'inactive_border':'rgba('+accent+'44)'}},'decoration':{'rounding':s['rounding'],'blur':{'enabled':s['blur'],'size':s['blur_size'],'passes':s['passes'],'xray':not s['live_blur'],'new_optimizations':True,'noise':0.018,'contrast':0.95,'brightness':1,'vibrancy':0.35,'popups':s['blur'],'popups_ignorealpha':0.2},'motion_blur':{'enabled':s['motion'],'samples':s['samples']},'glow':{'enabled':s['glow'],'range':22,'render_power':3,'color':'rgba('+accent+f'{round(s["glow_strength"]*2.55):02x}'+')','color_inactive':'rgba('+accent+'08)'},'shadow':{'enabled':s['shadow'],'range':60,'render_power':3,'offset':[0,8],'color':'rgba(09061166)','color_inactive':'rgba(09061133)'}}}
  lines=['-- Generated by desktop-effects. Use Super+I > Desktop effects.','hl.config('+lua(cfg)+')']
- for name,data in {'riceLinear':{'type':'bezier','points':[[0,0],[1,1]]},'riceExit':{'type':'bezier','points':[[0.4,0],[0.82,0.2]]},'riceSoft':{'type':'bezier','points':[[0.2,0.8],[0.2,1]]},'riceOpen':{'type':'spring','mass':1,'stiffness':190,'dampening':s['bounce']},'riceMove':{'type':'spring','mass':1,'stiffness':250,'dampening':28},'riceSpace':{'type':'spring','mass':1,'stiffness':175,'dampening':s['bounce']+2}}.items(): lines.append('hl.curve('+lua(name)+','+lua(data)+')')
- def anim(leaf,speed,curve,style=None,spring=False):
-  a=dict(leaf=leaf,enabled=True,speed=round(speed*s['tempo']/100,2));a['spring' if spring else 'bezier']=curve
-  if style is not None:a['style']=style
-  lines.append('hl.animation('+lua(a)+')')
- style=s['window_style'];anim('windowsIn',4.6,'riceOpen','popin 72%' if style=='popin' else style,True)
- anim('windowsOut',2.4,'riceExit','popin 88%' if style=='popin' else style)
- anim('windowsMove',3.6,'riceMove','slide',True)
- ws=s['workspace_style'];ws=ws if ws=='fade' else ws+' '+str(s['travel'])+'%'
- for leaf in ['workspaces','workspacesIn','workspacesOut']:anim(leaf,5.2,'riceSpace',ws,True)
- for leaf in ['layersIn','specialWorkspaceIn']:anim(leaf,4.2,'riceOpen','popin 88%' if leaf=='layersIn' else 'slidefadevert 35%',True)
- for leaf in ['layersOut','specialWorkspaceOut']:anim(leaf,2.2,'riceExit','popin 94%' if leaf=='layersOut' else 'slidefadevert 25%')
- for leaf in ['fadeIn','fadeLayersIn','fadePopupsIn','fadeShadow','fadeGlow','border']:anim(leaf,2.8,'riceSoft')
- for leaf in ['fadeOut','fadeLayersOut','fadePopupsOut']:anim(leaf,1.8,'riceExit')
+ if s['motion_source']=='profile':
+  lines.append(profile_motion(s))
+ else:
+  lines.append('hl.config({animations={enabled=true}})')
+  for name,data in {'riceLinear':{'type':'bezier','points':[[0,0],[1,1]]},'riceExit':{'type':'bezier','points':[[0.4,0],[0.82,0.2]]},'riceSoft':{'type':'bezier','points':[[0.2,0.8],[0.2,1]]},'riceOpen':{'type':'spring','mass':1,'stiffness':190,'dampening':s['bounce']},'riceMove':{'type':'spring','mass':1,'stiffness':250,'dampening':28},'riceSpace':{'type':'spring','mass':1,'stiffness':175,'dampening':s['bounce']+2}}.items(): lines.append('hl.curve('+lua(name)+','+lua(data)+')')
+  def anim(leaf,speed,curve,style=None,spring=False):
+   a=dict(leaf=leaf,enabled=True,speed=round(speed*s['tempo']/100,2));a['spring' if spring else 'bezier']=curve
+   if style is not None:a['style']=style
+   lines.append('hl.animation('+lua(a)+')')
+  style=s['window_style'];anim('windowsIn',4.6,'riceOpen','popin 72%' if style=='popin' else style,True)
+  anim('windowsOut',2.4,'riceExit','popin 88%' if style=='popin' else style)
+  anim('windowsMove',3.6,'riceMove','slide',True)
+  ws=s['workspace_style'];ws=ws if ws=='fade' else ws+' '+str(s['travel'])+'%'
+  for leaf in ['workspaces','workspacesIn','workspacesOut']:anim(leaf,5.2,'riceSpace',ws,True)
+  anim('layersIn',4.2,'riceOpen','popin 88%',True)
+  anim('specialWorkspaceIn',3.2,'riceSoft','fade')
+  anim('layersOut',2.2,'riceExit','popin 94%')
+  anim('specialWorkspaceOut',2.2,'riceExit','fade')
+  for leaf in ['fadeIn','fadeLayersIn','fadePopupsIn','fadeShadow','fadeGlow','border']:anim(leaf,2.8,'riceSoft')
+  for leaf in ['fadeOut','fadeLayersOut','fadePopupsOut']:anim(leaf,1.8,'riceExit')
+ lines.append('hl.curve("riceLinear",{type="bezier",points={{0,0},{1,1}}})')
  lines.append('hl.animation('+lua(dict(leaf='borderangle',enabled=s['rotate'],speed=80,bezier='riceLinear',style='loop'))+')')
- lines.append('hl.layer_rule('+lua(dict(name='desktop_notification_glass',match={'namespace':'quickshell:notificationPopup'},blur=s['blur'],ignore_alpha=0.01,animation='slide right'))+')')
- lines.append('hl.layer_rule('+lua(dict(name='desktop_sidebar_motion',match={'namespace':'quickshell:sidebarRight'},animation='slide right'))+')')
- lines.append('hl.layer_rule('+lua(dict(name='desktop_sidebar_left_motion',match={'namespace':'quickshell:sidebarLeft'},animation='slide left'))+')')
+ lines.append('hl.layer_rule('+lua(dict(name='desktop_notification_glass',match={'namespace':'quickshell:notificationPopup'},blur=s['blur'],ignore_alpha=0.01,**({'animation':'slide right'} if s['motion_source']=='custom' else {})))+')')
+ if s['motion_source']=='custom':
+  lines.append('hl.layer_rule('+lua(dict(name='desktop_sidebar_motion',match={'namespace':'quickshell:sidebarRight'},animation='slide right'))+')')
+  lines.append('hl.layer_rule('+lua(dict(name='desktop_sidebar_left_motion',match={'namespace':'quickshell:sidebarLeft'},animation='slide left'))+')')
  return '\n'.join(lines)+'\n' 
 def atomic(path,text):
  path.parent.mkdir(parents=True,exist_ok=True)
@@ -65,29 +200,44 @@ def atomic(path,text):
  finally:
   if os.path.exists(tmp):os.unlink(tmp)
 def apply(s):
- content=render(validate(s));candidate=STATE/'candidate.lua';atomic(candidate,content)
+ s=validate(normalize(s))
+ profile=profile_path(s['animation_profile']).read_text()
+ content=render(s);candidate=STATE/'candidate.lua';atomic(candidate,'do local hl=setmetatable({gesture=function() end},{__index=hl})\n'+profile+'\nend\n'+content)
  result=subprocess.run(['Hyprland','--verify-config','-c',str(candidate)],capture_output=True,text=True)
  if result.returncode:raise RuntimeError(result.stdout+result.stderr)
- before=MODULE.read_text();atomic(MODULE,content)
+ paths=[MODULE,ACTIVE,ANIM_STATE,STATE/'state.json']
+ before={p:p.read_text() if p.exists() else None for p in paths}
  try:
+  atomic(ACTIVE,profile)
+  atomic(ANIM_STATE,s['animation_profile']+'\n')
+  atomic(MODULE,content)
   subprocess.run(['hyprctl','reload','config-only'],check=True,capture_output=True,text=True)
   errors=subprocess.check_output(['hyprctl','configerrors'],text=True).strip()
   if errors:raise RuntimeError(errors)
+  atomic(STATE/'state.json',json.dumps(s,indent=2)+'\n')
  except Exception:
-  atomic(MODULE,before);subprocess.run(['hyprctl','reload','config-only'],capture_output=True);raise
- atomic(STATE/'state.json',json.dumps(s,indent=2)+'\n')
+  for path,text in before.items():
+   if text is None:path.unlink(missing_ok=True)
+   else:atomic(path,text)
+  subprocess.run(['hyprctl','reload','config-only'],capture_output=True)
+  raise
  return s
 if __name__=='__main__':
- p=argparse.ArgumentParser();p.add_argument('action',choices=['status','preset','apply','validate']);p.add_argument('value',nargs='?');a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('action',choices=['status','preset','apply','validate','presets','save','animation','animations','delete','refresh']);p.add_argument('value',nargs='?');a=p.parse_args()
  STATE.mkdir(parents=True,exist_ok=True)
  try:
   with (STATE/'lock').open('w') as lock:
    fcntl.flock(lock,fcntl.LOCK_EX)
    if a.action=='status':s=state()
+   elif a.action=='presets':s=saved_presets()
+   elif a.action=='animations':s=animation_profiles()
+   elif a.action=='delete':s=delete_preset(a.value)
+   elif a.action=='save':s=save_preset(a.value)
+   elif a.action=='refresh':s=apply(state())
+   elif a.action=='animation':s=apply(state()|{'motion_source':'profile','animation_profile':a.value,'preset':'custom'})
    elif a.action=='preset':
-    if a.value not in PRESETS:raise ValueError('Unknown preset')
-    s=apply(DEFAULT|PRESETS[a.value]|{'preset':a.value})
+    s=apply(preset_settings(a.value))
    else:
-    s=validate(DEFAULT|json.loads(a.value));s=s if a.action=='validate' else apply(s|{'preset':'custom'})
+    s=validate(normalize(json.loads(a.value)));s=s if a.action=='validate' else apply(s|{'preset':'custom'})
    print(json.dumps(s))
  except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)

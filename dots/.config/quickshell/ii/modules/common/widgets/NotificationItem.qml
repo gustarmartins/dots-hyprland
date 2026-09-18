@@ -17,6 +17,7 @@ Item { // Notification item area
     property bool expanded: false
     property bool popup: false
     property bool onlyNotification: false
+    readonly property var compactActions: (notificationObject?.actions ?? []).filter(action => action.identifier !== "default" && String(action.text ?? "").trim().length > 0)
     property real fontSize: Appearance.font.pixelSize.small
     property real padding: onlyNotification ? 0 : 8
     property real summaryElideRatio: 0.85
@@ -136,7 +137,7 @@ Item { // Notification item area
                 (Appearance.colors.colLayer3) :
             ColorUtils.transparentize(Appearance.colors.colLayer3)
 
-        implicitHeight: expanded ? (contentColumn.implicitHeight + padding * 2) : summaryRow.implicitHeight
+        implicitHeight: contentColumn.implicitHeight + (expanded ? padding * 2 : 0)
         Behavior on implicitHeight {
             animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
         }
@@ -181,6 +182,22 @@ Item { // Notification item area
                     textFormat: Text.StyledText
                     text: {
                         return root.expanded ? "" : root.formattedBody
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                visible: root.popup && !root.expanded && root.compactActions.length > 0
+                Repeater {
+                    model: root.popup && !root.expanded ? root.compactActions : []
+                    NotificationActionButton {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        buttonText: modelData.text
+                        urgency: root.notificationObject.urgency
+                        onClicked: Notifications.attemptInvokeAction(root.notificationObject.notificationId, modelData.identifier)
                     }
                 }
             }

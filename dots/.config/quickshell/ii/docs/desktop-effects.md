@@ -4,6 +4,15 @@ Open **Super+I → Desktop effects**, or use the **Desktop mood** selector in th
 right sidebar. Presets apply immediately; individual controls are a draft until
 **Apply custom changes** is pressed. Reset edits reloads the applied state.
 
+To keep a custom look, apply any pending edits, enter a name, and press
+**Save current preset**. A named chip appears beside the built-in presets;
+clicking it restores the entire saved effects configuration. Saving itself does
+not apply or change effects. Names are limited to 32 characters and must be
+unique, ignoring case. Saved chips persist in
+`~/.config/desktop-effects/presets.json` across Settings and desktop restarts.
+The CLI equivalents are `desktop-effects save 'My look'`,
+`desktop-effects presets`, and `desktop-effects preset saved:<id>`.
+
 - Light: no blur, motion blur, glow, shadows, ambient animation or rotating borders.
 - Balanced: two-pass wallpaper glass and softer motion, without continuous effects.
 - Cinematic: live glass, motion blur, spring transitions and rotating borders.

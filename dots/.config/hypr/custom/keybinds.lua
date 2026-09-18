@@ -5,11 +5,15 @@ hl.bind("CTRL + SUPER + ALT + Slash", hl.dsp.exec_cmd("xdg-open ~/.config/hypr/c
 hl.bind("SUPER + Space", hl.dsp.exec_cmd("hyprctl switchxkblayout all next"),
     { description = "User: Toggle keyboard layout" })
 
-hl.unbind("SUPER + C")
-hl.unbind("SUPER + SHIFT + C")
-hl.bind("SUPER + C", hl.dsp.exec_cmd("flatpak run com.danklinux.dankcalendar"),
+hl.bind("SUPER + CTRL + O", hl.dsp.exec_cmd("$HOME/.local/bin/notes"),
+    { description = "Notes: Browse saved references" })
+hl.bind("SUPER + SHIFT + O", hl.dsp.exec_cmd("$HOME/.local/bin/notes new"),
+    { description = "Notes: Capture a quick note" })
+
+-- Keep the inherited code editor and color picker shortcuts.
+hl.bind("SUPER + CTRL + C", hl.dsp.exec_cmd("flatpak run com.danklinux.dankcalendar"),
     { description = "Calendar: Open DankCalendar" })
-hl.bind("SUPER + SHIFT + C", hl.dsp.exec_cmd("flatpak run com.danklinux.dankcalendar show --view agenda"),
+hl.bind("SUPER + CTRL + SHIFT + C", hl.dsp.exec_cmd("flatpak run com.danklinux.dankcalendar show --view agenda"),
     { description = "Calendar: Open agenda view" })
 
 hl.bind("SUPER + F11", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/toggle-float.sh"),
@@ -21,7 +25,7 @@ hl.bind("SUPER + CTRL + F11", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/sav
     { description = "User: Save app float geometry" })
 hl.bind("SUPER + CTRL + F12", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/save-float-position.sh"),
     { description = "User: Save window float geometry" })
-hl.bind("SUPER + F10", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/geo-daemon.sh"),
+hl.bind("SUPER + F10", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/geo-daemon.sh --toggle-geo"),
     { description = "User: Toggle geometry restore" })
 hl.bind("SUPER + F1", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/toggle-gpu-perf.sh"),
     { description = "User: Toggle AMD GPU power mode" })
@@ -114,3 +118,6 @@ hl.bind("SUPER + SHIFT + F9", hl.dsp.exec_cmd("$HOME/.local/bin/obsctl pause"),
     { description = "OBS: Pause/resume recording", locked = true })
 hl.bind("SUPER + ALT + F9", hl.dsp.exec_cmd("$HOME/.local/bin/obsctl split"),
     { description = "OBS: Split recording file", locked = true })
+
+-- Keep hidden scratchpad transfers local to the sending monitor.
+require("custom.scratchpad")

@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""Fast entry points and a discoverable index over the existing Markdown vault."""
+import argparse
+from collections import defaultdict
+from datetime import datetime, date
+import fcntl
+import hashlib
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+from urllib.parse import quote, urlencode
+
+VAULT = Path(os.environ.get('MEKKI_NOTES_VAULT', str(Path.home() / 'Documents/Obsidian Vault')))
+BRAIN = VAULT / 'Mekki Brain'
+START = BRAIN / 'Start Here.md'
+LIBRARY = BRAIN / 'Saved Notes.md'
+TOPICS = {
+    'Memory': 'RAM, swap, ZRAM, ZSTD, compaction and performance',
+    'Android': 'Phones, ADB, apps and device diagnostics',
+    'Desktop': 'Displays, shortcuts, audio, Linux and backups',
+    'Gaming': 'Eden, HarderAI, race research and osu!',
+    'Company': 'Imak, Microsoft 365 and work references',
+    'Projects': 'Ideas, plans, experiments and handoffs',
+    'Inbox': 'Quick captures and things not filed yet',
+    'Archive': 'Earlier setup notes, templates and historical references',
+}
+
+
+def uri(action='open', **params):
+    return 'obsidian://' + action + '?' + urlencode({'vault': VAULT.name, **params}, quote_via=quote)
+
+
+def link(path, label=None):
+    name = path.relative_to(VAULT).with_suffix('').as_posix()
+    label = (label or path.stem).replace('|', ' / ').replace(']', '').replace('[', '')
+    return f'[[{name}|{label}]]'
+
+
+def title(path, body):
+    match = re.search(r'^# ([^\n]+)', body, re.M)
+    return re.sub(r'[`*_]', '', match[1]).strip() if match else path.stem
+
+
+def topic(path, heading):
+    relative = path.relative_to(BRAIN).parts if path.is_relative_to(BRAIN) else path.parts[-1:]
+    if len(relative) > 2 and relative[0] == 'Reference' and relative[1] in TOPICS:
+        return relative[1]
+    words = (' '.join(relative) + ' ' + heading).lower()
+    if any(word in words for word in ('archive', 'template', 'prototype', 'adoption', 'evaluation', 'gemini -')):
+        return 'Archive'
+    if any(word in words for word in ('harderai', 'eden', 'lazer', 'race', 'osu')):
+        return 'Gaming'
+    if any(word in words for word in ('avminfo', 'android', 'poco', 'samsung', 'cryomanager')):
+        return 'Android'
+    if any(word in words for word in ('memory', 'vmatlas', 'vmscope', 'focus-mode', 'zram', 'unswap')):
+        return 'Memory'
+    if any(word in words for word in ('imak', 'company', 'm365', 'sharepoint')):
+        return 'Company'
+    if any(word in words for word in ('display', 'hypr', 'workstation', 'script registry', 'runbooks')):
+        return 'Desktop'
+    if any(word in words for word in ('quick notes', 'inbox', 'untitled', 'welcome')):
+        return 'Inbox'
+    return 'Projects'
+
+
+def inventory():
+    found = []
+    for path in VAULT.rglob('*.md'):
+        if path in (START, LIBRARY) or path.is_symlink() or any(p.startswith('.') for p in path.relative_to(VAULT).parts):
+            continue
+        body = path.read_text(encoding='utf-8')
+        if not body.strip():
+            continue
+        heading = title(path, body)
+        found.append(dict(path=path, title=heading, topic=topic(path, heading), modified=path.stat().st_mtime, body=body))
+    return found
+
+
+def write_index(path, body):
+    if path.exists() and path.read_text() == body:
+        return
+    with tempfile.NamedTemporaryFile('w', dir=path.parent, prefix='.notes-', delete=False) as stream:
+        tmp = Path(stream.name)
+        stream.write(body)
+    tmp.replace(path)
+
+
+def refresh():
+    if not BRAIN.is_dir():
+        raise ValueError(f'Existing vault not found: {BRAIN}')
+    # A short lock covers generated indexes only; it never locks the editor.
+    lock_path = VAULT / '.mekki-notes-index.lock'
+    with lock_path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        items = inventory()
+        grouped = defaultdict(list)
+        for item in items:
+            grouped[item['topic']].append(item)
+        prefix = '---\ncssclasses: [mekki-brain, mekki-notes-home]\n---\n\n'
+        library = prefix + '# Saved notes\n\n' + link(START, '← Notes home') + '\n\n'
+        library += 'Browse by topic. **Ctrl+Shift+F** searches the contents of every note.\n\n'
+        for group, purpose in TOPICS.items():
+            library += f'## {group}\n\n{purpose}.\n\n'
+            for item in sorted(grouped[group], key=lambda n: n['title'].casefold()):
+                library += '- ' + link(item['path'], item['title']) + '\n'
+            if not grouped[group]:
+                library += '_Nothing saved here yet._\n'
+            library += '\n'
+        home = prefix + '# Find it again\n\n'
+        home += f'**[Search everything]({uri("search")})** · ' + link(BRAIN/'Inbox.md', 'Jot something down') + ' · ' + link(LIBRARY, f'All {len(items)} saved notes') + '\n\n'
+        home += '> **Super+Ctrl+O** opens this page. **Super+Shift+O** captures a new note.\n> Search by what you remember: `zstd`, `phone`, `screen`, `race`, a command, or a phrase.\n\n'
+        guide = BRAIN / 'Reference/Memory/MEMORY-COMMANDS.md'
+        if guide.exists():
+            home += '**Pinned:** ' + link(guide, 'Memory commands — compact · ZSTD tiers · swap') + '\n\n'
+        home += '## What are you dealing with?\n\n| Topic | What you can find | Saved |\n| --- | --- | ---: |\n'
+        for group, purpose in TOPICS.items():
+            home += f'| [[Mekki Brain/Saved Notes#{group}\\|{group}]] | {purpose} | {len(grouped[group])} |\n'
+        recent = sorted([n for n in items if n['topic'] != 'Archive'], key=lambda n: n['modified'], reverse=True)[:5]
+        home += '\n## Recently saved or changed\n\n'
+        for item in recent:
+            stamp = datetime.fromtimestamp(item['modified']).strftime('%d %b')
+            home += f'- {link(item["path"], item["title"])} — {item["topic"]} · {stamp}\n'
+        older = [n for n in items if n not in recent and n['topic'] not in ('Archive', 'Inbox')]
+        older.sort(key=lambda n: hashlib.sha256((str(date.today())+str(n['path'])).encode()).hexdigest())
+        home += '\n## You also saved…\n\n'
+        for item in older[:3]:
+            home += '- ' + link(item['path'], item['title']) + f' — {item["topic"]}\n'
+        home += '\n_This small selection changes daily. The complete library stays one click away._\n'
+        home += '\n' + link(BRAIN/'How to use these notes.md', 'How to save files and capture notes') + '\n'
+        home += '\n---\nIndexes refresh when opened through `notes` or the shortcut. Use `notes refresh` while staying in Obsidian.\n'
+        write_index(LIBRARY, library)
+        write_index(START, home)
+    return items
+
+
+def launch(url):
+    state = Path.home() / '.local/state/mekki-notes'
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / 'launch.log').open('a') as log:
+        subprocess.Popen(['xdg-open', url], stdin=subprocess.DEVNULL,
+                         stdout=log, stderr=log, start_new_session=True)
+
+
+def open_note(path):
+    launch(uri(file=str(path.relative_to(VAULT))))
+
+
+def safe_name(name):
+    cleaned = re.sub(r'[\x00-\x1f/\\:*?"<>|\[\]#^]', '-', name).strip(' .')[:150]
+    if not cleaned:
+        raise ValueError('A note needs a title')
+    return cleaned
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Notes home, quick capture, search and save into Mekki Brain.')
+    sub = parser.add_subparsers(dest='command')
+    sub.add_parser('home', help='open the topic home')
+    sub.add_parser('refresh', help='refresh home and library without opening a window')
+    sub.add_parser('memory', help='open the memory command guide')
+    new = sub.add_parser('new', help='capture a note; omit the title for a small prompt')
+    new.add_argument('title', nargs='*')
+    find = sub.add_parser('find', help='search all note contents in Obsidian')
+    find.add_argument('words', nargs='*')
+    listing = sub.add_parser('list', help='search saved notes from the terminal')
+    listing.add_argument('words', nargs='*')
+    save = sub.add_parser('save', help='save a Markdown/text file as a searchable reference')
+    save.add_argument('file', type=Path)
+    save.add_argument('--topic', choices=list(TOPICS), default='Inbox', type=str.title)
+    save.add_argument('--no-open', action='store_true')
+    args = parser.parse_args()
+    if not BRAIN.is_dir():
+        raise ValueError(f'Existing vault not found: {BRAIN}')
+    target = START
+    if args.command == 'save':
+        source = args.file.expanduser().resolve(strict=True)
+        content = source.read_text(encoding='utf-8')
+        target = BRAIN / 'Reference' / args.topic / (safe_name(source.stem) + '.md')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Never silently replace a previously saved or edited note.
+        with target.open('x', encoding='utf-8') as out:
+            out.write(content.rstrip() + f'\n\n---\nSaved {date.today()} from [the original file]({source.as_uri()}). '
+                      'This note is a snapshot; the source may change.\n')
+        print(f'Saved: {target}')
+    elif args.command == 'new':
+        name = ' '.join(args.title)
+        if not name:
+            prompt = subprocess.run(['rofi', '-dmenu', '-p', 'Note title', '-mesg', 'Write it now. Find it later by title or contents.'], input='', text=True, capture_output=True)
+            if prompt.returncode != 0 or not prompt.stdout.strip():
+                return
+            name = prompt.stdout.strip()
+        stamp = datetime.now().strftime('%Y-%m-%d %H%M%S-%f')
+        target = BRAIN / 'Quick Notes' / f'{stamp} - {safe_name(name)}.md'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open('x', encoding='utf-8') as out:
+            out.write(f'# {name}\n\n')
+    items = refresh()
+    if args.command == 'refresh' or (args.command == 'save' and args.no_open):
+        return
+    if args.command == 'list':
+        words = [w.casefold() for w in args.words]
+        for item in items:
+            if all(w in (item['title'] + ' ' + item['body']).casefold() for w in words):
+                print(f'{item["topic"]:9} {item["title"]}\n          {item["path"]}')
+        return
+    if args.command == 'find':
+        launch(uri('search', query=' '.join(args.words)))
+        return
+    if args.command == 'memory':
+        target = BRAIN / 'Reference/Memory/MEMORY-COMMANDS.md'
+        if not target.exists():
+            raise ValueError('The memory command guide has not been saved yet')
+    open_note(target)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        raise SystemExit(f'notes: {error}')

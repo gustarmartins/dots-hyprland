@@ -4,6 +4,14 @@ end
 
 rule({ match = { class = "^()$", title = "^()$" }, no_blur = true })
 
+-- Quick-access notes stay readable among many tiled work windows.
+rule({
+    match = { class = "^(md\\.obsidian\\.Obsidian)$" },
+    float = true,
+    center = true,
+    size = { 1080, 860 },
+})
+
 rule({
     match = { class = "^(com\\.danklinux\\.dankcalendar)$" },
     float = true,

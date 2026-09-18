@@ -24,6 +24,7 @@ Flow {
     property var currentValue: null
 
     signal selected(var newValue)
+    signal alternateSelected(var value)
 
     Repeater {
         model: root.options
@@ -46,6 +47,7 @@ Flow {
             buttonIcon: modelData.icon || ""
             buttonText: modelData.displayName
             toggled: root.currentValue == modelData.value
+            altAction: () => root.alternateSelected(modelData.value)
             onClicked: {
                 root.selected(modelData.value);
             }

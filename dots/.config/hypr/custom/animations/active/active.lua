@@ -75,8 +75,11 @@ hl.animation({ leaf = "fadeDpms", enabled = true, speed = 4.0, bezier = "aetherS
 hl.animation({ leaf = "workspaces", enabled = true, speed = 5.6, spring = "aetherSpace", style = "slidefade 32%" })
 hl.animation({ leaf = "workspacesIn", enabled = true, speed = 5.6, spring = "aetherSpace", style = "slidefade 32%" })
 hl.animation({ leaf = "workspacesOut", enabled = true, speed = 4.8, spring = "aetherSpace", style = "slidefade 32%" })
-hl.animation({ leaf = "specialWorkspaceIn", enabled = true, speed = 4.6, spring = "aetherSheet", style = "slidefadevert 22%" })
-hl.animation({ leaf = "specialWorkspaceOut", enabled = true, speed = 2.8, bezier = "aetherExit", style = "slidefadevert 16%" })
+-- Hidden workspaces retain their final render offset in this compositor.
+-- Cross-fading leaves that offset at zero, so sending another real floating
+-- window into the scratchpad does not inherit a stale off-screen position.
+hl.animation({ leaf = "specialWorkspaceIn", enabled = true, speed = 3.2, bezier = "aetherReveal", style = "fade" })
+hl.animation({ leaf = "specialWorkspaceOut", enabled = true, speed = 2.2, bezier = "aetherExit", style = "fade" })
 
 -- Finishing details. Avoid a looping angle animation: it forces continuous
 -- redraws even while the desktop is idle.

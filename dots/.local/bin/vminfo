@@ -678,27 +678,15 @@ def watermark_bar(zone, width=20):
     return ''.join(out)
 
 
-def kswapd_verdict(zones, vmstat_deltas):
-    """Classify current zone-watermark and reclaim pressure."""
-    min_breached = any(z.get('free', 0) <= z.get('min', -1) for z in zones)
-    low_breached = any(z.get('free', 0) <= z.get('low', -1) for z in zones)
-    scan = vmstat_deltas.get('pgscan_kswapd')
-    if scan is None:
-        scan = vmstat_deltas.get('pgscan_kswapd_normal')
-    steal = vmstat_deltas.get('pgsteal_kswapd')
-    low_hit = vmstat_deltas.get('kswapd_low_wmark_hit_quickly')
-    direct = vmstat_deltas.get('pgscan_direct')
-
-    if min_breached:
-        return f" {BRED}free below min — kswapd thrashing, kills likely{RESET}"
-    if low_breached and (scan or 0) > 0:
-        steal_info = f", {steal:.0f} steal/s" if (steal or 0) > 0 else ""
-        return f" {BYELLOW}below low watermark — kswapd reclaiming ({scan:.0f} scan/s{steal_info}){RESET}"
-    if (direct or 0) > 0:
-        return f" {BYELLOW}direct reclaim active ({direct:.0f} scan/s){RESET}"
-    if (low_hit or 0) > 0:
-        return f" {BYELLOW}low watermark hit repeatedly — kswapd waking often ({low_hit:.0f}/s){RESET}"
-    return f" {BGREEN}free above low watermark — kswapd idle{RESET}"
+def kswapd_verdict(zones, deltas):
+    fields = []
+    for key, label in (('pgscan_kswapd', 'scan'), ('pgsteal_kswapd', 'steal'),
+                       ('pgscan_direct', 'direct'), ('kswapd_low_wmark_hit_quickly', 'low-hit')):
+        value = deltas.get(key, deltas.get(key + '_normal'))
+        if value is not None:
+            color = BYELLOW if value > 0 else DIM
+            fields.append(f"{DIM}{label}{RESET} {color}{value:.0f}/s{RESET}")
+    return ' ' + '  '.join(fields) if fields else ''
 
 
 def get_loadavg():
@@ -1008,14 +996,101 @@ class DeltaTracker:
 # ── View modes ─────────────────────────────────────────────────────────
 
 VIEW_MODES = [
-    {'key': '1', 'sort': 'rss',       'label': 'Resident RAM', 'icon': '💾', 'color': BCYAN},
-    {'key': '2', 'sort': 'pcpu',      'label': 'CPU Hogs',     'icon': '🔥', 'color': BRED},
-    {'key': '3', 'sort': 'swap',      'label': 'Swap Hogs',    'icon': '🔄', 'color': BMAGENTA},
-    {'key': '4', 'sort': 'total_mem', 'label': 'RAM + Swap',   'icon': '📊', 'color': BYELLOW},
+    {'key': '1', 'sort': 'rss',       'label': 'Resident RAM', 'color': BCYAN},
+    {'key': '2', 'sort': 'pcpu',      'label': 'CPU',     'color': BRED},
+    {'key': '3', 'sort': 'swap',      'label': 'Swap',    'color': BMAGENTA},
+    {'key': '4', 'sort': 'total_mem', 'label': 'RAM + Swap',   'color': BYELLOW},
 ]
 
 
 # ── Dashboard Rendering ───────────────────────────────────────────────
+
+def footer_rows(width, count, filter_label='Filter', android=False, lite=False):
+    controls = [('q', 'quit', DIM), ('1-2' if lite else '1-4', 'view', DIM),
+                ('v', filter_label, DIM), ('+/-', count, DIM)]
+    if not lite:
+        controls += [('f', 'swap', BMAGENTA), ('u', 'unswap', BGREEN),
+                     ('k', 'sig', BRED), ('r', 'recomp', BMAGENTA), ('w', 'wb', BCYAN)]
+    controls += [('Space', 'pause', DIM)]
+    if android and not lite:
+        controls += [('m', 'select', BYELLOW)]
+    rows, current = [], ' '
+    for key, label, color in controls:
+        item = f'{color}[{key}]{RESET} {label}'
+        if current != ' ' and visible_len(current + ' ' + item) > width - 1:
+            rows.append(current)
+            current = ' ' + item
+        else:
+            current += ('' if current == ' ' else ' ') + item
+    rows.append(current)
+    return rows
+
+
+def compact_fields(label, fields, width):
+    """Wrap whole label/value fields, reserving one terminal column."""
+    prefix = f" {BOLD}{label:<5}{RESET} "
+    current = prefix
+    rows = []
+    for key, value in fields:
+        item = f"{DIM}{key}{RESET} {BWHITE}{value}{RESET}" if key else str(value)
+        candidate = current + ("  " if current != prefix else "") + item
+        if current != prefix and visible_len(candidate) > width - 1:
+            rows.append(current)
+            current = prefix + item
+        else:
+            current = candidate
+    if current != prefix:
+        rows.append(current)
+    return rows
+
+
+def vm_fields(knobs):
+    """Known tunables only; zero is a value, missing is not zero."""
+    knobs = {k.replace('-', '_'): v for k, v in knobs.items()}
+    fields = []
+    for key, label in (
+        ('swappiness', 'swappiness'), ('page_cluster', 'cluster'),
+        ('min_free_kbytes', 'min-free'), ('extra_free_kbytes', 'extra-free'),
+        ('watermark_scale_factor', 'scale'), ('watermark_boost_factor', 'boost'),
+        ('compaction_proactiveness', 'compact'),
+        ('vfs_cache_pressure', 'vfs'), ('max_map_count', 'maps'),
+        ('overcommit_memory', 'overcommit'), ('overcommit_ratio', 'oc-ratio'),
+        ('extfrag_threshold', 'extfrag'), ('zone_reclaim_mode', 'zone-reclaim'),
+        ('lowmem_reserve_ratio', 'reserve'),
+    ):
+        value = knobs.get(key)
+        if value is None:
+            continue
+        if key.endswith('_kbytes'):
+            value = to_human(int(value) * 1024)
+        elif key == 'lowmem_reserve_ratio':
+            value = '/'.join(str(value).split())
+        elif key == 'overcommit_ratio':
+            value = f'{value}%'
+        fields.append((label, value))
+    return fields
+
+
+def dirty_fields(knobs):
+    knobs = {k.replace('-', '_'): v for k, v in knobs.items()}
+    fields = []
+    for key, label in (('dirty_background', 'bg'), ('dirty', 'limit')):
+        size, ratio = knobs.get(key + '_bytes'), knobs.get(key + '_ratio')
+        if size:
+            fields.append((label, to_human(size)))
+        elif ratio is not None:
+            fields.append((label, f'{ratio}%'))
+        elif size is not None:
+            fields.append((label, '-'))
+    for key, label, divisor in (
+        ('dirty_expire_centisecs', 'expire', 100),
+        ('dirty_writeback_centisecs', 'write', 100),
+        ('dirtytime_expire_seconds', 'age', 1),
+    ):
+        if knobs.get(key) is not None:
+            fields.append((label, f'{knobs[key] / divisor:g}s'))
+    return fields
+
 
 def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                    proc_limit, cpu_pct, temps, loadavg, uptime_s,
@@ -1066,19 +1141,16 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
 
     # Section visibility decisions based on terminal size
     show_sublines = not is_tiny and th >= 28
-    show_top_hogs = not is_tiny and th >= 30
     show_breakdown = not is_tiny and th >= 32
-    show_dirty_knobs = show_breakdown and th >= 35
     show_zones = not is_tiny and th >= 40 and tw >= 75 and bool(display_zones)
-    show_zone_knobs = show_zones and th >= 44
 
     # ── Header ──────────────────────────────────────────────────────
-    status = (f"{BRED}⏸  PAUSED{RESET}" if paused else f"{BGREEN}●  LIVE{RESET}")
+    status = (f"{BRED}PAUSED{RESET}" if paused else f"{BGREEN}LIVE{RESET}")
     if is_tiny:
-        emit(f" {BOLD}{BCYAN}⚡vminfo{RESET} {status}")
+        emit(f" {BOLD}{BCYAN}vminfo{RESET} {status}")
     else:
         uptxt = fmt_duration(uptime_s) if uptime_s else ""
-        emit(f" {BOLD}{BCYAN}⚡ vminfo{RESET}  {status}  {DIM}up {uptxt}{RESET}")
+        emit(f" {BOLD}{BCYAN}vminfo{RESET}  {status}  {DIM}up {uptxt}{RESET}")
     emit(f" {CYAN}{'━' * max(1, tw - 2)}{RESET}")
 
     # ── CPU, load, and temperatures ──────────────────────────────────
@@ -1092,7 +1164,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
 
     cpu_bar_pct = min(cpu_pct or 0, 100)
     if is_tiny:
-        emit(f" {BOLD}🖥  CPU{RESET}  {make_bar(cpu_bar_pct, bar_w)} {BWHITE}{cpu_str}{RESET}")
+        emit(f" {BOLD}CPU  {RESET}  {make_bar(cpu_bar_pct, bar_w)} {BWHITE}{cpu_str}{RESET}")
         emit(f"        {DIM}load{RESET} {load_color}{loadavg['l1']:.1f}{RESET} {DIM}{loadavg['l5']:.1f} {loadavg['l15']:.1f} ({ncpu}c){RESET}")
     else:
         temp_parts = []
@@ -1106,7 +1178,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
             temp_parts.append(f"{DIM}gpu{RESET} {tc}{t:.0f}°C{RESET}")
         temp_str = f"  {'  '.join(temp_parts)}" if temp_parts else ""
 
-        emit(f" {BOLD}🖥  CPU{RESET}   {make_bar(cpu_bar_pct, bar_w)}  "
+        emit(f" {BOLD}CPU  {RESET}   {make_bar(cpu_bar_pct, bar_w)}  "
              f"{BWHITE}{cpu_str:>5}{RESET}  "
              f"{DIM}load{RESET} {load_color}{loadavg['l1']:.2f}{RESET}"
              f"/{loadavg['l5']:.2f}/{loadavg['l15']:.2f}"
@@ -1121,13 +1193,13 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
 
     avail_ratio = avail_ram / total_ram if total_ram > 0 else 0
     if avail_ratio > 0.30:
-        ram_tag = f"{BGREEN}▲ Healthy{RESET}"
+        ram_color = BGREEN
     elif avail_ratio > 0.12:
-        ram_tag = f"{BYELLOW}▶ Warning{RESET}"
+        ram_color = BYELLOW
     else:
-        ram_tag = f"{BRED}▼ Critical{RESET}"
+        ram_color = BRED
 
-    ram_delta_str = f"{GRAY}→ stable{RESET}"
+    ram_delta_str = f"{GRAY}0 B/s{RESET}"
     d = deltas.get('avail_ram')
     if d is not None:
         if d > 512 * 1024:
@@ -1136,13 +1208,13 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
             ram_delta_str = f"{BRED}↘ {to_human(abs(d))}/s{RESET}"
 
     if is_tiny:
-        emit(f" {BOLD}💾 RAM{RESET}  {make_bar(ram_pct, bar_w)} {BWHITE}{ram_pct:.0f}%{RESET}")
-        emit(f"        {DIM}{to_human(used_ram)}/{to_human(total_ram)}{RESET} {ram_tag}")
+        emit(f" {BOLD}RAM  {RESET}  {make_bar(ram_pct, bar_w)} {ram_color}{ram_pct:.0f}%{RESET}")
+        emit(f"        {DIM}{to_human(used_ram)}/{to_human(total_ram)}{RESET}")
     else:
-        emit(f" {BOLD}💾 RAM{RESET}   {make_bar(ram_pct, bar_w)}  "
-             f"{BWHITE}{ram_pct:5.1f}%{RESET}  "
+        emit(f" {BOLD}RAM  {RESET}   {make_bar(ram_pct, bar_w)}  "
+             f"{ram_color}{ram_pct:5.1f}%{RESET}  "
              f"{DIM}{to_human(used_ram)} / {to_human(total_ram)}{RESET}  "
-             f"{ram_tag}  {ram_delta_str}")
+             f"{ram_delta_str}")
 
     # ── Swap ────────────────────────────────────────────────────────
     total_swap = mem.get('SwapTotal', 0)
@@ -1151,13 +1223,13 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     swap_pct = (used_swap / total_swap) * 100 if total_swap > 0 else 0
 
     if swap_pct < 50:
-        swap_tag = f"{BGREEN}▲ Good{RESET}"
+        swap_color = BGREEN
     elif swap_pct < 85:
-        swap_tag = f"{BYELLOW}▶ Caution{RESET}"
+        swap_color = BYELLOW
     else:
-        swap_tag = f"{BRED}▼ Low{RESET}"
+        swap_color = BRED
 
-    swap_delta_str = f"{GRAY}→ stable{RESET}"
+    swap_delta_str = f"{GRAY}0 B/s{RESET}"
     d = deltas.get('used_swap')
     if d is not None:
         if d > 512 * 1024:
@@ -1167,57 +1239,42 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
 
     swap_bar = make_bar(swap_pct, bar_w) if total_swap > 0 else f"{GRAY}{'░' * bar_w}{RESET}"
     if is_tiny:
-        emit(f" {BOLD}🔄 Swp{RESET}  {swap_bar} {BWHITE}{swap_pct:.0f}%{RESET}")
-        emit(f"        {DIM}{to_human(used_swap)}/{to_human(total_swap)}{RESET} {swap_tag}")
+        emit(f" {BOLD}Swap {RESET}   {swap_bar} {swap_color}{swap_pct:.0f}%{RESET}")
+        emit(f"        {DIM}{to_human(used_swap)}/{to_human(total_swap)}{RESET}")
     else:
-        emit(f" {BOLD}🔄 Swap{RESET}  {swap_bar}  "
-             f"{BWHITE}{swap_pct:5.1f}%{RESET}  "
+        emit(f" {BOLD}Swap {RESET}   {swap_bar}  "
+             f"{swap_color}{swap_pct:5.1f}%{RESET}  "
              f"{DIM}{to_human(used_swap)} / {to_human(total_swap)}{RESET}  "
-             f"{swap_tag}  {swap_delta_str}")
-        if show_sublines:
-            emit(fmt_swap_knobs(vm_knobs, tw))
+             f"{swap_delta_str}")
 
-    # ── ZRAM ────────────────────────────────────────────────────────
+    # ZRAM and writeback use separate compact numeric rows.
     if has_zram:
-        raw_ratio = zr['orig'] / zr['compr'] if zr['compr'] > 0 else 1.0
-        phys_ratio = zr['orig'] / zr['mem_used'] if zr['mem_used'] > 0 else 1.0
-        if phys_ratio >= 2.5:
-            zr_tag = f"{BGREEN}▲ Efficient{RESET}"
-        elif phys_ratio >= 1.5:
-            zr_tag = f"{BYELLOW}▶ Moderate{RESET}"
-        else:
-            zr_tag = f"{BRED}▼ Inefficient{RESET}"
-
-        zram_items = [
-            f"{BWHITE}{phys_ratio:.2f}x phys{RESET} {DIM}({raw_ratio:.2f}x raw){RESET}",
-            f"{DIM}{to_human(zr['orig'])} → {to_human(zr['mem_used'])}{RESET}",
-            zr_tag,
-        ]
-        primary = zr.get('primary') or '?'
-        recomp = zr.get('recomp_tiers') or []
-        if recomp:
-            # Keep the target identity, not the verbose verification prose.
-            target = str(recomp[0]).split(' ', 1)[0]
-            zram_items.append(f"{DIM}{primary}→{target}{RESET}")
-        elif primary != '?':
-            zram_items.append(f"{DIM}{primary}{RESET}")
+        raw_ratio = zr['orig'] / zr['compr'] if zr['compr'] else 0
+        phys_ratio = zr['orig'] / zr['mem_used'] if zr['mem_used'] else 0
+        color = BGREEN if phys_ratio >= 2.5 else BYELLOW if phys_ratio >= 1.5 else BRED
+        fields = [('', f"{color}{phys_ratio:.2f}x phys{RESET}"),
+                  ('raw', f'{raw_ratio:.2f}x'), ('orig', to_human(zr['orig'])),
+                  ('compr', to_human(zr['compr'])), ('RAM', to_human(zr['mem_used']))]
+        for row in compact_fields('ZRAM', fields, tw):
+            emit(row)
+        codec = zr.get('primary') or '-'
+        tiers = [str(t).split(' ', 1)[0] for t in zr.get('recomp_tiers', [])]
+        if tiers:
+            codec += '>' + '>'.join(tiers)
+        for row in compact_fields('Codec', [('', codec)], tw):
+            emit(row)
         if zr.get('backing'):
-            wb_name = os.path.basename(zr['backing'])
-            wb_state = (f"budget {to_human(zr['wb_limit_bytes'])}"
-                        if zr.get('wb_limit_bytes') else
-                        "locked" if zr.get('wb_enabled') else "unlimited")
-            wb_on_dev = to_human(zr['backing_bytes']) if zr.get('backing_bytes') else '0 B'
-            zram_items.append(f"{DIM}wb {wb_name} {wb_on_dev} {wb_state}{RESET}")
-        if zram_busy:
-            zram_items.append(f"{BYELLOW}⏳ action running; last sample{RESET}")
-        emit_packed(
-            f" {BOLD}🗜  ZRAM{RESET}  ",
-            zram_items,
-            separator="  ",
-            continuation="      ",
-        )
-    elif zram_busy:
-        emit(f" {BOLD}🗜  ZRAM{RESET}  {BYELLOW}⏳ action running; counters will resume when it finishes{RESET}")
+            limit = (to_human(zr.get('wb_limit_bytes', 0)) if zr.get('wb_enabled')
+                     else 'off' if zr.get('wb_enabled') is False else '-')
+            fields = [('', os.path.basename(zr['backing'])),
+                      ('used', to_human(zr['backing_bytes'])),
+                      ('read', to_human(zr.get('bd_reads', 0) * 4096)),
+                      ('write', to_human(zr.get('wb_boot_writes', 0) * 4096)),
+                      ('limit', limit)]
+            for row in compact_fields('WB', fields, tw):
+                emit(row)
+    if zram_busy:
+        emit(f" {BYELLOW}ZRAM  busy / cached sample{RESET}")
 
     # ── PSI ─────────────────────────────────────────────────────────
     s10 = psi['some']['avg10']
@@ -1225,68 +1282,26 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     s300 = psi['some']['avg300']
     f10 = psi['full']['avg10']
 
-    if s10 > 5.0 or f10 > 2.0:
-        psi_tag = f"{BRED}▼ Stalling!{RESET}"
-    elif s10 > 0.0:
-        psi_tag = f"{BYELLOW}▶ Mild{RESET}"
-    else:
-        psi_tag = f"{BGREEN}▲ Smooth{RESET}"
-
-    if is_tiny:
-        emit(f" {BOLD}⏱  PSI{RESET}  {BWHITE}{s10:.1f}{RESET}/{s60:.1f}/{s300:.1f}%  {psi_tag}")
-    else:
-        emit(f" {BOLD}⏱  PSI{RESET}   "
-             f"avg10/60/300: {BWHITE}{s10:.2f}{RESET}/{s60:.2f}/{s300:.2f}%"
-             f"  {psi_tag}")
-
-    # ── Top Hogs (compact one-liner) ─────────────────────────────────
-    if show_top_hogs and processes:
-        top_mem = max(processes, key=lambda p: p.get('total_mem', 0))
-        top_cpu = max(processes, key=lambda p: p.get('pcpu', 0))
-        top_burn = max(processes, key=lambda p: p.get('cputime_s', 0))
-        top_swp = max(processes, key=lambda p: p.get('swap', 0))
-
-        parts = []
-        # Always show heaviest memory consumer
-        parts.append(f"{BWHITE}{top_mem['comm'][:14]}{RESET} {BCYAN}{to_human(top_mem['total_mem'])}{RESET} {DIM}mem{RESET}")
-
-        # CPU% — skip if same process as mem leader
-        if top_cpu['pid'] != top_mem['pid'] and top_cpu.get('pcpu', 0) > 1.0:
-            parts.append(f"{BWHITE}{top_cpu['comm'][:14]}{RESET} {BRED}{top_cpu['pcpu']:.0f}%{RESET} {DIM}cpu{RESET}")
-        elif top_cpu.get('pcpu', 0) > 1.0:
-            parts.append(f"{BRED}{top_cpu['pcpu']:.0f}%{RESET} {DIM}cpu{RESET}")
-
-        # Cumulative CPU burn — skip if same as mem or cpu leader
-        seen_pids = {top_mem['pid'], top_cpu['pid']}
-        if top_burn['pid'] not in seen_pids and top_burn.get('cputime_s', 0) > 60:
-            parts.append(f"{BWHITE}{top_burn['comm'][:14]}{RESET} {BYELLOW}{fmt_duration(top_burn['cputime_s'])}{RESET} {DIM}burn{RESET}")
-        elif top_burn.get('cputime_s', 0) > 60:
-            parts.append(f"{BYELLOW}{fmt_duration(top_burn['cputime_s'])}{RESET} {DIM}burn{RESET}")
-
-        # Swap — only if there's meaningful swap and different process
-        seen_pids.add(top_burn['pid'])
-        if top_swp.get('swap', 0) > 0:
-            if top_swp['pid'] not in seen_pids:
-                parts.append(f"{BWHITE}{top_swp['comm'][:14]}{RESET} {BMAGENTA}{to_human(top_swp['swap'])}{RESET} {DIM}swp{RESET}")
-            else:
-                parts.append(f"{BMAGENTA}{to_human(top_swp['swap'])}{RESET} {DIM}swp{RESET}")
-
-        emit(f" {DIM}🏋 top:{RESET}  {f' {DIM}·{RESET} '.join(parts)}")
+    color = BRED if s10 > 5 or f10 > 2 else BYELLOW if s10 > 0 else BGREEN
+    fields = [('10/60/300', f"{color}{s10:.2f}/{s60:.2f}/{s300:.2f}%{RESET}"),
+              ('full10', f'{f10:.2f}%')]
+    for row in compact_fields('PSI', fields, tw):
+        emit(row)
 
     # ── Memory Breakdown ────────────────────────────────────────────
     if show_breakdown:
         emit("")
-        emit(make_separator("📊 Memory Breakdown", tw))
+        emit(make_separator("Memory", tw))
         for row in memory_grid_lines:
             emit(row)
 
-        if show_dirty_knobs:
-            emit(fmt_dirty_knobs(vm_knobs, tw))
 
     # ── Zones & watermarks ───────────────────────────────────────────
     if show_zones and display_zones:
-        emit(make_separator("🛟 Zones & watermarks", tw))
-        emit(kswapd_verdict(display_zones, vmstat_deltas))
+        emit(make_separator("Zones", tw))
+        reclaim = kswapd_verdict(display_zones, vmstat_deltas)
+        if reclaim:
+            emit(reclaim)
         if tw >= 135:
             zw = 25
         elif tw >= 110:
@@ -1304,11 +1319,11 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
             boost = zone.get('boost', 0)
 
             if free <= minimum:
-                state = f"{BRED}min breached{RESET}"
+                state = f"{BRED}< min{RESET}"
             elif free <= low:
-                state = f"{BYELLOW}below low (kswapd awake){RESET}"
+                state = f"{BYELLOW}< low{RESET}"
             else:
-                state = f"{BGREEN}comfortable{RESET}"
+                state = f"{BGREEN}> low{RESET}"
 
             pages_to_bytes = 4096
             zparts = [
@@ -1330,14 +1345,16 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                         f"{watermark_bar(zone, zw)} ")
             emit_packed(z_prefix, zparts, separator=" · ", continuation="      ")
 
-        if show_zone_knobs:
-            emit_packed("   ", zone_knob_parts(vm_knobs, tw),
-                        separator=" · ", continuation="   ")
+    if show_sublines:
+        for row in compact_fields('VM', vm_fields(vm_knobs), tw):
+            emit(row)
+        for row in compact_fields('Dirty', dirty_fields(vm_knobs), tw):
+            emit(row)
 
     # The upper dashboard now wraps telemetry according to the live width.
     # Measure the rendered lines directly so process rows fill only genuinely
     # unused height instead of relying on stale fixed-line estimates.
-    table_chrome = 6  # blank, tabs, rule, header, blank, footer
+    table_chrome = 5 + len(footer_rows(tw, f"{min(proc_limit, len(processes))}/{len(processes)}"))
     max_procs_by_height = max(1, th - len(lines) - table_chrome)
     effective_limit = min(proc_limit, max_procs_by_height)
 
@@ -1346,7 +1363,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     tabs = []
     for i, vm in enumerate(VIEW_MODES):
         if i == view_idx:
-            tabs.append(f"{BOLD}{vm['color']}[{vm['key']}]{vm['icon']} {vm['label']}{RESET}")
+            tabs.append(f"{BOLD}{vm['color']}[{vm['key']}] {vm['label']}{RESET}")
         else:
             tabs.append(f"{DIM}[{vm['key']}]{RESET}")
     emit(f" {' '.join(tabs)}")
@@ -1461,15 +1478,8 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     emit("")
     shown = len(display_procs)
     count_info = f"{shown}" if shown == total_procs else f"{shown}/{total_procs}"
-    if is_tiny:
-        if tw < 55:
-            emit(f" {DIM}q{RESET}Quit {DIM}1-4{RESET}View {DIM}v{RESET}Filter {DIM}+/-{RESET}{count_info} {BMAGENTA}f{RESET}/{BGREEN}u{RESET} {BRED}k{RESET} {BMAGENTA}r{RESET}/{BCYAN}w{RESET} {DIM}⎵{RESET}Pause")
-        else:
-            emit(f" {DIM}[q]{RESET} Quit {DIM}[1-4]{RESET} View {DIM}[v]{RESET} Filter {DIM}[+/-]{RESET} {count_info} {BMAGENTA}[f]{RESET} swap {BGREEN}[u]{RESET} unsw {BRED}[k]{RESET} sig {BMAGENTA}[r]{RESET} recomp {BCYAN}[w]{RESET} wb {DIM}[⎵]{RESET} pause")
-    elif tw < 90:
-        emit(f" {DIM}[q]{RESET} Quit  {DIM}[1-4]{RESET} View  {DIM}[v]{RESET} Filter  {DIM}[+/-]{RESET} {count_info}  {BMAGENTA}[f]{RESET} swap  {BGREEN}[u]{RESET} unsw  {BRED}[k]{RESET} sig  {BMAGENTA}[r]{RESET} recomp  {BCYAN}[w]{RESET} wb  {DIM}[⎵]{RESET} pause")
-    else:
-        emit(f" {DIM}[q]{RESET} Quit  {DIM}[1-4]{RESET} View  {DIM}[v]{RESET} Filter  {DIM}[+/-]{RESET} Showing {count_info}  {BMAGENTA}[f]{RESET} swap  {BGREEN}[u]{RESET} unsw  {BRED}[k]{RESET} sig  {BMAGENTA}[r]{RESET} recomp  {BCYAN}[w]{RESET} wb  {DIM}[Space]{RESET} pause")
+    for row in footer_rows(tw, count_info):
+        emit(row)
 
     return "\n".join(lines)
 
