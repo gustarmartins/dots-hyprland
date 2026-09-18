@@ -1,0 +1,30 @@
+diff --git a/src/services/pipewire/qml.cpp b/src/services/pipewire/qml.cpp
+index e4424c1..1b078e9 100644
+--- a/src/services/pipewire/qml.cpp
++++ b/src/services/pipewire/qml.cpp
+@@ -3,6 +3,7 @@
+ #include <qcontainerfwd.h>
+ #include <qlist.h>
+ #include <qobject.h>
++#include <qpointer.h>
+ #include <qqmllist.h>
+ #include <qtmetamacros.h>
+ #include <qtypes.h>
+@@ -356,12 +357,14 @@ PwNodeIface* PwNodeIface::instance(PwNode* node) {
+ 	if (node == nullptr) return nullptr;
+ 
+ 	auto v = node->property("iface");
+-	if (v.canConvert<PwNodeIface*>()) {
+-		return v.value<PwNodeIface*>();
++	if (v.canConvert<QPointer<PwNodeIface>>()) {
++		// The interface can die before the default-node destruction handlers run.
++		// Reentrant QML bindings must see null instead of the cached freed pointer.
++		return v.value<QPointer<PwNodeIface>>().data();
+ 	}
+ 
+ 	auto* instance = new PwNodeIface(node);
+-	node->setProperty("iface", QVariant::fromValue(instance));
++	node->setProperty("iface", QVariant::fromValue(QPointer<PwNodeIface>(instance)));
+ 
+ 	return instance;
+ }

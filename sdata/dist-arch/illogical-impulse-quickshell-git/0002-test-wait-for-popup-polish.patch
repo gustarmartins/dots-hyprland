@@ -1,0 +1,16 @@
+diff --git a/src/window/test/popupwindow.cpp b/src/window/test/popupwindow.cpp
+index f9498d2..cf92716 100644
+--- a/src/window/test/popupwindow.cpp
++++ b/src/window/test/popupwindow.cpp
+@@ -112,8 +112,9 @@ void TestPopupWindow::moveWithParent() { // NOLINT
+ 	parent.backingWindow()->setX(10);
+ 	parent.backingWindow()->setY(10);
+ 
+-	QCOMPARE(popup.x(), parent.x() + 10);
+-	QCOMPARE(popup.y(), parent.y() + 10);
++	// Repositioning is scheduled for the next polish rather than synchronous.
++	QTRY_COMPARE(popup.x(), parent.x() + 10);
++	QTRY_COMPARE(popup.y(), parent.y() + 10);
+ }
+ 
+ void TestPopupWindow::attachParentLate() { // NOLINT

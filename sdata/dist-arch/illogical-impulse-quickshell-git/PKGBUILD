@@ -1,4 +1,4 @@
-_commit='7511545ee20664e3b8b8d3322c0ffe7567c56f7a'
+_commit='c6a516096dd84d5255b409482eb4bf740b952f88'
 # Useful links:
 # https://git.outfoxxed.me/quickshell/quickshell/commits/branch/master
 # https://aur.archlinux.org/packages/quickshell-git
@@ -7,16 +7,18 @@ groups=(illogical-impulse)
 _prefix='illogical-impulse'
 _pkgname=quickshell
 pkgname="$_prefix-$_pkgname-git"
-pkgver=0.1.0.r1
-pkgrel=8
+pkgver=0.3.1.r14.gc6a5160
+pkgrel=2
 pkgdesc="$_pkgname-git pinned commit and extra deps for $_prefix"
 arch=(x86_64 aarch64)
 url='https://git.outfoxxed.me/quickshell/quickshell'
-options=(!strip)
+options=(!strip !debug)
 license=('LGPL-3.0-only')
 depends=(
   'cpptrace'
   'jemalloc'
+  'glib2'
+  'polkit'
   'mesa'
   'qt6-declarative'
   'qt6-base'
@@ -58,20 +60,45 @@ conflicts=("$_pkgname" "$_pkgname-git")
 
 _pkgsrc="$_pkgname"
 source=("$_pkgsrc::git+$url.git#commit=$_commit"
-  quickshell-check.hook)
+  quickshell-check.hook
+  0001-pipewire-guard-cached-node-interface.patch
+  0002-test-wait-for-popup-polish.patch
+)
 sha256sums=('SKIP'
-  '8543e21aeaaa5441b73a679160e7601a957f16c433e8d6bd9257e80bd0e94083')
+  'd02da428ae72ca6bec2bf1be224674b39aaf7ddbff03d8c09a2f1eb81bd1cbdb'
+  'f725b6dae8d22bc199d389af8f1d65c563e52ba52a10ac0fa2711619d6a92b2d'
+  '3653831ef194d92b72c7646e40a3868aa386b4556946a70aa1086505b645074e'
+)
+
+prepare() {
+  cd "$_pkgname"
+  patch -Np1 -i "$srcdir/0001-pipewire-guard-cached-node-interface.patch"
+  patch -Np1 -i "$srcdir/0002-test-wait-for-popup-polish.patch"
+}
 
 build() {
   cd "$_pkgname"
+  # The maintenance helper tries --noextract first; reject stale source trees.
+  if [[ "$(git rev-parse HEAD)" != "$_commit" ]]; then
+    error "Quickshell source does not match the pinned commit; rerun without --noextract."
+    return 1
+  fi
+  for local_patch in 0001-pipewire-guard-cached-node-interface.patch 0002-test-wait-for-popup-polish.patch; do
+    git apply --reverse --check "$srcdir/$local_patch" || return 1
+  done
   cmake -GNinja -B build \
     -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
     -DCMAKE_INSTALL_PREFIX=/usr \
-    -DDISTRIBUTOR="AUR (package: quickshell-git)" \
-    -DDISTRIBUTOR_DEBUGINFO_AVAILABLE=NO \
+    -DDISTRIBUTOR="Mekki c6a5160 + PipeWire lifetime fix" \
+    -DBUILD_TESTING=ON \
     -DINSTALL_QML_PREFIX=lib/qt6/qml
 
-  cmake --build build
+  cmake --build build --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+}
+
+check() {
+  cd "$_pkgname/build"
+  QT_QPA_PLATFORM=offscreen ctest --output-on-failure
 }
 
 package() {
