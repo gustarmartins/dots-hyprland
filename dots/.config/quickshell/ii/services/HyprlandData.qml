@@ -12,17 +12,39 @@ import Quickshell.Hyprland
  */
 Singleton {
     id: root
-    property var windowList: []
-    property var addresses: []
-    property var windowByAddress: ({})
-    property var workspaces: []
-    property var workspaceIds: []
-    property var workspaceById: ({})
-    property var activeWorkspace: null
-    property var monitors: []
+    // Keep the compatibility snapshots used by existing widgets, while the
+    // native service owns discovery, object lifetimes and IPC connections.
+    readonly property var windowList: Hyprland.toplevels.values
+        .map(toplevel => toplevel?.lastIpcObject)
+        .filter(win => win?.address && win.size?.length === 2);
+    readonly property var addresses: windowList.map(win => win.address)
+    readonly property var windowByAddress: windowList.reduce((map, win) => { map[win.address] = win; return map; }, {})
+    readonly property var workspaces: Hyprland.workspaces.values
+        .filter(ws => ws && ws.id >= 1 && ws.id <= 100 && ws.lastIpcObject.id !== undefined)
+        .map(ws => Object.assign({}, ws.lastIpcObject, {
+            id: ws.id, name: ws.name, hasfullscreen: ws.hasFullscreen,
+            monitor: ws.monitor?.name ?? ws.lastIpcObject.monitor,
+            monitorID: ws.monitor?.id ?? ws.lastIpcObject.monitorID,
+        }));
+    readonly property var workspaceIds: workspaces.map(ws => ws.id)
+    readonly property var workspaceById: workspaces.reduce((map, ws) => { map[ws.id] = ws; return map; }, {})
+    readonly property var activeWorkspace: {
+        const ws = Hyprland.focusedWorkspace;
+        return ws ? Object.assign({}, ws.lastIpcObject, {
+            id: ws.id, name: ws.name, hasfullscreen: ws.hasFullscreen,
+            monitor: ws.monitor?.name ?? "", monitorID: ws.monitor?.id ?? -1,
+        }) : null;
+    }
+    readonly property var monitors: Hyprland.monitors.values
+        .filter(mon => mon && mon.lastIpcObject.name && mon.lastIpcObject.width > 0)
+        .map(mon => Object.assign({}, mon.lastIpcObject, {
+            focused: mon.focused,
+            activeWorkspace: {id: mon.activeWorkspace?.id ?? -1, name: mon.activeWorkspace?.name ?? ""},
+        }));
     property var layers: ({})
-    property bool monitorsReady: false
-    property bool workspacesReady: false
+    readonly property bool monitorsReady: monitors.length > 0 && monitors.length === Hyprland.monitors.values.length
+    readonly property bool workspacesReady: Hyprland.workspaces.values.length > 0
+        && Hyprland.workspaces.values.every(ws => ws && ws.lastIpcObject.id !== undefined)
 
     // Convenient stuff
 
@@ -84,44 +106,48 @@ Singleton {
 
     // Internals
 
-    function updateWindowList() {
-        getClients.running = true;
-    }
-
+    function updateWindowList() { Hyprland.refreshToplevels(); }
+    function updateMonitors() { Hyprland.refreshMonitors(); }
+    function updateWorkspaces() { Hyprland.refreshWorkspaces(); }
     function updateLayers() {
-        getLayers.running = true;
+        layersPending = true;
+        if (!layerRefreshThrottle.running) layerRefreshThrottle.start();
     }
 
-    function updateMonitors() {
-        getMonitors.running = true;
-    }
-
-    function updateWorkspaces() {
-        getWorkspaces.running = true;
-        getActiveWorkspace.running = true;
-    }
-
-    function updateAll() {
+    function updateNativeSnapshots() {
         updateWindowList();
         updateMonitors();
-        updateLayers();
         updateWorkspaces();
     }
 
-    // Eden publishes both title-event formats every frame. Keep those events
-    // from launching full Hyprland refreshes continuously.
-    Timer {
-        id: eventRefreshThrottle
-        interval: 25
-        repeat: false
-        onTriggered: root.updateAll()
+    function updateAll() {
+        updateNativeSnapshots();
+        updateLayers();
     }
 
     Timer {
+        id: eventRefreshThrottle
+        interval: 25
+        onTriggered: root.updateNativeSnapshots()
+    }
+
+    // Eden publishes both title formats every frame. Refresh only client
+    // snapshots, at most four times a second, preserving the existing limit.
+    Timer {
         id: titleRefreshThrottle
         interval: 250
-        repeat: false
         onTriggered: root.updateWindowList()
+    }
+
+    property bool layersPending: false
+    Timer {
+        id: layerRefreshThrottle
+        interval: 50
+        onTriggered: {
+            if (getLayers.running) return;
+            root.layersPending = false;
+            getLayers.running = true;
+        }
     }
 
     function biggestWindowForWorkspace(workspaceId) {
@@ -134,54 +160,30 @@ Singleton {
     }
 
     Component.onCompleted: {
-        updateAll();
+        // The native connection performs its initial refresh with permission
+        // to create monitors. An earlier manual refresh can race that request
+        // and leave only empty monitor placeholders from workspace discovery.
+        updateLayers();
     }
 
     Connections {
         target: Hyprland
 
         function onRawEvent(event) {
-            // console.log("Hyprland raw event:", event.name);
-            if (["openlayer", "closelayer", "screencast"].includes(event.name)) return;
-
-            if (["windowtitle", "windowtitlev2"].includes(event.name)) {
-                if (!titleRefreshThrottle.running)
-                    titleRefreshThrottle.start();
+            if (["openlayer", "closelayer"].includes(event.name)) {
+                root.updateLayers();
                 return;
             }
-
-            if (!eventRefreshThrottle.running)
-                eventRefreshThrottle.start();
-        }
-    }
-
-    Process {
-        id: getClients
-        command: ["hyprctl", "clients", "-j"]
-        stdout: StdioCollector {
-            id: clientsCollector
-            onStreamFinished: {
-                root.windowList = JSON.parse(clientsCollector.text)
-                let tempWinByAddress = {};
-                for (var i = 0; i < root.windowList.length; ++i) {
-                    var win = root.windowList[i];
-                    tempWinByAddress[win.address] = win;
-                }
-                root.windowByAddress = tempWinByAddress;
-                root.addresses = root.windowList.map(win => win.address);
+            if (event.name === "screencast") return;
+            if (["monitoradded", "monitoraddedv2", "monitorremoved", "configreloaded"].includes(event.name))
+                root.updateLayers();
+            if (["windowtitle", "windowtitlev2"].includes(event.name)) {
+                if (!titleRefreshThrottle.running) titleRefreshThrottle.start();
+                return;
             }
-        }
-    }
-
-    Process {
-        id: getMonitors
-        command: ["hyprctl", "monitors", "-j"]
-        stdout: StdioCollector {
-            id: monitorsCollector
-            onStreamFinished: {
-                root.monitors = JSON.parse(monitorsCollector.text);
-                root.monitorsReady = true;
-            }
+            // Properties such as window size, reserved monitor space and
+            // special-workspace details still require fresh JSON snapshots.
+            if (!eventRefreshThrottle.running) eventRefreshThrottle.start();
         }
     }
 
@@ -189,42 +191,17 @@ Singleton {
         id: getLayers
         command: ["hyprctl", "layers", "-j"]
         stdout: StdioCollector {
-            id: layersCollector
             onStreamFinished: {
-                root.layers = JSON.parse(layersCollector.text);
-            }
-        }
-    }
-
-    Process {
-        id: getWorkspaces
-        command: ["hyprctl", "workspaces", "-j"]
-        stdout: StdioCollector {
-            id: workspacesCollector
-            onStreamFinished: {
-                var rawWorkspaces = JSON.parse(workspacesCollector.text);
-                // Filter out invalid workspace ids (e.g. lock-screen temp workspace 2147483647 - N)
-                root.workspaces = rawWorkspaces.filter(ws => ws.id >= 1 && ws.id <= 100);
-                let tempWorkspaceById = {};
-                for (var i = 0; i < root.workspaces.length; ++i) {
-                    var ws = root.workspaces[i];
-                    tempWorkspaceById[ws.id] = ws;
+                try {
+                    const parsed = JSON.parse(text);
+                    if (parsed && typeof parsed === "object") root.layers = parsed;
+                } catch (error) {
+                    console.warn("[HyprlandData] Could not read layers:", error);
                 }
-                root.workspaceById = tempWorkspaceById;
-                root.workspaceIds = root.workspaces.map(ws => ws.id);
-                root.workspacesReady = true;
             }
         }
-    }
-
-    Process {
-        id: getActiveWorkspace
-        command: ["hyprctl", "activeworkspace", "-j"]
-        stdout: StdioCollector {
-            id: activeWorkspaceCollector
-            onStreamFinished: {
-                root.activeWorkspace = JSON.parse(activeWorkspaceCollector.text);
-            }
+        onExited: {
+            if (root.layersPending) layerRefreshThrottle.restart();
         }
     }
 }

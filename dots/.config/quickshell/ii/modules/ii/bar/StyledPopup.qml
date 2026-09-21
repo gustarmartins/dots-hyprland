@@ -40,7 +40,9 @@ LazyLoader {
                 if (!Config.options.bar.vertical) {
                     // Center popup under the hover target, but clamp to the
                     // screen so a wide popup near an edge isn't clipped.
-                    const centered = (root.QsWindow?.mapFromItem(
+                    const targetWindow = root.hoverTarget?.QsWindow.window;
+                    if (!targetWindow) return 0;
+                    const centered = (targetWindow.mapFromItem(
                         root.hoverTarget,
                         (root.hoverTarget.width - popupBackground.implicitWidth) / 2, 0
                     ).x) ?? 0;
@@ -52,7 +54,9 @@ LazyLoader {
             }
             top: {
                 if (!Config.options.bar.vertical) return Appearance.sizes.barHeight;
-                return root.QsWindow?.mapFromItem(
+                const targetWindow = root.hoverTarget?.QsWindow.window;
+                if (!targetWindow) return Appearance.sizes.barHeight;
+                return targetWindow.mapFromItem(
                     root.hoverTarget, 
                     (root.hoverTarget.height - popupBackground.implicitHeight) / 2, 0
                 ).y;

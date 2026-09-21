@@ -32,9 +32,9 @@ Scope {
                 bottom: true
             }
 
-            mask: Region {
-                item: listview.contentItem
-            }
+            mask: listview.surfaceRegion
+            BackgroundEffect.blurRegion: Config.options.appearance.transparency.enable
+                && DesktopEffects.settings.blur !== false ? listview.surfaceRegion : null
 
             color: "transparent"
             implicitWidth: Appearance.sizes.notificationPopupWidth

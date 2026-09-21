@@ -889,7 +889,7 @@ Inline w/ backslash and round brackets \\(e^{i\\pi} + 1 = 0\\)
                         // Command buttons
                         model: commandButtonsRow.commandsShown
                         delegate: ApiCommandButton {
-                            property string commandRepresentation: `${root.commandPrefix}${modelData.name}`
+                            property string commandRepresentation: `${root?.commandPrefix ?? ""}${modelData?.name ?? ""}`
                             buttonText: commandRepresentation
                             downAction: () => {
                                 if (modelData.sendDirectly) {

@@ -9,7 +9,8 @@ import Quickshell.Hyprland
 QuickToggleButton {
     id: root
     visible: EasyEffects.available
-    toggled: EasyEffects.active
+    enabled: !EasyEffects.busy
+    toggled: EasyEffects.active && !EasyEffects.bypassed
     buttonIcon: "instant_mix"
 
     Component.onCompleted: {
@@ -21,11 +22,11 @@ QuickToggleButton {
     }
 
     altAction: () => {
-        Quickshell.execDetached(["bash", "-c", "flatpak run com.github.wwmm.easyeffects || easyeffects"])
+        EasyEffects.show()
         GlobalStates.sidebarRightOpen = false
     }
 
     StyledToolTip {
-        text: Translation.tr("EasyEffects | Right-click to configure")
+        text: Translation.tr("EasyEffects processing on/off | Right-click to configure")
     }
 }

@@ -20,11 +20,7 @@ MouseArea {
     implicitHeight: contentLayout.implicitHeight
 
     function dismissAll() {
-        root.notifications.forEach(notif => {
-            Qt.callLater(() => {
-                Notifications.discardNotification(notif.notificationId);
-            });
-        });
+        Notifications.discardNotifications(root.notifications.map(notif => notif.notificationId));
         removeAnimation.start();
     }
 

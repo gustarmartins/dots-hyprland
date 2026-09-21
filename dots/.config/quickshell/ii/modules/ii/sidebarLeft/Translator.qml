@@ -13,6 +13,13 @@ import Quickshell.Io
  */
 Item {
     id: root
+    property bool disposed: false
+    Component.onDestruction: {
+        disposed = true;
+        translateTimer.stop();
+        translateProc.running = false;
+        getLanguagesProc.running = false;
+    }
 
     // Sizes
     property real padding: 4
@@ -50,7 +57,8 @@ Item {
         interval: Config.options.sidebar.translator.delay
         repeat: false
         onTriggered: () => {
-            if (root.inputField.text.trim().length > 0) {
+            if (!root || root.disposed) return;
+            if ((root.inputField?.text ?? "").trim().length > 0) {
                 // console.log("Translating with command:", translateProc.command);
                 translateProc.running = false;
                 translateProc.buffer = ""; // Clear the buffer
@@ -66,14 +74,16 @@ Item {
         command: ["bash", "-c", `trans -brief`
             + ` -source '${StringUtils.shellSingleQuoteEscape(root.sourceLanguage)}'`
             + ` -target '${StringUtils.shellSingleQuoteEscape(root.targetLanguage)}'`
-            + ` '${StringUtils.shellSingleQuoteEscape(root.inputField.text.trim())}'`]
+            + ` '${StringUtils.shellSingleQuoteEscape((root.inputField?.text ?? "").trim())}'`]
         property string buffer: ""
         stdout: SplitParser {
             onRead: (line) => {
+                if (!root || root.disposed) return;
                 translateProc.buffer += line + "\n";
             }
         }
         onExited: (exitCode, exitStatus) => {
+            if (!root || root.disposed) return;
             // With -brief mode, we get output with no metadata
             root.translatedText = translateProc.buffer.trim();
         }
@@ -86,10 +96,12 @@ Item {
         running: true
         stdout: SplitParser {
             onRead: (line) => {
+                if (!root || root.disposed) return;
                 getLanguagesProc.bufferList = [...getLanguagesProc.bufferList, line.trim()];
             }
         }
         onExited: (exitCode, exitStatus) => {
+            if (!root || root.disposed) return;
             // Ensure "auto" is always the first language
             let langs = getLanguagesProc.bufferList
                 .filter(lang => lang.trim().length > 0 && lang !== "auto")

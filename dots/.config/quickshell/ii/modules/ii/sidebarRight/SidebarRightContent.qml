@@ -117,6 +117,11 @@ Item {
                 visible: !root.showingNotifications && !root.showingWidgets
             }
 
+            EasyEffectsPresets {
+                Layout.fillWidth: true
+                visible: EasyEffects.available && !root.showingNotifications && !root.showingWidgets
+            }
+
             Loader {
                 id: slidersLoader
                 Layout.fillWidth: true

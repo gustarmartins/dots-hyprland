@@ -13,6 +13,9 @@ MaterialShape { // App icon
     property var urgency: NotificationUrgency.Normal
     property bool isUrgent: urgency === NotificationUrgency.Critical
     property var image: ""
+    property bool imageFailed: false
+    readonly property bool hasImage: root.image !== "" && !root.imageFailed
+    onImageChanged: imageFailed = false
     property real materialIconScale: 0.57
     property real appIconScale: 0.8
     property real smallAppIconScale: 0.49
@@ -30,7 +33,7 @@ MaterialShape { // App icon
     color: isUrgent ? Appearance.colors.colPrimaryContainer : Appearance.colors.colSecondaryContainer
     Loader {
         id: materialSymbolLoader
-        active: root.appIcon == "" && root.image == ""
+        active: root.appIcon == "" && !root.hasImage
         anchors.fill: parent
         sourceComponent: MaterialSymbol {
             text: {
@@ -48,7 +51,7 @@ MaterialShape { // App icon
     }
     Loader {
         id: appIconLoader
-        active: root.image == "" && root.appIcon != ""
+        active: !root.hasImage && root.appIcon != ""
         anchors.centerIn: parent
         sourceComponent: IconImage {
             id: appIconImage
@@ -59,7 +62,7 @@ MaterialShape { // App icon
     }
     Loader {
         id: notifImageLoader
-        active: root.image != ""
+        active: root.hasImage
         anchors.fill: parent
         sourceComponent: Item {
             anchors.fill: parent
@@ -69,6 +72,7 @@ MaterialShape { // App icon
                 readonly property int size: parent.width
 
                 source: root.image
+                onStatusChanged: if (status === Image.Error) root.imageFailed = true
                 fillMode: Image.PreserveAspectCrop
                 cache: false
                 antialiasing: true

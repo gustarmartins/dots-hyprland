@@ -18,6 +18,9 @@ import Quickshell.Hyprland
 
 ShellRoot {
     id: root
+    // Singleton destruction runs after the engine interrupts JavaScript.
+    // Flush while the root is still alive, including during hot reload.
+    Component.onDestruction: Notifications.flushSave(true)
 
     // Stuff for every panel family
     ReloadPopup {}
@@ -29,6 +32,7 @@ ShellRoot {
         ConflictKiller.load()
         Cliphist.refresh()
         Wallpapers.load()
+        WallpaperDiscovery.rotationOwner = true
         Updates.load()
     }
 
@@ -74,4 +78,3 @@ ShellRoot {
         onPressed: root.cyclePanelFamily()
     }
 }
-

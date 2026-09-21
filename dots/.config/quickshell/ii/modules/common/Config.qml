@@ -216,6 +216,12 @@ Singleton {
                         property real y: 100
                     }
                 }
+                property JsonObject discovery: JsonObject {
+                    property string theme: "mix"
+                    property bool includeKonachan: false
+                    property bool rotate: false
+                    property int intervalMinutes: 60
+                }
                 property string wallpaperPath: ""
                 property string thumbnailPath: ""
                 property bool hideWhenFullscreen: true

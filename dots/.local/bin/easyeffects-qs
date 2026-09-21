@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""One native EasyEffects instance for Hyprland and Quickshell."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "easyeffects"
+
+
+def exchange(command, reply=True):
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(1)
+        connection.connect(str(RUNTIME / "EasyEffectsServer"))
+        connection.sendall((command + "\n").encode())
+        connection.shutdown(socket.SHUT_WR)
+        if not reply:
+            return ""
+        chunks = []
+        while chunk := connection.recv(4096):
+            chunks.append(chunk)
+        return b"".join(chunks).decode().strip()
+
+
+def state():
+    result = {"available": shutil.which("easyeffects") is not None,
+              "active": False, "preset": "", "bypassed": False,
+              "presets": sorted(p.stem for p in (DATA / "output").glob("astra-*.json"))}
+    try:
+        result["preset"] = exchange("get_last_loaded_preset:output")
+        result["bypassed"] = exchange("get_global_bypass") == "1"
+        result["active"] = True
+    except OSError:
+        pass
+    return result
+
+
+def wait_for_tray():
+    for _ in range(60):
+        result = subprocess.run(
+            ["busctl", "--user", "--timeout=1", "get-property", "org.kde.StatusNotifierWatcher",
+             "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher", "IsStatusNotifierHostRegistered"],
+            capture_output=True, text=True, timeout=2)
+        if result.returncode == 0 and result.stdout.strip() == "b true":
+            return
+        time.sleep(0.25)
+    raise RuntimeError("The system tray is not ready; EasyEffects was not started. Try again once Quickshell is running.")
+
+
+def start():
+    if state()["active"]:
+        return
+    wait_for_tray()
+    log = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "easyeffects-qs.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("ab") as output:
+        subprocess.Popen(["easyeffects", "--hide-window", "--service-mode"],
+                         stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+    for _ in range(80):
+        if state()["active"]:
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"EasyEffects did not become ready. See {log}")
+
+
+def set_bypass(bypassed):
+    if not state()["active"]:
+        if bypassed:
+            return
+        start()
+    exchange("global_bypass:" + ("1" if bypassed else "0"), reply=False)
+    for _ in range(30):
+        if state()["bypassed"] == bypassed:
+            return
+        time.sleep(0.1)
+    raise RuntimeError("EasyEffects did not confirm the processing state.")
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else "state"
+    if action == "state":
+        print(json.dumps(state()))
+        return
+    with (RUNTIME / "easyeffects-qs.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if action in ("start", "show"):
+            start()
+            if action == "show":
+                exchange("show_window", reply=False)
+        elif action in ("effects-on", "effects-off"):
+            # A manual processing toggle must not be immediately undone by automation.
+            automatic = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "astra-profiled.service"])
+            if automatic.returncode == 0:
+                subprocess.run(["systemctl", "--user", "stop", "astra-profiled.service"], check=True)
+            set_bypass(action == "effects-off")
+        elif action == "stop":
+            if state()["active"]:
+                exchange("quit_app", reply=False)
+                for _ in range(50):
+                    if not state()["active"]:
+                        return
+                    time.sleep(0.1)
+                raise RuntimeError("EasyEffects has not finished shutting down.")
+        elif action == "preset" and len(sys.argv) == 3:
+            preset = sys.argv[2]
+            if preset not in state()["presets"]:
+                raise ValueError("Choose an installed Astra preset.")
+            # A manual selection owns the profile until automatic mode is started again.
+            automatic = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "astra-profiled.service"])
+            if automatic.returncode == 0:
+                subprocess.run(["systemctl", "--user", "stop", "astra-profiled.service"], check=True)
+            start()
+            exchange("load_preset:output:" + preset, reply=False)
+            for _ in range(30):
+                try:
+                    if exchange("get_last_loaded_preset:output") == preset:
+                        return
+                except (TimeoutError, ConnectionResetError):
+                    # Rebuilding the effects pipeline can briefly occupy the UI thread.
+                    pass
+                time.sleep(0.1)
+            raise RuntimeError("EasyEffects did not confirm the selected preset.")
+        else:
+            raise ValueError("Usage: easyeffects-qs state|start|show|stop|effects-on|effects-off|preset astra-NAME")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)

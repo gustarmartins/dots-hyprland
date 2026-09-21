@@ -43,6 +43,10 @@ Item {
         spacing: 4
 
         Repeater {
+            id: tabRepeater
+            property int itemsRevision: 0
+            onItemAdded: itemsRevision++
+            onItemRemoved: itemsRevision++
             model: root.tabButtonList
             delegate: root.delegate
         }
@@ -52,25 +56,30 @@ Item {
         id: activeIndicator
         z: 0
         color: Appearance.colors.colSecondaryContainer
-        implicitWidth: contentItem.children[root.currentIndex]?.implicitWidth ?? 0
-        implicitHeight: contentItem.children[root.currentIndex]?.implicitHeight ?? 0
+        implicitWidth: targetItem?.implicitWidth ?? 0
+        implicitHeight: targetItem?.implicitHeight ?? 0
         radius: height / 2
         // Animation
-        property Item targetItem: contentItem.children[root.currentIndex]
+        readonly property Item targetItem: {
+            const revision = tabRepeater.itemsRevision;
+            return root.currentIndex >= 0 && root.currentIndex < tabRepeater.count
+                ? tabRepeater.itemAt(root.currentIndex) : null;
+        }
         AnimatedTabIndexPair {
             id: leftBound
             idx1Duration: 50
             idx2Duration: 200
-            index: activeIndicator.targetItem.x
+            index: activeIndicator.targetItem?.x ?? 0
         }
         AnimatedTabIndexPair {
             id: rightBound
             idx1Duration: 50
             idx2Duration: 200
-            index: activeIndicator.targetItem.x + activeIndicator.targetItem.width
+            index: (activeIndicator.targetItem?.x ?? 0) + (activeIndicator.targetItem?.width ?? 0)
         }
-        x: Math.min(leftBound.idx1, leftBound.idx2)
-        width: Math.max(rightBound.idx1, rightBound.idx2) - x
+        x: contentItem.x + Math.min(leftBound.idx1, leftBound.idx2)
+        y: contentItem.y
+        width: Math.max(rightBound.idx1, rightBound.idx2) - Math.min(leftBound.idx1, leftBound.idx2)
     }
 
     MouseArea {

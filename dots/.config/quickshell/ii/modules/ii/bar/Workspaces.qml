@@ -10,7 +10,7 @@ import Quickshell
 import Quickshell.Wayland
 import Quickshell.Hyprland
 import Quickshell.Widgets
-import Qt5Compat.GraphicalEffects
+import QtQuick.Effects
 
 Item {
     id: root
@@ -18,11 +18,12 @@ Item {
     property bool borderless: Config.options.bar.borderless
     readonly property HyprlandMonitor monitor: Hyprland.monitorFor(root.QsWindow.window?.screen)
     readonly property Toplevel activeWindow: ToplevelManager.activeToplevel
-    readonly property int effectiveActiveWorkspaceId: monitor?.activeWorkspace?.id ?? 1
+    WorkspaceModel { id: workspaceModel; monitor: root.monitor }
+    readonly property int effectiveActiveWorkspaceId: workspaceModel.activeWorkspace
     
-    readonly property int workspacesShown: Config.options.bar.workspaces.shown
-    readonly property int workspaceGroup: Math.floor((effectiveActiveWorkspaceId - 1) / root.workspacesShown)
-    property list<bool> workspaceOccupied: []
+    readonly property int workspacesShown: workspaceModel.shownCount
+    readonly property int workspaceGroup: workspaceModel.group
+    readonly property var workspaceOccupied: workspaceModel.occupied
     property int widgetPadding: 4
     property int workspaceButtonWidth: 22
     property real activeWorkspaceMargin: 2
@@ -56,31 +57,6 @@ Item {
         }
     }
 
-    // Function to update workspaceOccupied
-    function updateWorkspaceOccupied() {
-        workspaceOccupied = Array.from({ length: root.workspacesShown }, (_, i) => {
-            return Hyprland.workspaces.values.some(ws => ws.id === workspaceGroup * root.workspacesShown + i + 1);
-        })
-    }
-
-    // Occupied workspace updates
-    Component.onCompleted: updateWorkspaceOccupied()
-    Connections {
-        target: Hyprland.workspaces
-        function onValuesChanged() {
-            updateWorkspaceOccupied();
-        }
-    }
-    Connections {
-        target: Hyprland
-        function onFocusedWorkspaceChanged() {
-            updateWorkspaceOccupied();
-        }
-    }
-    onWorkspaceGroupChanged: {
-        updateWorkspaceOccupied();
-    }
-
     implicitWidth: root.vertical ? Appearance.sizes.verticalBarWidth : (root.workspaceButtonWidth * root.workspacesShown)
     implicitHeight: root.vertical ? (root.workspaceButtonWidth * root.workspacesShown) : Appearance.sizes.barHeight
 
@@ -102,6 +78,28 @@ Item {
             if (event.button === Qt.BackButton) {
                 Hyprland.dispatch(`hl.dsp.workspace.toggle_special("special")`);
             } 
+        }
+    }
+
+    HoverHandler { id: workspaceHover }
+    Rectangle {
+        z: 6
+        anchors.centerIn: parent
+        visible: opacity > 0
+        opacity: workspaceModel.specialWorkspaceActive && !workspaceHover.hovered ? 1 : 0
+        color: Appearance.colors.colPrimary
+        radius: height / 2
+        width: Math.min(root.width, root.vertical ? root.workspaceButtonWidth : specialLabel.implicitWidth + 20)
+        height: root.workspaceButtonWidth
+        Behavior on opacity { NumberAnimation { duration: 120 } }
+        StyledText {
+            id: specialLabel
+            anchors.centerIn: parent
+            width: Math.min(implicitWidth, Math.max(0, parent.width - 12))
+            text: root.vertical ? "S" : workspaceModel.specialWorkspaceName
+            color: Appearance.colors.colOnPrimary
+            font.pixelSize: Appearance.font.pixelSize.small
+            elide: Text.ElideRight
         }
     }
 
@@ -207,7 +205,7 @@ Item {
                     id: workspaceButtonBackground
                     implicitWidth: workspaceButtonWidth
                     implicitHeight: workspaceButtonWidth
-                    property var biggestWindow: HyprlandData.biggestWindowForWorkspace(button.workspaceValue)
+                property var biggestWindow: workspaceModel.biggestWindow[index]
                     property var mainAppIconSource: Quickshell.iconPath(AppSearch.guessIcon(biggestWindow?.class), "image-missing")
 
                     StyledText { // Workspace number text
@@ -272,6 +270,13 @@ Item {
                             anchors.rightMargin: (!root.showNumbers && Config.options?.bar.workspaces.showAppIcons) ? 
                                 (workspaceButtonWidth - workspaceIconSize) / 2 : workspaceIconMarginShrinked
 
+                            layer.enabled: Config.options.bar.workspaces.monochromeIcons
+                            layer.effect: MultiEffect {
+                                saturation: -0.8
+                                colorization: 0.1
+                                colorizationColor: wsDot.color
+                            }
+
                             source: workspaceButtonBackground.mainAppIconSource
                             implicitSize: (!root.showNumbers && Config.options?.bar.workspaces.showAppIcons) ? workspaceIconSize : workspaceIconSizeShrinked
 
@@ -289,24 +294,7 @@ Item {
                             }
                         }
 
-                        Loader {
-                            active: Config.options.bar.workspaces.monochromeIcons
-                            anchors.fill: mainAppIcon
-                            sourceComponent: Item {
-                                Desaturate {
-                                    id: desaturatedIcon
-                                    visible: false // There's already color overlay
-                                    anchors.fill: parent
-                                    source: mainAppIcon
-                                    desaturation: 0.8
-                                }
-                                ColorOverlay {
-                                    anchors.fill: desaturatedIcon
-                                    source: desaturatedIcon
-                                    color: ColorUtils.transparentize(wsDot.color, 0.9)
-                                }
-                            }
-                        }
+
                     }
                 }
                 

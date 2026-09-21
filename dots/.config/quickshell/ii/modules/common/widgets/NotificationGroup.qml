@@ -1,6 +1,7 @@
 import qs.services
 import qs.modules.common
 import qs.modules.common.functions
+import qs.modules.common.widgets
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
@@ -18,6 +19,18 @@ MouseArea { // Notification group area
     property bool multipleNotifications: notificationCount > 1
     property bool expanded: false
     property bool popup: false
+    readonly property alias glassSurface: background
+    property Region surfaceRegion: SurfaceRegion {
+        surface: root.visible && root.opacity > 0 ? background : null
+        radius: Math.round(background.radius * root.scale)
+        topLeftRadius: radius
+        topRightRadius: radius
+        bottomLeftRadius: radius
+        bottomRightRadius: radius
+    }
+    onXChanged: surfaceRegion.changed()
+    onYChanged: surfaceRegion.changed()
+    onScaleChanged: surfaceRegion.changed()
     property real padding: 16
     property real collapsedHeightLimit: popup ? 160 : 130
     implicitHeight: background.implicitHeight
@@ -65,11 +78,7 @@ MouseArea { // Notification group area
             easing.bezierCurve: Appearance.animation.elementMove.bezierCurve
         }
         onFinished: () => {
-            root.notifications.forEach((notif) => {
-                Qt.callLater(() => {
-                    Notifications.discardNotification(notif.notificationId);
-                });
-            });
+            Notifications.discardNotifications(root.notifications.map(notif => notif.notificationId));
         }
     }
 
@@ -121,11 +130,12 @@ MouseArea { // Notification group area
 
     // A translucent shadow gets blurred by the compositor into a thick halo.
     // Keep the popup silhouette to the antialiased card and its fine outline.
-    Rectangle { // Background of the notification
+    GlassSurface { // Background of the notification
         id: background
         anchors.left: parent.left
         width: parent.width
-        color: popup ? Qt.alpha(Appearance.m3colors.m3surfaceContainer, (DesktopEffects.settings.popup_opacity ?? 82) / 100) : Appearance.m3colors.m3surfaceContainerHigh
+        baseColor: root.popup ? Appearance.m3colors.m3surfaceContainer : Appearance.m3colors.m3surfaceContainerHigh
+        surfaceOpacity: root.popup ? (DesktopEffects.settings.popup_opacity ?? 82) / 100 : 1
         border.width: 1
         border.color: Qt.alpha(Appearance.m3colors.m3outlineVariant, 0.35)
         radius: 24

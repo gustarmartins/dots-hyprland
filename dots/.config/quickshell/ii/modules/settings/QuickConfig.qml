@@ -29,15 +29,13 @@ ContentPage {
         property color colText: toggled ? Appearance.colors.colOnPrimary : Appearance.colors.colOnLayer2
         padding: 5
         Layout.fillWidth: true
+        Layout.minimumHeight: implicitHeight
         toggled: Appearance.m3colors.darkmode === dark
         colBackground: Appearance.colors.colLayer2
         onClicked: {
             Quickshell.execDetached(["bash", "-c", `${Directories.wallpaperSwitchScriptPath} --mode ${dark ? "dark" : "light"} --noswitch`]);
         }
-        contentItem: Item {
-            anchors.centerIn: parent
-            ColumnLayout {
-                anchors.centerIn: parent
+        contentItem: ColumnLayout {
                 spacing: 0
                 MaterialSymbol {
                     Layout.alignment: Qt.AlignHCenter
@@ -51,7 +49,6 @@ ContentPage {
                     font.pixelSize: Appearance.font.pixelSize.smaller
                     color: smallLightDarkPreferenceButton.colText
                 }
-            }
         }
     }
 
@@ -65,7 +62,10 @@ ContentPage {
             Layout.fillWidth: true
 
             Item {
-                implicitWidth: 340
+                Layout.preferredWidth: 320
+                Layout.minimumWidth: 220
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignTop
                 implicitHeight: 200
                 
                 StyledImage {
@@ -86,23 +86,37 @@ ContentPage {
             }
 
             ColumnLayout {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 220
+                Layout.alignment: Qt.AlignTop
                 RippleButtonWithIcon {
-                    enabled: !randomWallProc.running
-                    visible: Config.options.policies.weeb === 1
+                    enabled: !WallpaperDiscovery.busy && !randomWallProc.running
+                    Layout.fillWidth: true
+                    implicitHeight: 44
+                    materialIcon: "explore"
+                    mainText: WallpaperDiscovery.busy ? Translation.tr("Finding your next wallpaper…") : Translation.tr("Discover: Games & Art")
+                    onClicked: WallpaperDiscovery.fetch()
+                    StyledToolTip {
+                        text: Translation.tr("Fresh game art and illustrated landscapes from Wallhaven. SFW, wide images, 1080p minimum; 1440p and 4K preferred.")
+                    }
+                }
+                RippleButtonWithIcon {
+                    enabled: !randomWallProc.running && !WallpaperDiscovery.busy
+                    visible: Config.options.background.discovery.includeKonachan
                     Layout.fillWidth: true
                     buttonRadius: Appearance.rounding.small
                     materialIcon: "ifl"
-                    mainText: randomWallProc.running ? Translation.tr("Be patient...") : Translation.tr("Random: Konachan")
+                    objectName: "konachanWallpaperButton"
+                    mainText: Translation.tr("Konachan · anime option")
                     onClicked: {
-                        randomWallProc.scriptPath = `${Directories.scriptPath}/colors/random/random_konachan_wall.sh`;
-                        randomWallProc.running = true;
+                        WallpaperDiscovery.fetch("konachan");
                     }
                     StyledToolTip {
                         text: Translation.tr("Random SFW Anime wallpaper from Konachan\nImage is saved to ~/Pictures/Wallpapers")
                     }
                 }
                 RippleButtonWithIcon {
-                    enabled: !randomWallProc.running
+                    enabled: !randomWallProc.running && !WallpaperDiscovery.busy
                     visible: Config.options.policies.weeb === 1
                     Layout.fillWidth: true
                     buttonRadius: Appearance.rounding.small
@@ -152,21 +166,83 @@ ContentPage {
                         }
                     }
                 }
-                RowLayout {
-                    Layout.alignment: Qt.AlignHCenter
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    uniformCellSizes: true
+            }
+        }
 
-                    SmallLightDarkPreferenceButton {
-                        Layout.fillHeight: true
-                        dark: false
-                    }
-                    SmallLightDarkPreferenceButton {
-                        Layout.fillHeight: true
-                        dark: true
-                    }
-                }
+        // Independent row: optional source buttons cannot compress theme controls.
+        RowLayout {
+            Layout.fillWidth: true
+            uniformCellSizes: true
+            SmallLightDarkPreferenceButton { objectName: "wallpaperLightButton"; dark: false }
+            SmallLightDarkPreferenceButton { objectName: "wallpaperDarkButton"; dark: true }
+        }
+
+        StyledText {
+            Layout.fillWidth: true
+            text: Translation.tr("Pick a mood, or let the mix alternate between your games and painted worlds.")
+            wrapMode: Text.WordWrap
+            color: Appearance.colors.colSubtext
+        }
+        ConfigSelectionArray {
+            currentValue: Config.options.background.discovery.theme
+            onSelected: value => Config.options.background.discovery.theme = value
+            options: [
+                {value: "mix", displayName: "Your mix", icon: "shuffle"},
+                {value: "mario", displayName: "Mario"},
+                {value: "lis", displayName: "Life is Strange 1"},
+                {value: "tomb", displayName: "Tomb Raider"},
+                {value: "painted", displayName: "Painted landscapes"},
+                {value: "worlds", displayName: "Other game worlds"}
+            ]
+        }
+        ConfigSwitch {
+            buttonIcon: "add_photo_alternate"
+            text: Translation.tr("Include Konachan anime in the mix")
+            checked: Config.options.background.discovery.includeKonachan
+            onCheckedChanged: Config.options.background.discovery.includeKonachan = checked
+        }
+        ConfigSwitch {
+            buttonIcon: "autorenew"
+            text: Translation.tr("Rotate automatically")
+            checked: Config.options.background.discovery.rotate
+            onCheckedChanged: Config.options.background.discovery.rotate = checked
+        }
+        ConfigSelectionArray {
+            visible: Config.options.background.discovery.rotate
+            currentValue: Config.options.background.discovery.intervalMinutes
+            onSelected: value => Config.options.background.discovery.intervalMinutes = value
+            options: [
+                {value: 30, displayName: "Every 30 minutes"},
+                {value: 60, displayName: "Every hour"},
+                {value: 180, displayName: "Every 3 hours"}
+            ]
+        }
+        StyledText {
+            Layout.fillWidth: true
+            visible: Config.options.background.discovery.rotate
+            wrapMode: Text.WordWrap
+            text: WallpaperDiscovery.busy ? Translation.tr("Rotation: fetching a wallpaper…")
+                : Translation.tr("Next automatic wallpaper: ") + Qt.formatDateTime(new Date(WallpaperDiscovery.nextRotationAt), "hh:mm")
+            color: Appearance.colors.colSubtext
+        }
+        StyledText {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            text: WallpaperDiscovery.status || (WallpaperDiscovery.current.label
+                ? WallpaperDiscovery.current.label + " · " + WallpaperDiscovery.current.width + " × " + WallpaperDiscovery.current.height
+                : Translation.tr("Click Discover to fetch. Downloads are kept in Pictures/Wallpapers/Discovery."))
+            color: Appearance.colors.colSubtext
+        }
+        RowLayout {
+            visible: !!WallpaperDiscovery.current.url
+            RippleButtonWithIcon {
+                materialIcon: "open_in_new"
+                mainText: Translation.tr("Wallpaper & source")
+                onClicked: Qt.openUrlExternally(WallpaperDiscovery.current.url)
+            }
+            StyledText {
+                text: WallpaperDiscovery.current.provider || ""
+                color: Appearance.colors.colSubtext
             }
         }
 

@@ -8,6 +8,23 @@ import Quickshell
 StyledListView { // Scrollable window
     id: root
     property bool popup: false
+    property Region viewportRegion: Region {
+        item: root
+        intersection: Intersection.Intersect
+    }
+    // ListView keeps only delegates near the viewport. Each delegate owns its
+    // moving card region, so gaps and rounded corners stay click-through.
+    property Region surfaceRegion: Region {
+        regions: [...root.contentItem.children
+            .filter(item => item.surfaceRegion !== undefined && item.surfaceRegion !== null)
+            .map(item => item.surfaceRegion), root.viewportRegion]
+    }
+    Connections {
+        target: root
+        function onContentYChanged() { root.surfaceRegion.changed(); }
+        function onXChanged() { root.surfaceRegion.changed(); }
+        function onYChanged() { root.surfaceRegion.changed(); }
+    }
 
     spacing: 12
     cacheBuffer: 160

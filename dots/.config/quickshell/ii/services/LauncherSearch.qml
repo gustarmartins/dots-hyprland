@@ -75,6 +75,10 @@ Singleton {
             }
         },
         {
+            action: "discoverwallpaper",
+            execute: () => WallpaperDiscovery.fetch()
+        },
+        {
             action: "konachanwallpaper",
             execute: () => {
                 Quickshell.execDetached([Quickshell.shellPath("scripts/colors/random/random_konachan_wall.sh")]);
