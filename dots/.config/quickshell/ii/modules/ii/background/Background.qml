@@ -17,10 +17,31 @@ import Quickshell.Hyprland
 import qs.modules.ii.background.widgets
 import qs.modules.ii.background.widgets.clock
 import qs.modules.ii.background.widgets.weather
+import "WorkspacePlacement.js" as WorkspacePlacement
 
 Variants {
     id: root
     model: Quickshell.screens
+
+    property var workspaceRules: []
+    property Process workspaceRulesProcess: Process {
+        command: ["hyprctl", "-j", "workspacerules"]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    const rules = JSON.parse(text);
+                    if (Array.isArray(rules)) root.workspaceRules = rules;
+                } catch (error) { console.warn("[Background] Workspace rules unavailable:", error); }
+            }
+        }
+    }
+    property Connections workspaceRulesConnection: Connections {
+        target: Hyprland
+        function onRawEvent(event) {
+            if (event.name === "configreloaded") root.workspaceRulesProcess.running = true;
+        }
+    }
 
     PanelWindow {
         id: bgRoot
@@ -32,11 +53,9 @@ Variants {
 
         // Workspaces
         property HyprlandMonitor monitor: Hyprland.monitorFor(modelData)
-        property list<var> relevantWindows: HyprlandData.windowList.filter(win => win.monitor == monitor?.id && win.workspace.id >= 0).sort((a, b) => a.workspace.id - b.workspace.id)
-        property int firstWorkspaceId: relevantWindows[0]?.workspace.id || 1
-        property int lastWorkspaceId: relevantWindows[relevantWindows.length - 1]?.workspace.id || 10
         property int workspaceChunkSize: Config?.options.bar.workspaces.shown ?? 10
-        property int totalWorkspaces: Math.ceil(lastWorkspaceId / workspaceChunkSize) * workspaceChunkSize
+        readonly property real workspaceFraction: WorkspacePlacement.fraction(root.workspaceRules,
+            bgRoot.modelData.name, bgRoot.monitor?.activeWorkspace?.id ?? 1, workspaceChunkSize)
         // Wallpaper
         property bool wallpaperIsVideo: Config.options.background.wallpaperPath.endsWith(".mp4") || Config.options.background.wallpaperPath.endsWith(".webm") || Config.options.background.wallpaperPath.endsWith(".mkv") || Config.options.background.wallpaperPath.endsWith(".avi") || Config.options.background.wallpaperPath.endsWith(".mov")
         property string wallpaperPath: wallpaperIsVideo ? Config.options.background.thumbnailPath : Config.options.background.wallpaperPath
@@ -133,16 +152,8 @@ Variants {
                 cache: false
                 smooth: false
 
-                property int workspaceIndex: (bgRoot.monitor.activeWorkspace?.id ?? 1) - 1
                 property real middleFraction: 0.5
-                property real fraction: {
-                    // 0 - start of the picture
-                    // 1 - end of the picture
-                    if (bgRoot.totalWorkspaces <= 1) {
-                        return middleFraction;
-                    }
-                    return Math.max(0, Math.min(1, workspaceIndex / (bgRoot.totalWorkspaces - 1)));
-                }
+                property real fraction: bgRoot.workspaceFraction
 
                 property real usedFractionX: {
                     let usedFraction = middleFraction;
@@ -266,6 +277,8 @@ Variants {
                 FadeLoader {
                     shown: Config.options.background.widgets.weather.enable
                     sourceComponent: WeatherWidget {
+                        canvasOffsetX: widgetCanvas.x
+                        canvasOffsetY: widgetCanvas.y
                         screenWidth: bgRoot.screen.width
                         screenHeight: bgRoot.screen.height
                         scaledScreenWidth: bgRoot.screen.width
@@ -277,6 +290,8 @@ Variants {
                 FadeLoader {
                     shown: Config.options.background.widgets.clock.enable
                     sourceComponent: ClockWidget {
+                        canvasOffsetX: widgetCanvas.x
+                        canvasOffsetY: widgetCanvas.y
                         screenWidth: bgRoot.screen.width
                         screenHeight: bgRoot.screen.height
                         scaledScreenWidth: bgRoot.screen.width
