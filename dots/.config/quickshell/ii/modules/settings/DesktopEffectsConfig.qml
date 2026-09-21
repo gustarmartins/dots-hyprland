@@ -386,10 +386,12 @@ ContentPage {
         }
         RowLayout {
             Layout.fillWidth: true
-            StyledText { Layout.fillWidth: true; text: "Workspace travel (%)"; wrapMode: Text.WordWrap }
+            StyledText { Layout.fillWidth: true; text: "Glide travel (%) · full slide always uses 100%"; wrapMode: Text.WordWrap }
             EffectsSpinBox {
+                enabled: !["slide", "slidevert", "fade"].includes(root.draft[root.motionKey("workspace_style")])
                 from: root.profileMotion ? -1 : 0; to: 100
-                value: root.draft[root.motionKey("travel")] ?? -1
+                value: ["slide", "slidevert"].includes(root.draft[root.motionKey("workspace_style")])
+                    ? 100 : root.draft[root.motionKey("travel")] ?? -1
                 textFromValue: value => value < 0 ? "Preset" : String(value)
                 valueFromText: text => text.toLowerCase() === "preset" ? -1 : Number(text)
                 onValueModified: root.edit(root.motionKey("travel"), value)

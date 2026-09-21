@@ -149,7 +149,11 @@ def profile_motion(s):
    if leaf == "workspaces" or leaf == "workspacesIn" or leaf == "workspacesOut" then
     if options.workspace_style ~= "preset" then a.style=options.workspace_style end
     local style = (a.style or ""):match("^(%S+)")
-    if options.travel >= 0 and (style == "slide" or style == "slidevert" or style == "slidefade" or style == "slidefadevert") then
+    if style == "slide" or style == "slidevert" then
+     -- Opaque slides must move the old workspace fully offscreen. Partial
+     -- travel leaves it covering the incoming workspace until animation end.
+     a.style = style .. " 100%"
+    elseif options.travel >= 0 and (style == "slidefade" or style == "slidefadevert") then
      a.style = style .. " " .. options.travel .. "%"
     end
    elseif leaf == "windowsIn" and options.window_style ~= "preset" then
@@ -176,7 +180,7 @@ def render(s):
   style=s['window_style'];anim('windowsIn',4.6,'riceOpen','popin 72%' if style=='popin' else style,True)
   anim('windowsOut',2.4,'riceExit','popin 88%' if style=='popin' else style)
   anim('windowsMove',3.6,'riceMove','slide',True)
-  ws=s['workspace_style'];ws=ws if ws=='fade' else ws+' '+str(s['travel'])+'%'
+  ws=s['workspace_style'];ws=ws if ws=='fade' else ws+' '+str(100 if ws in ('slide','slidevert') else s['travel'])+'%'
   for leaf in ['workspaces','workspacesIn','workspacesOut']:anim(leaf,5.2,'riceSpace',ws,True)
   anim('layersIn',4.2,'riceOpen','popin 88%',True)
   anim('specialWorkspaceIn',3.2,'riceSoft','fade')

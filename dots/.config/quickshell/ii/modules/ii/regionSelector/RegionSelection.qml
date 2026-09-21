@@ -265,7 +265,10 @@ PanelWindow {
             "--save-dir", Config.options.screenSnip.savePath,
             "--search-url", Config.options.search.imageSearch.imageSearchEngineBaseUrl,
             "--editor", Config.options.regionSelector.annotation.useSatty ? "satty" : "swappy"];
-        root.processing(true, action === RegionSelection.SnipAction.Edit);
+        // The frozen image remains owned by this session while the worker runs.
+        // Release every overlay and input grab now; a failed action can reveal
+        // the same frame again for retry without blocking desktop interaction.
+        root.processing(true, true);
         actionProc.running = true;
     }
     Process {
