@@ -69,7 +69,10 @@ Singleton {
     }
 
     function monitorHasFullscreen(screenName) {
-        if (!screenName || !root.monitorsReady || !root.workspacesReady)
+        // A newly created workspace has no JSON snapshot yet. Its readiness must
+        // not hide this monitor's background (or an unrelated monitor's panels).
+        // The monitor's native active-workspace identity already updates on IPC.
+        if (!screenName)
             return true;
 
         const monitor = root.monitors.find(mon => mon.name === screenName);
