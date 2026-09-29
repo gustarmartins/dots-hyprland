@@ -26,6 +26,53 @@ import shutil
 import unicodedata
 import fcntl
 
+def keyboard_input(prompt=''):
+    """Read a keyboard line, excluding terminal events and bracketed paste."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return input(prompt)
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    line, pending, pasting = [], b'', False
+    try:
+        tty.setcbreak(fd)
+        termios.tcflush(fd, termios.TCIFLUSH)
+        sys.stdout.write(MOUSE_INPUT_ON + prompt)
+        sys.stdout.flush()
+        while True:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                raise EOFError
+            keys, pending, pasting = parse_terminal_input(pending + chunk, pasting, text=True)
+            for key in keys:
+                if key in ('\r', '\n'):
+                    sys.stdout.write('\n')
+                    return ''.join(line)
+                if key == '\x03':
+                    raise KeyboardInterrupt
+                if key == '\x04' and not line:
+                    raise EOFError
+                if key in ('\x7f', '\b'):
+                    if line:
+                        line.pop()
+                        sys.stdout.write('\b \b')
+                elif key == '\x15':
+                    sys.stdout.write('\b \b' * len(line))
+                    line.clear()
+                elif len(key) == 1 and key.isprintable():
+                    line.append(key)
+                    sys.stdout.write(key)
+                sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write(MOUSE_INPUT_ON if _dashboard_terminal_active else MOUSE_INPUT_OFF)
+        sys.stdout.flush()
+
+
+_dashboard_terminal_active = False
+
+
 # ── ANSI Escape Codes ──────────────────────────────────────────────────
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -1486,8 +1533,9 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
 
 # ── Terminal Raw Mode ─────────────────────────────────────────────────
 
-MOUSE_INPUT_ON = '\033[?1000h\033[?1006h\033[?2004h'
-MOUSE_INPUT_OFF = '\033[?2004l\033[?1006l\033[?1000l'
+MOUSE_INPUT_ON = ('\033[?9;1002;1003;1004;1005;1015;1016;1007l'
+                  '\033[=0u\033[>4;0m\033[?1000;1006;2004h')
+MOUSE_INPUT_OFF = '\033[?9;1000;1002;1003;1004;1005;1006;1015;1016;2004l'
 PASTE_START = b'\033[200~'
 PASTE_END = b'\033[201~'
 
@@ -1500,7 +1548,7 @@ def _partial_suffix(data, marker):
     return b''
 
 
-def parse_terminal_input(data, in_paste=False):
+def parse_terminal_input(data, in_paste=False, text=False):
     """Return command keys while consuming terminal control/mouse events.
 
     Kitty sends scroll actions as cursor-key escape sequences on the alternate
@@ -1527,6 +1575,18 @@ def parse_terminal_input(data, in_paste=False):
             # than treating part of a multibyte character as a command.
             if byte < 0x80:
                 keys.append(chr(byte))
+            elif text:
+                width = (2 if 0xc2 <= byte <= 0xdf else
+                         3 if 0xe0 <= byte <= 0xef else
+                         4 if 0xf0 <= byte <= 0xf4 else 1)
+                if pos + width > len(data):
+                    break
+                try:
+                    keys.append(data[pos:pos + width].decode('utf-8'))
+                except UnicodeDecodeError:
+                    pass
+                pos += width
+                continue
             pos += 1
             continue
 
@@ -1539,7 +1599,13 @@ def parse_terminal_input(data, in_paste=False):
             break
 
         introducer = data[pos + 1]
-        if introducer == ord('['):
+        if introducer == ord('[') and data[pos:pos + 3] == b'\033[M':
+            # X10/VT200 reports have three binary bytes after CSI M. A
+            # coordinate can equal an action key; never decode it separately.
+            if pos + 6 > len(data):
+                break
+            pos += 6
+        elif introducer == ord('['):
             # CSI: arrows, focus reports, SGR mouse, and extended keys all end
             # with a final byte in the 0x40..0x7e range.
             end = pos + 2
@@ -1553,7 +1619,7 @@ def parse_terminal_input(data, in_paste=False):
             if pos + 2 >= len(data):
                 break
             pos += 3
-        elif introducer == ord(']'):
+        elif introducer in (ord(']'), ord('P'), ord('_'), ord('^')):
             # OSC replies end in BEL or ST (ESC backslash).
             end = pos + 2
             while end < len(data):
@@ -1583,6 +1649,8 @@ class RawTerminal:
         self.in_paste = False
 
     def __enter__(self):
+        global _dashboard_terminal_active
+        _dashboard_terminal_active = True
         if sys.stdin.isatty():
             import termios
             import tty
@@ -1593,6 +1661,8 @@ class RawTerminal:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        global _dashboard_terminal_active
+        _dashboard_terminal_active = False
         if self.old_settings is not None:
             import termios
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
@@ -1625,7 +1695,7 @@ class RawTerminal:
         if self.old_settings is not None:
             import termios
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
-            sys.stdout.write(f'{MOUSE_INPUT_OFF}\033[?25h\033[?1049l')
+            sys.stdout.write(f'{MOUSE_INPUT_ON}\033[?25h\033[?1049l')
             sys.stdout.flush()
 
     def resume(self):
@@ -1690,7 +1760,7 @@ def run_swap_action(op, processes, view_idx, proc_limit, term):
             print(f"  {CYAN}{p['pid']:>8}{RESET}  {p['comm'][:24]:<24}"
                   f"  {DIM}rss {to_human(p['rss'])}  swap {to_human(p['swap'])}{RESET}")
         try:
-            raw = input(f"\n{op} which? ")
+            raw = keyboard_input(f"\n{op} which? ")
         except (EOFError, KeyboardInterrupt):
             raw = ""
 
@@ -1705,7 +1775,7 @@ def run_swap_action(op, processes, view_idx, proc_limit, term):
                 print(f"[-] Failed to run {op}: {e}")
 
         try:
-            input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
+            keyboard_input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
         except (EOFError, KeyboardInterrupt):
             pass
     finally:
@@ -1719,12 +1789,12 @@ def run_signal_action(processes, view_idx, proc_limit, term):
     try:
         print(f"\n{BOLD}{BRED}== Signal process =={RESET}")
         print(f"{DIM}Enter PID/name/all, then a signal (default TERM). Empty cancels.{RESET}")
-        raw = input("signal which? ").strip()
+        raw = keyboard_input("signal which? ").strip()
         pids = resolve_selection(raw, shown)
         if not pids:
             print("Cancelled.")
             return
-        sig_raw = input("signal [TERM]: ").strip().upper() or "TERM"
+        sig_raw = keyboard_input("signal [TERM]: ").strip().upper() or "TERM"
         if sig_raw.startswith("SIG"):
             sig_raw = sig_raw[3:]
         sig = getattr(signal, f"SIG{sig_raw}", None)
@@ -1732,7 +1802,7 @@ def run_signal_action(processes, view_idx, proc_limit, term):
             print(f"[-] Unknown signal: {sig_raw}")
             return
         print(f"[!] Sending SIG{sig_raw} to {len(pids)} PID(s): {' '.join(map(str, pids))}")
-        if input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
+        if keyboard_input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
             print("Cancelled.")
             return
         result = subprocess.run(["sudo", "kill", f"-{sig.value}"] + [str(p) for p in pids],
@@ -1745,7 +1815,7 @@ def run_signal_action(processes, view_idx, proc_limit, term):
         print("Cancelled.")
     finally:
         try:
-            input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
+            keyboard_input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
         except (EOFError, KeyboardInterrupt):
             pass
         term.resume()
@@ -1757,21 +1827,21 @@ def run_zram_action(kind, term):
     try:
         print(f"\n{BOLD}{BMAGENTA}== ZRAM {kind} =={RESET}")
         if kind == "recompress":
-            mode = (input("mode [tier1/tier2/tier3/all]: ").strip().casefold()
+            mode = (keyboard_input("mode [tier1/tier2/tier3/all]: ").strip().casefold()
                     or "tier1")
             if mode not in {"tier1", "tier2", "tier3", "idle", "huge", "huge-idle", "all"}:
                 print("[-] Unknown recompression mode.")
                 return
             command = ["sudo", "/usr/local/bin/memory-tool-apply", "recompress", mode]
         else:
-            mode = (input("mode [idle/huge/huge-idle]: ").strip().casefold()
+            mode = (keyboard_input("mode [idle/huge/huge-idle]: ").strip().casefold()
                     or "idle")
             if mode not in {"idle", "huge", "huge-idle", "cold", "incompressible"}:
                 print("[-] Unknown writeback mode.")
                 return
             command = ["sudo", "/usr/local/bin/memory-tool-apply", "writeback", mode]
         print(f"[>] {' '.join(command)}")
-        if input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
+        if keyboard_input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
             print("Cancelled.")
             return
         result = subprocess.run(command, text=True, capture_output=True)
@@ -1786,7 +1856,7 @@ def run_zram_action(kind, term):
         print("Cancelled.")
     finally:
         try:
-            input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
+            keyboard_input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
         except (EOFError, KeyboardInterrupt):
             pass
         term.resume()

@@ -52,6 +52,13 @@ System-wide Fontconfig changes request elevation through `pkexec`. Quickshell
 is restarted after an applied change; Hyprland is intentionally left running.
 For an SSH/headless update, use `fontctl preset profile --user-only`.
 
+## Terminal workflow
+
+The [terminal workflow guide](docs/terminal-workflow.md) covers Kitty, zsh and
+tmux keys, prompt recovery, dashboard input handling and optional reboot restore.
+The [floating-window reconnect correction](docs/floating-hotplug-20260929.md)
+preserves terminal positions when an output is powered off and reconnected.
+
 ## Original animation profiles
 
 This profile distributes only animation presets authored by
