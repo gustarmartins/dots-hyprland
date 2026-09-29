@@ -2,7 +2,7 @@
 
 ## Data flow
 
-1. `QuickConfig.qml` selects the wallpaper, light/dark mode, and Material scheme.
+1. The Wallpaper & colors settings page selects the wallpaper, light/dark mode, and Material scheme.
 2. `Config.qml` persists those choices and the terminal tuning values in
    `~/.config/illogical-impulse/config.json`.
 3. `switchwall.sh` serializes color generation, then runs Matugen once. Before

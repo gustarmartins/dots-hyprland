@@ -4,6 +4,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.modules.common.functions
+import "ConfigKeys.js" as ConfigKeys
 
 Singleton {
     id: root
@@ -11,7 +12,46 @@ Singleton {
     property alias options: configOptionsJsonAdapter
     property bool ready: false
     property int readWriteDelay: 50 // milliseconds
+    // FileView.blockWrites means synchronous I/O, not disabling writes.
     property bool blockWrites: false
+    property bool writesPaused: false
+    property string writeError: ""
+    signal reloaded()
+    function reloadFromDisk() { configFileView.reload(); }
+    function writeConfig(create = false) {
+        if (root.writesPaused || (!root.ready && !create)) return;
+        let data = {};
+        try {
+            const source = configFileView.text().trim();
+            if (source) data = JSON.parse(source);
+            if (!data || Array.isArray(data) || typeof data !== "object") throw new Error("Not an object");
+        } catch (error) {
+            root.writeError = "Configuration could not be read; changes were not written.";
+            return;
+        }
+        // JsonAdapter.writeAdapter serializes only declared properties. Merge
+        // those properties into the original document to retain extension keys.
+        for (const path of ConfigKeys.paths) {
+            const keys = path.split(".");
+            let value = root.options; let target = data;
+            for (let i = 0; i < keys.length - 1; i++) {
+                value = value[keys[i]];
+                if (!target[keys[i]] || typeof target[keys[i]] !== "object" || Array.isArray(target[keys[i]])) target[keys[i]] = {};
+                target = target[keys[i]];
+            }
+            target[keys[keys.length - 1]] = value[keys[keys.length - 1]];
+        }
+        root.writeError = "";
+        configFileView.setText(JSON.stringify(data, null, 2) + "\n");
+    }
+    function flushPendingWrites() {
+        if (!fileWriteTimer.running) return;
+        fileWriteTimer.stop();
+        const wasBlocking = root.blockWrites;
+        root.blockWrites = true;
+        root.writeConfig();
+        root.blockWrites = wasBlocking;
+    }
 
     function setNestedValue(nestedKey, value) {
         let keys = nestedKey.split(".");
@@ -57,7 +97,7 @@ Singleton {
         interval: root.readWriteDelay
         repeat: false
         onTriggered: {
-            configFileView.writeAdapter()
+            root.writeConfig()
         }
     }
 
@@ -67,11 +107,12 @@ Singleton {
         watchChanges: true
         blockWrites: root.blockWrites
         onFileChanged: fileReloadTimer.restart()
-        onAdapterUpdated: fileWriteTimer.restart()
-        onLoaded: root.ready = true
+        onAdapterUpdated: if (root.ready && !root.writesPaused) fileWriteTimer.restart()
+        onLoaded: { root.ready = true; root.reloaded(); }
+        onSaveFailed: error => { root.writeError = "Could not save configuration (error " + error + "). Check the file permissions."; }
         onLoadFailed: error => {
             if (error == FileViewError.FileNotFound) {
-                writeAdapter();
+                root.writeConfig(true);
             }
         }
 

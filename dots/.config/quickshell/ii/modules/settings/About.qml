@@ -10,6 +10,20 @@ ContentPage {
     forceWidth: true
 
     ContentSection {
+        icon: "desktop_windows"
+        title: "Gustarmartins desktop"
+        StyledText {
+            Layout.fillWidth: true
+            text: "This settings app follows the features in the Gustarmartins fork of illogical impulse."
+            wrapMode: Text.WordWrap
+        }
+        ConfigRow {
+            RippleButtonWithIcon { materialIcon: "code"; mainText: "Fork & releases"; onClicked: Qt.openUrlExternally("https://github.com/gustarmartins/dots-hyprland") }
+            RippleButtonWithIcon { materialIcon: "help"; mainText: "Settings guide"; onClicked: Qt.openUrlExternally("https://github.com/gustarmartins/dots-hyprland/blob/main/docs/settings.md") }
+        }
+    }
+
+    ContentSection {
         icon: "box"
         title: Translation.tr("Distro")
         

@@ -939,6 +939,19 @@ cmd_preset() {
                     --numbers "Noto Sans" \
                     --hintstyle hintfull --subpixel rgb "$@"
             ;;
+        catalog)
+            # Stable, data-only interface for the settings app. Preset execution
+            # remains the authority for families/sizes, including legacy names.
+            curated_presets | jq -Rn '
+                [{id:"profile", description:"Readex Pro and JetBrains Mono"},
+                 {id:"apple", description:"SF Pro Text and SF Mono"},
+                 {id:"google", description:"Google Sans Flex and JetBrains Mono"},
+                 {id:"inter", description:"Inter and JetBrains Mono"},
+                 {id:"roboto-flex", description:"Roboto Flex and JetBrains Mono"},
+                 {id:"noto", description:"Noto Sans and Noto Sans Mono"}]
+                + [inputs | split("|") | {id:.[0], description:.[1],
+                    ui:.[2], mono:.[3], title:.[4], numbers:.[5], reading:.[6], expressive:.[7]}]'
+            ;;
         list)
             echo -e "${BOLD}Rendering presets (preserve families and sizes; apply desktop-wide):${NC}"
             echo "  aoc / sharp      Full hinting + RGB (DDC-verified AOC stripes)"
@@ -963,7 +976,7 @@ cmd_preset() {
             echo "Override rendering for grayscale: --subpixel none"
             ;;
         "")
-            die "Usage: fontctl preset <name|list>"
+            die "Usage: fontctl preset <name|list|catalog>"
             ;;
         *)
             apply_curated_preset "$name" "$@"
@@ -988,7 +1001,7 @@ cmd_help() {
   USAGE
     fontctl set [OPTIONS]          Set font and/or rendering across all targets
     fontctl status                 Show current configuration across all targets  
-    fontctl preset <name|list>     Apply a named font preset
+    fontctl preset <name|list|catalog>     Apply a named font preset
     fontctl fix-rendering          Apply rendering fixes without changing fonts
     fontctl help                   Show this help
 

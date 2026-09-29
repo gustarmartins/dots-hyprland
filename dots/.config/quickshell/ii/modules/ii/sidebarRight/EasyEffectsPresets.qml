@@ -26,7 +26,7 @@ Rectangle {
             Layout.fillWidth: true
             StyledText {
                 Layout.fillWidth: true
-                text: "EasyEffects · Astra"
+                text: "EasyEffects"
                 font.pixelSize: Appearance.font.pixelSize.small
                 color: Appearance.m3colors.m3onSurface
             }

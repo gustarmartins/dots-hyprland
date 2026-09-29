@@ -31,7 +31,7 @@ def exchange(command, reply=True):
 def state():
     result = {"available": shutil.which("easyeffects") is not None,
               "active": False, "preset": "", "bypassed": False,
-              "presets": sorted(p.stem for p in (DATA / "output").glob("astra-*.json"))}
+              "presets": sorted(p.stem for p in (DATA / "output").glob("*.json"))}
     try:
         result["preset"] = exchange("get_last_loaded_preset:output")
         result["bypassed"] = exchange("get_global_bypass") == "1"
@@ -127,7 +127,7 @@ def main():
                 time.sleep(0.1)
             raise RuntimeError("EasyEffects did not confirm the selected preset.")
         else:
-            raise ValueError("Usage: easyeffects-qs state|start|show|stop|effects-on|effects-off|preset astra-NAME")
+            raise ValueError("Usage: easyeffects-qs state|start|show|stop|effects-on|effects-off|preset NAME")
 
 
 if __name__ == "__main__":

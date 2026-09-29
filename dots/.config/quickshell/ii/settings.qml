@@ -1,307 +1,168 @@
 //@ pragma UseQApplication
 //@ pragma Env QS_NO_RELOAD_POPUP=1
 //@ pragma Env QT_QUICK_CONTROLS_STYLE=Basic
-//@ pragma Env QT_QUICK_FLICKABLE_WHEEL_DECELERATION=10000
-
-// Adjust this to make the app smaller or larger
-//@ pragma Env QT_SCALE_FACTOR=1
-
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.Window
 import Quickshell
+import Quickshell.Io
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
-import qs.modules.common.functions as CF
+import qs.modules.settings
+import "modules/settings/SettingsCatalog.js" as Catalog
 
 ApplicationWindow {
     id: root
-    property string firstRunFilePath: CF.FileUtils.trimFileProtocol(`${Directories.state}/user/first_run.txt`)
-    property string firstRunFileContent: "This file is just here to confirm you've been greeted :>"
-    property real contentPadding: 8
-    property bool showNextTime: false
-    property var pages: [
-        {
-            name: Translation.tr("Desktop effects"),
-            icon: "auto_awesome",
-            component: "modules/settings/DesktopEffectsConfig.qml"
-        },
-        {
-            name: Translation.tr("Quick"),
-            icon: "instant_mix",
-            component: "modules/settings/QuickConfig.qml"
-        },
-        {
-            name: Translation.tr("General"),
-            icon: "browse",
-            component: "modules/settings/GeneralConfig.qml"
-        },
-        {
-            name: Translation.tr("Bar"),
-            icon: "toast",
-            iconRotation: 180,
-            component: "modules/settings/BarConfig.qml"
-        },
-        {
-            name: Translation.tr("Background"),
-            icon: "texture",
-            component: "modules/settings/BackgroundConfig.qml"
-        },
-        {
-            name: Translation.tr("Interface"),
-            icon: "bottom_app_bar",
-            component: "modules/settings/InterfaceConfig.qml"
-        },
-        {
-            name: Translation.tr("Services"),
-            icon: "settings",
-            component: "modules/settings/ServicesConfig.qml"
-        },
-        {
-            name: Translation.tr("Advanced"),
-            icon: "construction",
-            component: "modules/settings/AdvancedConfig.qml"
-        },
-        {
-            name: Translation.tr("About"),
-            icon: "info",
-            component: "modules/settings/About.qml"
-        }
-    ]
-    property int currentPage: 0
-
+    property string currentPage: "home"
+    property string query: ""
+    property string feedback: "Changes save when you use a control. Text lists have a Save button."
+    readonly property bool searching: query.trim().length > 0
+    readonly property var page: Catalog.page(currentPage)
+    readonly property bool wide: width >= 1000
+    property bool effectsVisited: false
+    property bool aboutVisited: false
     visible: true
-    onClosing: Qt.quit()
     title: "illogical-impulse Settings"
-
-    Component.onCompleted: {
-        MaterialThemeLoader.reapplyTheme()
-        Config.readWriteDelay = 0 // Settings app always only sets one var at a time so delay isn't needed
+    width: 1180
+    height: 800
+    minimumWidth: 680
+    minimumHeight: 480
+    font.family: Appearance.font.family.main
+    font.pixelSize: 13
+    palette {
+        window: Appearance.m3colors.m3background
+        windowText: Appearance.m3colors.m3onSurface
+        base: Appearance.m3colors.m3surfaceContainerHigh
+        alternateBase: Appearance.m3colors.m3surfaceContainerLow
+        text: Appearance.m3colors.m3onSurface
+        button: Appearance.m3colors.m3surfaceContainerHigh
+        buttonText: Appearance.m3colors.m3onSurface
+        highlight: Appearance.m3colors.m3primary
+        highlightedText: Appearance.m3colors.m3onPrimary
+        mid: Appearance.m3colors.m3outlineVariant
     }
-
-    minimumWidth: 750
-    minimumHeight: 500
-    width: 1100
-    height: 750
     color: Appearance.m3colors.m3background
+    onClosing: event => { if (Config.writesPaused) event.accepted = false; else Qt.quit(); }
+    Component.onCompleted: MaterialThemeLoader.reapplyTheme()
 
+    function navigate(id) {
+        if (Config.writesPaused) return;
+        if (id === "effects") effectsVisited = true;
+        if (id === "about") aboutVisited = true;
+        currentPage = id;
+        query = ""; searchField.text = "";
+    }
+    Shortcut { sequence: "Ctrl+F"; enabled: !Config.writesPaused; onActivated: { searchField.forceActiveFocus(); searchField.selectAll(); } }
+    Shortcut { sequence: "Ctrl+PageDown"; enabled: !Config.writesPaused; onActivated: root.navigate(Catalog.pages[(Catalog.pages.findIndex(p => p.id === root.currentPage) + 1) % Catalog.pages.length].id) }
+    Shortcut { sequence: "Ctrl+PageUp"; enabled: !Config.writesPaused; onActivated: root.navigate(Catalog.pages[(Catalog.pages.findIndex(p => p.id === root.currentPage) + Catalog.pages.length - 1) % Catalog.pages.length].id) }
     ColumnLayout {
-        anchors {
-            fill: parent
-            margins: contentPadding
-        }
-
-        Keys.onPressed: (event) => {
-            if (event.modifiers === Qt.ControlModifier) {
-                if (event.key === Qt.Key_PageDown) {
-                    root.currentPage = Math.min(root.currentPage + 1, root.pages.length - 1)
-                    event.accepted = true;
-                } 
-                else if (event.key === Qt.Key_PageUp) {
-                    root.currentPage = Math.max(root.currentPage - 1, 0)
-                    event.accepted = true;
-                }
-                else if (event.key === Qt.Key_Tab) {
-                    root.currentPage = (root.currentPage + 1) % root.pages.length;
-                    event.accepted = true;
-                }
-                else if (event.key === Qt.Key_Backtab) {
-                    root.currentPage = (root.currentPage - 1 + root.pages.length) % root.pages.length;
-                    event.accepted = true;
-                }
-            }
-        }
-
-        Item { // Titlebar
-            visible: Config.options?.windows.showTitlebar
+        anchors { fill: parent; margins: 16 }
+        spacing: 16
+        RowLayout {
             Layout.fillWidth: true
-            Layout.fillHeight: false
-            implicitHeight: Math.max(titleText.implicitHeight, windowControlsRow.implicitHeight)
-            StyledText {
-                id: titleText
-                anchors {
-                    left: Config.options.windows.centerTitle ? undefined : parent.left
-                    horizontalCenter: Config.options.windows.centerTitle ? parent.horizontalCenter : undefined
-                    verticalCenter: parent.verticalCenter
-                    leftMargin: 12
-                }
-                color: Appearance.colors.colOnLayer0
-                text: Translation.tr("Settings")
-                font {
-                    family: Appearance.font.family.title
-                    pixelSize: Appearance.font.pixelSize.title
-                    variableAxes: Appearance.font.variableAxes.title
-                }
+            spacing: 16
+            MaterialSymbol { text: "tune"; iconSize: 26; color: Appearance.m3colors.m3primary }
+            StyledText { text: "Desktop settings"; font.pixelSize: 21; font.weight: Font.Medium }
+            Item { Layout.fillWidth: true }
+            SettingsField {
+                id: searchField
+                objectName: "settingsSearch"
+                Layout.preferredWidth: Math.min(380, root.width * 0.37)
+                placeholderText: "Search settings…  Ctrl+F"
+                Accessible.name: "Search all settings"
+                selectByMouse: true
+                enabled: !Config.writesPaused
+                onTextEdited: root.query = text
+                Keys.onEscapePressed: { text = ""; root.query = ""; }
             }
-            RowLayout { // Window controls row
-                id: windowControlsRow
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.right: parent.right
-                RippleButton {
-                    buttonRadius: Appearance.rounding.full
-                    implicitWidth: 35
-                    implicitHeight: 35
-                    onClicked: root.close()
-                    contentItem: MaterialSymbol {
-                        anchors.centerIn: parent
-                        horizontalAlignment: Text.AlignHCenter
-                        text: "close"
-                        iconSize: 20
-                    }
-                }
-            }
+            ToolButton { text: "×"; Accessible.name: "Close settings"; enabled: !Config.writesPaused; onClicked: root.close() }
         }
-
-        RowLayout { // Window content with navigation rail and content pane
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: contentPadding
-            Item {
-                id: navRailWrapper
+            spacing: 18
+            ColumnLayout {
+                Layout.preferredWidth: root.wide ? 206 : 56
                 Layout.fillHeight: true
-                Layout.margins: 5
-                implicitWidth: navRail.expanded ? 150 : fab.baseSize
-                Behavior on implicitWidth {
-                    animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                spacing: 12
+                ListView {
+                    id: navigation
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: Catalog.pages
+                    spacing: 4
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    delegate: Button {
+                        required property var modelData
+                        width: navigation.width
+                        height: 43
+                        padding: 10
+                        enabled: !Config.writesPaused
+                        highlighted: !root.searching && root.currentPage === modelData.id
+                        Accessible.name: modelData.title
+                        ToolTip.visible: hovered && !root.wide
+                        ToolTip.text: modelData.title
+                        onClicked: root.navigate(modelData.id)
+                        background: Rectangle { radius: 14; color: parent.highlighted ? Appearance.m3colors.m3secondaryContainer : parent.hovered ? Appearance.m3colors.m3surfaceContainerHigh : "transparent" }
+                        contentItem: RowLayout {
+                            spacing: 10
+                            MaterialSymbol { text: modelData.icon; iconSize: 22; color: Appearance.m3colors.m3onSurface }
+                            StyledText { visible: root.wide; Layout.fillWidth: true; text: modelData.title; font.pixelSize: 13; elide: Text.ElideRight }
+                        }
+                    }
                 }
-                NavigationRail { // Window content with navigation rail and content pane
-                    id: navRail
-                    anchors {
-                        left: parent.left
-                        top: parent.top
-                        bottom: parent.bottom
-                    }
-                    spacing: 10
-                    expanded: root.width > 900
-                    
-                    NavigationRailExpandButton {
-                        focus: root.visible
-                    }
-
-                    FloatingActionButton {
-                        id: fab
-                        property bool justCopied: false
-                        iconText: justCopied ? "check" : "edit"
-                        buttonText: justCopied ? Translation.tr("Path copied") : Translation.tr("Config file")
-                        expanded: navRail.expanded
-                        downAction: () => {
-                            Qt.openUrlExternally(`${Directories.config}/illogical-impulse/config.json`);
-                        }
-                        altAction: () => {
-                            Quickshell.clipboardText = CF.FileUtils.trimFileProtocol(`${Directories.config}/illogical-impulse/config.json`);
-                            fab.justCopied = true;
-                            revertTextTimer.restart()
-                        }
-
-                        Timer {
-                            id: revertTextTimer
-                            interval: 1500
-                            onTriggered: {
-                                fab.justCopied = false;
-                            }
-                        }
-
-                        StyledToolTip {
-                            text: Translation.tr("Open the shell config file\nAlternatively right-click to copy path")
-                        }
-                    }
-
-                    NavigationRailTabArray {
-                        currentIndex: root.currentPage
-                        expanded: navRail.expanded
-                        Repeater {
-                            model: root.pages
-                            NavigationRailButton {
-                                required property var index
-                                required property var modelData
-                                toggled: root.currentPage === index
-                                onPressed: root.currentPage = index;
-                                expanded: navRail.expanded
-                                buttonIcon: modelData.icon
-                                buttonIconRotation: modelData.iconRotation || 0
-                                buttonText: modelData.name
-                                showToggledHighlight: false
-                            }
-                        }
-                    }
-
-                    Item {
-                        Layout.fillHeight: true
-                    }
+                SettingsButton {
+                    Layout.fillWidth: true
+                    text: root.wide ? "Open config file" : "{ }"
+                    Accessible.name: "Open configuration file"
+                    enabled: !Config.writesPaused
+                    onClicked: Qt.openUrlExternally(Directories.shellConfigPath)
                 }
             }
-            Rectangle { // Content container
+            ColumnLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                color: Appearance.m3colors.m3surfaceContainerLow
-                radius: Appearance.rounding.windowRounding - root.contentPadding
-
-                Loader {
-                    id: pageLoader
-                    anchors.fill: parent
-                    opacity: 1.0
-
-                    active: Config.ready
-                    Component.onCompleted: {
-                        source = root.pages[0].component
+                spacing: 12
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+                    StyledText { Layout.fillWidth: true; text: root.searching ? "Search results" : root.page.title; font.pixelSize: 27; font.weight: Font.Medium; wrapMode: Text.WordWrap }
+                    StyledText { Layout.fillWidth: true; text: root.searching ? "Matches across the whole desktop. Changes use the same controls as their own pages." : root.page.description; font.pixelSize: 13; wrapMode: Text.WordWrap; color: Appearance.m3colors.m3onSurfaceVariant }
+                }
+                StackLayout {
+                    id: stack
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    currentIndex: !Config.ready ? 4 : root.searching ? 2 : root.currentPage === "home" ? 0 : root.currentPage === "effects" ? 1 : root.currentPage === "about" ? 3 : 2
+                    SettingsHome { onNavigate: id => root.navigate(id) }
+                    Loader { id: effects; active: root.effectsVisited; source: "modules/settings/DesktopEffectsConfig.qml" }
+                    CatalogPage {
+                        id: catalogPage
+                        pageId: root.currentPage
+                        query: root.query
+                        writable: !Config.writesPaused
+                        onNavigate: id => root.navigate(id)
+                        onEdited: path => { root.feedback = "Updated · " + (Catalog.entries.find(e => e.path === path)?.title ?? "Setting"); }
                     }
-
-                    Connections {
-                        target: root
-                        function onCurrentPageChanged() {
-                            switchAnim.complete();
-                            switchAnim.start();
-                        }
-                    }
-
-                    SequentialAnimation {
-                        id: switchAnim
-
-                        NumberAnimation {
-                            target: pageLoader
-                            properties: "opacity"
-                            from: 1
-                            to: 0
-                            duration: 100
-                            easing.type: Appearance.animation.elementMoveExit.type
-                            easing.bezierCurve: Appearance.animationCurves.emphasizedFirstHalf
-                        }
-                        ParallelAnimation {
-                            PropertyAction {
-                                target: pageLoader
-                                property: "source"
-                                value: root.pages[root.currentPage].component
-                            }
-                            PropertyAction {
-                                target: pageLoader
-                                property: "anchors.topMargin"
-                                value: 20
-                            }
-                        }
-                        ParallelAnimation {
-                            NumberAnimation {
-                                target: pageLoader
-                                properties: "opacity"
-                                from: 0
-                                to: 1
-                                duration: 200
-                                easing.type: Appearance.animation.elementMoveEnter.type
-                                easing.bezierCurve: Appearance.animationCurves.emphasizedLastHalf
-                            }
-                            NumberAnimation {
-                                target: pageLoader
-                                properties: "anchors.topMargin"
-                                to: 0
-                                duration: 200
-                                easing.type: Appearance.animation.elementMoveEnter.type
-                                easing.bezierCurve: Appearance.animationCurves.emphasizedLastHalf
-                            }
-                        }
-                    }
+                    Loader { id: about; active: root.aboutVisited; source: "modules/settings/About.qml" }
+                    BusyIndicator { running: !Config.ready }
+                }
+                StyledText {
+                    Layout.fillWidth: true
+                    text: Config.writeError ? Config.writeError : Config.writesPaused ? "Applying desktop fonts…" : root.currentPage === "effects" && !root.searching ? "Desktop effects keep their own Apply and Save controls." : root.feedback
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: 11
+                    color: Appearance.m3colors.m3onSurfaceVariant
                 }
             }
         }
+    }
+    IpcHandler {
+        target: "settings"
+        function open(page: string): void { if (Catalog.pages.some(p => p.id === page)) root.navigate(page); }
+        function search(text: string): void { if (!Config.writesPaused) { searchField.text = text; root.query = text; } }
+        function status(): string { return JSON.stringify({page:root.currentPage,search:root.query,ready:Config.ready,loading:Config.writesPaused,pages:Catalog.pages.map(p=>p.id),settings:Catalog.entries.length}); }
     }
 }

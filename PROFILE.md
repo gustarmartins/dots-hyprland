@@ -29,6 +29,13 @@ On an existing installation, the personal Quickshell settings file is written
 as `~/.config/illogical-impulse/config.json.new` instead of silently replacing
 the existing file.
 
+## Desktop settings
+
+Open Super+I for the [current fork settings](docs/settings.md): searchable pages,
+font profiles, custom control-center tiles, wallpaper discovery and the existing
+saved-effects editor. Settings follow the configuration schema and are checked
+for coverage as the fork changes.
+
 ## Official font utility
 
 `fontctl` is installed into `~/.local/bin` by `./setup install` and is the

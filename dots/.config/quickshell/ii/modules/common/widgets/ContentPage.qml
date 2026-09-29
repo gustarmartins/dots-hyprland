@@ -17,7 +17,7 @@ StyledFlickable {
     
     ColumnLayout {
         id: contentColumn
-        width: root.forceWidth ? root.baseWidth : Math.max(root.baseWidth, implicitWidth)
+        width: Math.max(0, Math.min(root.width - 40, Math.max(root.baseWidth, 820)))
         anchors {
             top: parent.top
             horizontalCenter: parent.horizontalCenter
