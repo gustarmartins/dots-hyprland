@@ -15,7 +15,7 @@ import Quickshell.Services.Mpris
 Item { // Player instance
     id: root
     required property MprisPlayer player
-    property var artUrl: player?.trackArtUrl
+    property string artUrl: player?.trackArtUrl ?? ""
     property string artDownloadLocation: Directories.coverArt
     property string artFileName: Qt.md5(artUrl)
     property string artFilePath: `${artDownloadLocation}/${artFileName}`
@@ -26,7 +26,9 @@ Item { // Player instance
     property int visualizerSmoothing: 2 // Number of points to average for smoothing
     property real radius
 
-    property string displayedArtFilePath: root.downloaded ? Qt.resolvedUrl(artFilePath) : ""
+    readonly property bool directArt: artUrl.startsWith("file:") || artUrl.startsWith("/")
+    property string displayedArtFilePath: directArt ? artUrl
+        : (root.downloaded ? Qt.resolvedUrl(artFilePath) : "")
 
     component TrackChangeButton: RippleButton {
         implicitWidth: 24
@@ -60,16 +62,20 @@ Item { // Player instance
     }
 
     onArtFilePathChanged: {
+        root.downloaded = false
         if (root.artUrl.length == 0) {
-            root.artDominantColor = Appearance.m3colors.m3secondaryContainer
             return;
         }
+        // ColorQuantizer requires a local file, including for data URLs.
+        // Send the URL over stdin so large inline art never enters exec argv.
+        if (!root.directArt) root.downloadArt()
+    }
 
-        // Binding does not work in Process
-        coverArtDownloader.targetFile = root.artUrl 
+    function downloadArt() {
+        if (coverArtDownloader.running || !root.artUrl || root.directArt) return;
+        coverArtDownloader.targetFile = root.artUrl
         coverArtDownloader.artFilePath = root.artFilePath
-        // Download
-        root.downloaded = false
+        coverArtDownloader.stdinEnabled = true
         coverArtDownloader.running = true
     }
 
@@ -77,9 +83,14 @@ Item { // Player instance
         id: coverArtDownloader
         property string targetFile: root.artUrl
         property string artFilePath: root.artFilePath
-        command: [ "bash", "-c", `[ -f ${artFilePath} ] || curl -4 -sSL '${targetFile}' -o '${artFilePath}'` ]
+        command: [ "python3", `${FileUtils.trimFileProtocol(Directories.scriptPath)}/media/cache_cover_art.py`, artFilePath ]
+        onStarted: {
+            write(targetFile)
+            stdinEnabled = false
+        }
         onExited: (exitCode, exitStatus) => {
-            root.downloaded = true
+            root.downloaded = exitCode === 0 && artFilePath === root.artFilePath
+            if (artFilePath !== root.artFilePath) Qt.callLater(root.downloadArt)
         }
     }
 
@@ -121,6 +132,7 @@ Item { // Player instance
             cache: false
             antialiasing: true
             asynchronous: true
+            sourceSize: Qt.size(512, 512)
 
             layer.enabled: true
             layer.effect: StyledBlurEffect {
@@ -167,6 +179,8 @@ Item { // Player instance
 
                 StyledImage { // Art image
                     id: mediaArt
+                    asynchronous: true
+                    sourceSize: Qt.size(512, 512)
                     property int size: parent.height
                     anchors.fill: parent
 

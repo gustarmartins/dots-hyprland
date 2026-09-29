@@ -497,6 +497,7 @@ def helpme():
   {c.cy}vmatlas pins{c.R}         what's pinned in /etc/sysctl.d (+ flags externals)
   {c.cy}vmatlas profiles{c.R}     every canonical VM profile and live match
   {c.cy}vmatlas profile ...{c.R}  list/show/detect/create/apply canonical profiles
+  {c.cy}vmatlas restore-default [--check]{c.R}  restore/check the saved workstation default
   {c.cy}vmatlas guide{c.R}        how to change zram / make profiles / safety
   {c.cy}vmatlas json{c.R}         machine-readable dump""")
 
@@ -510,8 +511,16 @@ def as_json():
                       "pins": pins()}, indent=2))
 
 
+def restore_default_command(args):
+    # The installed helper owns privilege escalation, checking, and exit codes.
+    result = subprocess.run(["/usr/local/libexec/vmatlas-restore-default", *args])
+    raise SystemExit(result.returncode)
+
+
 def profile_command(args):
     sub = args[0] if args else "list"
+    if sub == "restore-default":
+        restore_default_command(args[1:])
     if sub in {"list", "detect", "show"}:
         command = [PROFILE_TOOL, sub, *args[1:]]
     elif sub == "apply" and len(args) == 2:
@@ -691,6 +700,8 @@ def main():
         explain(a[1])
     elif cmd == "pins":
         show_pins()
+    elif cmd == "restore-default":
+        restore_default_command(a[1:])
     elif cmd == "profiles":
         show_profiles()
     elif cmd == "profile":

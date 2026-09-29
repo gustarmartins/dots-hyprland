@@ -8,7 +8,7 @@ _prefix='illogical-impulse'
 _pkgname=quickshell
 pkgname="$_prefix-$_pkgname-git"
 pkgver=0.3.1.r14.gc6a5160
-pkgrel=2
+pkgrel=3
 pkgdesc="$_pkgname-git pinned commit and extra deps for $_prefix"
 arch=(x86_64 aarch64)
 url='https://git.outfoxxed.me/quickshell/quickshell'
@@ -49,6 +49,7 @@ makedepends=(
   'cmake'
   'git'
   'ninja'
+  'python'
   'qt6-shadertools'
   'spirv-tools'
   'vulkan-headers'
@@ -63,47 +64,57 @@ source=("$_pkgsrc::git+$url.git#commit=$_commit"
   quickshell-check.hook
   0001-pipewire-guard-cached-node-interface.patch
   0002-test-wait-for-popup-polish.patch
+  0003-hyprland-reconnect-event-socket.patch
+  tests/hyprland-reconnect.py
 )
 sha256sums=('SKIP'
   'd02da428ae72ca6bec2bf1be224674b39aaf7ddbff03d8c09a2f1eb81bd1cbdb'
   'f725b6dae8d22bc199d389af8f1d65c563e52ba52a10ac0fa2711619d6a92b2d'
   '3653831ef194d92b72c7646e40a3868aa386b4556946a70aa1086505b645074e'
+  '3621ba5b1fa29d62b39eef39a5f8a4c4511dd079226fe8b1ce4ba893e3c8b494'
+  'f6170647749c1a7167979c18f180cb81d6d348596017814efbf16f4c4c1c60cd'
 )
 
 prepare() {
   cd "$_pkgname"
   patch -Np1 -i "$srcdir/0001-pipewire-guard-cached-node-interface.patch"
   patch -Np1 -i "$srcdir/0002-test-wait-for-popup-polish.patch"
+  patch -Np1 -i "$srcdir/0003-hyprland-reconnect-event-socket.patch"
 }
 
 build() {
-  cd "$_pkgname"
+  cd -P "$_pkgname"
+  # Local maintenance builds may symlink source/build. Canonical paths keep
+  # Qt's generated moc includes relative to the real source and build trees.
+  local qs_build_dir
+  qs_build_dir="$(realpath -m build)"
   # The maintenance helper tries --noextract first; reject stale source trees.
   if [[ "$(git rev-parse HEAD)" != "$_commit" ]]; then
     error "Quickshell source does not match the pinned commit; rerun without --noextract."
     return 1
   fi
-  for local_patch in 0001-pipewire-guard-cached-node-interface.patch 0002-test-wait-for-popup-polish.patch; do
+  for local_patch in 0001-pipewire-guard-cached-node-interface.patch 0002-test-wait-for-popup-polish.patch 0003-hyprland-reconnect-event-socket.patch; do
     git apply --reverse --check "$srcdir/$local_patch" || return 1
   done
-  cmake -GNinja -B build \
+  cmake -GNinja -S "$PWD" -B "$qs_build_dir" \
     -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
     -DCMAKE_INSTALL_PREFIX=/usr \
-    -DDISTRIBUTOR="Mekki c6a5160 + PipeWire lifetime fix" \
+    -DDISTRIBUTOR="Mekki c6a5160 + PipeWire lifetime and Hyprland reconnect fixes" \
     -DBUILD_TESTING=ON \
     -DINSTALL_QML_PREFIX=lib/qt6/qml
 
-  cmake --build build --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+  cmake --build "$qs_build_dir" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 }
 
 check() {
-  cd "$_pkgname/build"
+  cd -P "$_pkgname/build"
   QT_QPA_PLATFORM=offscreen ctest --output-on-failure
+  QS_TEST_BINARY="$PWD/src/quickshell" python3 "$srcdir/hyprland-reconnect.py"
 }
 
 package() {
   install -Dm644 "quickshell-check.hook" -t "$pkgdir/usr/share/libalpm/hooks"
-  cd "$_pkgname"
-  DESTDIR="$pkgdir" cmake --install build
+  cd -P "$_pkgname"
+  DESTDIR="$pkgdir" cmake --install "$(realpath build)"
   install -Dm644 "LICENSE" -t "$pkgdir/usr/share/licenses/$_pkgname"
 }

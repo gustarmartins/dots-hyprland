@@ -12,13 +12,26 @@ Local patches:
   second lifetime failure beyond upstream's targeted-default-disconnect fix.
 - `0002`: wait for asynchronous popup polish in the existing position test,
   retaining the original expected coordinates.
+- `0003`: reconnect the Hyprland event socket with bounded backoff. Reconcile
+  monitors, workspaces, windows and focus after reconnecting, including missed
+  destruction events, and discard partial data from the previous connection.
 
 The build rejects stale or unpatched trees when the maintenance helper tries
 `--noextract`, allowing its normal fresh-source fallback to adopt the new pin.
 
 `makepkg` builds with two jobs by default (override
 `CMAKE_BUILD_PARALLEL_LEVEL`) and runs all nine upstream test suites. Debug
-symbols stay in the binary. The compatibility hook runs after Qt Base,
+The private socket recovery regression also runs in `check()`, without touching
+the desktop compositor. It covers initial connection failure, disconnects,
+missed changes, partial events and repeated recovery. Run it separately with:
+
+```sh
+QS_TEST_BINARY=/path/to/built/quickshell python3 tests/hyprland-reconnect.py
+```
+
+Source and build paths are canonicalized so Qt moc generation also works with
+the workstation's source/build symlinks. Debug symbols stay in the binary.
+The compatibility hook runs after Qt Base,
 Declarative and Wayland updates; rebuild this package after an ABI mismatch.
 
 Before installing a changed pin, run the additional device-lifetime regression:

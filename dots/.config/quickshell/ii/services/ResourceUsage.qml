@@ -26,9 +26,8 @@ Singleton {
 	property real gttUsed: 0
 	property real gttUsedPercentage: gttUsed / gttTotal
 
-	// amdgpu engine load. gpu_busy_percent is the graphics pipe, mem_busy_percent
-	// the memory controller — both are single-read counters the driver already
-	// maintains, so polling them costs nothing beyond the read.
+	// Driver reads may wait on hardware; keep them in the asynchronous process.
+	// gpu_busy_percent is the graphics pipe, mem_busy_percent the memory controller.
 	property real gpuUsage: 0
 	property real gpuMemBusy: 0
 	property real gpuPower: 0
@@ -107,60 +106,77 @@ Singleton {
         updateCpuUsageHistory()
     }
 
-	Timer {
-		interval: 1
-        running: true 
+    // Parse each completed read, rather than the previous sample immediately
+    // after reload(). FileView loads asynchronously by default.
+    Timer {
+        interval: Math.max(250, Config.options?.resources?.updateInterval ?? 3000)
+        running: true
         repeat: true
-		onTriggered: {
-            // Reload files
+        triggeredOnStart: true
+        onTriggered: {
             fileMeminfo.reload()
             fileStat.reload()
             filePsiMem.reload()
             filePsiCpu.reload()
             filePsiIo.reload()
-            gpuStatsProc.running = true
-            cpuClockProc.running = true
-
-            // Parse memory and swap usage
-            const textMeminfo = fileMeminfo.text()
-            memoryTotal = Number(textMeminfo.match(/MemTotal: *(\d+)/)?.[1] ?? 1)
-            memoryFree = Number(textMeminfo.match(/MemAvailable: *(\d+)/)?.[1] ?? 0)
-            swapTotal = Number(textMeminfo.match(/SwapTotal: *(\d+)/)?.[1] ?? 1)
-            swapFree = Number(textMeminfo.match(/SwapFree: *(\d+)/)?.[1] ?? 0)
-
-            const textStat = fileStat.text()
-            const cpuLine = textStat.match(/^cpu\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/)
-            if (cpuLine) {
-                const stats = cpuLine.slice(1).map(Number)
-                const total = stats.reduce((a, b) => a + b, 0)
-                const idle = stats[3]
-
-                if (previousCpuStats) {
-                    const totalDiff = total - previousCpuStats.total
-                    const idleDiff = idle - previousCpuStats.idle
-                    cpuUsage = totalDiff > 0 ? (1 - idleDiff / totalDiff) : 0
-                }
-
-                previousCpuStats = { total, idle }
-            }
-
-            // Parse PSI pressure (matches "some avg10=..." / "some avg300=...")
-            const textPsiMem = filePsiMem.text()
-            memoryPressure = Number(textPsiMem.match(/some avg10=([\d.]+)/)?.[1] ?? 0) / 100
-            memoryPressure300 = Number(textPsiMem.match(/some avg300=([\d.]+)/)?.[1] ?? 0) / 100
-            cpuPressure = Number(filePsiCpu.text().match(/some avg10=([\d.]+)/)?.[1] ?? 0) / 100
-            ioPressure = Number(filePsiIo.text().match(/some avg10=([\d.]+)/)?.[1] ?? 0) / 100
-
-            root.updateHistories()
-            interval = Config.options?.resources?.updateInterval ?? 3000
+            if (!gpuStatsProc.running) gpuStatsProc.running = true
+            if (!cpuClockProc.running) cpuClockProc.running = true
         }
-	}
+    }
 
-	FileView { id: fileMeminfo; path: "/proc/meminfo" }
-    FileView { id: fileStat; path: "/proc/stat" }
-    FileView { id: filePsiMem; path: "/proc/pressure/memory" }
-    FileView { id: filePsiCpu; path: "/proc/pressure/cpu" }
-    FileView { id: filePsiIo;  path: "/proc/pressure/io" }
+    FileView {
+        id: fileMeminfo
+        path: "/proc/meminfo"
+        onLoaded: {
+            const data = text()
+            root.memoryTotal = Number(data.match(/MemTotal: *(\d+)/)?.[1] ?? 1)
+            root.memoryFree = Number(data.match(/MemAvailable: *(\d+)/)?.[1] ?? 0)
+            root.swapTotal = Number(data.match(/SwapTotal: *(\d+)/)?.[1] ?? 0)
+            root.swapFree = Number(data.match(/SwapFree: *(\d+)/)?.[1] ?? 0)
+            root.updateMemoryUsageHistory()
+            root.updateSwapUsageHistory()
+        }
+    }
+    FileView {
+        id: fileStat
+        path: "/proc/stat"
+        onLoaded: {
+            const cpuLine = text().match(/^cpu\s+(.+)$/m)
+            if (!cpuLine) return
+            // guest/guest_nice are included in user/nice already; iowait is idle.
+            const stats = cpuLine[1].trim().split(/\s+/).slice(0, 8).map(Number)
+            const total = stats.reduce((a, b) => a + b, 0)
+            const idle = stats[3] + (stats[4] ?? 0)
+            if (root.previousCpuStats) {
+                const delta = total - root.previousCpuStats.total
+                const idleDelta = idle - root.previousCpuStats.idle
+                if (delta > 0) {
+                    root.cpuUsage = Math.max(0, Math.min(1, 1 - idleDelta / delta))
+                    root.updateCpuUsageHistory()
+                }
+            }
+            root.previousCpuStats = { total, idle }
+        }
+    }
+    FileView {
+        id: filePsiMem
+        path: "/proc/pressure/memory"
+        onLoaded: {
+            const data = text()
+            root.memoryPressure = Number(data.match(/some avg10=([\d.]+)/)?.[1] ?? 0) / 100
+            root.memoryPressure300 = Number(data.match(/some avg10=.*avg300=([\d.]+)/)?.[1] ?? 0) / 100
+        }
+    }
+    FileView {
+        id: filePsiCpu
+        path: "/proc/pressure/cpu"
+        onLoaded: root.cpuPressure = Number(text().match(/some avg10=([\d.]+)/)?.[1] ?? 0) / 100
+    }
+    FileView {
+        id: filePsiIo
+        path: "/proc/pressure/io"
+        onLoaded: root.ioPressure = Number(text().match(/some avg10=([\d.]+)/)?.[1] ?? 0) / 100
+    }
 
     Process {
         id: gpuStatsProc
@@ -168,14 +184,14 @@ Singleton {
         // to 0 so the line count is fixed at 14 and the indices below stay valid
         // even if a node is missing on another card.
         command: ["bash", "-c",
-            "D=/sys/class/drm/card1/device; H=$(echo $D/hwmon/hwmon*); " +
+            "D=/sys/class/drm/card1/device; H=($D/hwmon/hwmon*); " +
             "for f in $D/mem_info_vram_total $D/mem_info_vram_used " +
             "$D/mem_info_gtt_total $D/mem_info_gtt_used " +
             "$D/gpu_busy_percent $D/mem_busy_percent " +
             "$H/power1_average $H/power1_cap " +
             "$H/temp1_input $H/temp2_input $H/temp3_input " +
             "$H/freq1_input $H/freq2_input $H/fan1_input; " +
-            "do cat \"$f\" 2>/dev/null || echo 0; done"]
+            "do v=0; IFS= read -r v < \"$f\" 2>/dev/null || :; printf '%s\\n' \"${v:-0}\"; done"]
         stdout: StdioCollector {
             onStreamFinished: {
                 const l = text.split("\n")
@@ -205,7 +221,7 @@ Singleton {
         // Peak live core clock: max of every core's scaling_cur_freq (kHz).
         // scaling_cur_freq reflects the boosted P-state, so this shows real
         // boost (e.g. ~3.9 GHz) not just the base cap.
-        command: ["bash", "-c", "cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq | sort -n | tail -1"]
+        command: ["bash", "-c", "max=0; for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do v=0; IFS= read -r v < \"$f\" 2>/dev/null || :; [[ $v =~ ^[0-9]+$ ]] && (( v > max )) && max=$v; done; printf '%s\\n' \"$max\""]
         stdout: StdioCollector {
             id: cpuClockCollector
             onStreamFinished: {

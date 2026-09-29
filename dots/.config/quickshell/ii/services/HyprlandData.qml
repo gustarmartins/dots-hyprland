@@ -42,6 +42,19 @@ Singleton {
             activeWorkspace: {id: mon.activeWorkspace?.id ?? -1, name: mon.activeWorkspace?.name ?? ""},
         }));
     property var layers: ({})
+    property double lastEventAt: 0
+    IpcHandler {
+        target: "hyprlandDiagnostics"
+        function status(): string {
+            return JSON.stringify({
+                eventAgeMs: root.lastEventAt ? Date.now() - root.lastEventAt : -1,
+                focusedWorkspace: Hyprland.focusedWorkspace?.id ?? -1,
+                monitors: Hyprland.monitors.values.map(mon => ({
+                    name: mon.name, workspace: mon.activeWorkspace?.id ?? -1,
+                })),
+            });
+        }
+    }
     readonly property bool monitorsReady: monitors.length > 0 && monitors.length === Hyprland.monitors.values.length
     readonly property bool workspacesReady: Hyprland.workspaces.values.length > 0
         && Hyprland.workspaces.values.every(ws => ws && ws.lastIpcObject.id !== undefined)
@@ -134,8 +147,8 @@ Singleton {
         onTriggered: root.updateNativeSnapshots()
     }
 
-    // Eden publishes both title formats every frame. Refresh only client
-    // snapshots, at most four times a second, preserving the existing limit.
+    // Compatibility consumers still read titles from lastIpcObject. Limit
+    // those client-only snapshots even when a title changes every frame.
     Timer {
         id: titleRefreshThrottle
         interval: 250
@@ -173,6 +186,7 @@ Singleton {
         target: Hyprland
 
         function onRawEvent(event) {
+            root.lastEventAt = Date.now();
             if (["openlayer", "closelayer"].includes(event.name)) {
                 root.updateLayers();
                 return;
@@ -184,6 +198,9 @@ Singleton {
                 if (!titleRefreshThrottle.running) titleRefreshThrottle.start();
                 return;
             }
+            // Focus is already applied to the native model; it does not change
+            // any geometry. Do not refresh every monitor/client on focus churn.
+            if (["activewindow", "activewindowv2"].includes(event.name)) return;
             // Properties such as window size, reserved monitor space and
             // special-workspace details still require fresh JSON snapshots.
             if (!eventRefreshThrottle.running) eventRefreshThrottle.start();

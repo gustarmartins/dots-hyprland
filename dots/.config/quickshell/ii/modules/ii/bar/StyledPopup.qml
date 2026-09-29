@@ -13,11 +13,22 @@ LazyLoader {
     default property Item contentItem
     property real popupBackgroundMargin: 0
 
-    active: hoverTarget && hoverTarget.containsMouse
+    readonly property bool popupRequested: !!hoverTarget?.containsMouse
+        && !!hoverTarget?.QsWindow.window?.visible
+
+    property bool windowWarmed: false
+    onPopupRequestedChanged: if (popupRequested) windowWarmed = true
+
+    // Build outside the pointer handler. On this engine, setting a layer window
+    // invisible destroys its native window and render thread. After first use,
+    // keep it mapped but completely transparent, input-empty and without blur.
+    activeAsync: true
 
     component: PanelWindow {
         id: popupWindow
         color: "transparent"
+        visible: root.windowWarmed && !!root.hoverTarget?.QsWindow.window?.visible
+        screen: root.hoverTarget?.QsWindow.window?.screen ?? null
 
         anchors.left: !Config.options.bar.vertical || (Config.options.bar.vertical && !Config.options.bar.bottom)
         anchors.right: Config.options.bar.vertical && Config.options.bar.bottom
@@ -29,9 +40,9 @@ LazyLoader {
 
         mask: SurfaceRegion {
             id: popupRegion
-            surface: popupBackground
+            surface: root.popupRequested ? popupBackground : null
         }
-        BackgroundEffect.blurRegion: popupBackground.glassEnabled ? popupRegion : null
+        BackgroundEffect.blurRegion: root.popupRequested && popupBackground.glassEnabled ? popupRegion : null
 
         exclusionMode: ExclusionMode.Ignore
         exclusiveZone: 0
@@ -66,13 +77,16 @@ LazyLoader {
         }
         WlrLayershell.namespace: "quickshell:popup"
         WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
         StyledRectangularShadow {
             target: popupBackground
+            visible: root.popupRequested
         }
 
         GlassSurface {
             id: popupBackground
+            visible: root.popupRequested
             readonly property real margin: 10
             anchors {
                 fill: parent

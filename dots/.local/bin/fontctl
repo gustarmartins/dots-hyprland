@@ -677,7 +677,7 @@ cmd_status() {
 
 # ── Set Command ────────────────────────────────────────────────────────────────
 cmd_set() {
-    local ui_font="" ui_size="11" mono_font="" mono_size="13"
+    local ui_font="" ui_size="11" mono_font="" mono_size="13" kitty_size=""
     local title_font="" title_size="12"
     local numbers_font="" reading_font="" expressive_font=""
     local hintstyle="hintfull" subpixel="rgb" lcdfilter="lcddefault"
@@ -688,7 +688,8 @@ cmd_set() {
             --ui)          ui_font="$2"; shift 2 ;;
             --ui-size)     ui_size="$2"; shift 2 ;;
             --mono)        mono_font="$2"; shift 2 ;;
-            --mono-size)   mono_size="$2"; shift 2 ;;
+            --mono-size)   mono_size="$2"; kitty_size=""; shift 2 ;;
+            --kitty-size)  kitty_size="$2"; shift 2 ;;
             --title)       title_font="$2"; shift 2 ;;
             --title-size)  title_size="$2"; shift 2 ;;
             --numbers)     numbers_font="$2"; shift 2 ;;
@@ -739,8 +740,9 @@ cmd_set() {
     done
 
     # Reject invalid sizes before any configuration files are changed.
-    jq -en --arg ui "$ui_size" --arg mono "$mono_size" --arg title "$title_size" \
-        '[$ui, $mono, $title] | all(.[]; (tonumber | . > 0))' >/dev/null 2>&1 \
+    kitty_size="${kitty_size:-$mono_size}"
+    jq -en --arg ui "$ui_size" --arg mono "$mono_size" --arg title "$title_size" --arg kitty "$kitty_size" \
+        '[$ui, $mono, $title, $kitty] | all(.[]; (tonumber | . > 0))' >/dev/null 2>&1 \
         || die "Font sizes must be positive numbers"
 
     # Defaults: inherit from ui_font if not set
@@ -756,6 +758,7 @@ cmd_set() {
     echo -e "\n${BOLD}fontctl set${NC}"
     echo -e "  UI:    ${CYAN}${ui_font}${NC} ${ui_size}pt"
     echo -e "  Mono:  ${CYAN}${mono_font}${NC} ${mono_size}pt"
+    echo -e "  Kitty: ${CYAN}${mono_font}${NC} ${kitty_size}pt"
     echo -e "  Title: ${CYAN}${title_font}${NC} ${title_size}pt"
     echo -e "  Hint:  ${hintstyle}  Subpixel: ${subpixel}  LCD: ${lcdfilter}"
     echo ""
@@ -781,7 +784,7 @@ cmd_set() {
     update_gsettings "$ui_font" "$ui_size" "$mono_font" "$mono_size" "$hintstyle" "$subpixel"
     
     if [[ "$rendering_only" == false ]]; then
-        update_kitty "$mono_font" "$mono_size"
+        update_kitty "$mono_font" "$kitty_size"
     fi
     
     update_firefox "$subpixel"
@@ -824,7 +827,7 @@ cmd_preset() {
         profile)
             echo -e "${BOLD}Preset: Profile${NC} — Readex Pro + JetBrains Mono Nerd Font"
             cmd_set --ui "Readex Pro" --ui-size 13 \
-                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 12 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 12 --kitty-size 11 \
                     --title "Readex Pro" --title-size 12 \
                     --numbers "Readex Pro" \
                     --reading "Readex Pro" \
@@ -832,17 +835,17 @@ cmd_preset() {
                     --hintstyle hintfull --subpixel rgb "$@"
             ;;
         apple)
-            echo -e "${BOLD}Preset: Apple${NC} — SF Pro + SF Mono"
-            cmd_set --ui "SF Pro" --ui-size 11 \
-                    --mono "SF Mono" --mono-size 13 \
-                    --title "SF Pro Display" --title-size 12 \
-                    --numbers "SF Pro" \
+            echo -e "${BOLD}Preset: Apple${NC} — SF Pro Text + SF Mono"
+            cmd_set --ui "SF Pro Text" --ui-size 10 \
+                    --mono "SF Mono" --mono-size 12 --kitty-size 12 \
+                    --title "SF Pro Text" --title-size 11 \
+                    --numbers "SF Pro Text" \
                     --hintstyle hintfull --subpixel rgb "$@"
             ;;
         roboto-flex)
             echo -e "${BOLD}Preset: Roboto Flex${NC} — Roboto Flex + JetBrains Mono NF"
             cmd_set --ui "Roboto Flex" --ui-size 11 \
-                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 --kitty-size 12 \
                     --title "Roboto Flex" --title-size 12 \
                     --numbers "Roboto Flex" --reading "Roboto Flex" \
                     --hintstyle hintfull --subpixel rgb "$@"
@@ -850,7 +853,7 @@ cmd_preset() {
         google)
             echo -e "${BOLD}Preset: Google${NC} — Google Sans Flex + JetBrains Mono NF"
             cmd_set --ui "Google Sans Flex" --ui-size 11 \
-                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 --kitty-size 12 \
                     --title "Google Sans Flex" --title-size 12 \
                     --numbers "Fira Sans Heavy" \
                     --hintstyle hintfull --subpixel rgb "$@"
@@ -858,7 +861,7 @@ cmd_preset() {
         inter)
             echo -e "${BOLD}Preset: Inter${NC} — Inter + JetBrains Mono NF"
             cmd_set --ui "Inter Variable" --ui-size 11 \
-                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 --kitty-size 12 \
                     --title "Inter Variable" --title-size 12 \
                     --numbers "Inter Variable" \
                     --hintstyle hintfull --subpixel rgb "$@"
@@ -866,7 +869,7 @@ cmd_preset() {
         noto)
             echo -e "${BOLD}Preset: Noto${NC} — Noto Sans + Noto Sans Mono"
             cmd_set --ui "Noto Sans" --ui-size 11 \
-                    --mono "Noto Sans Mono" --mono-size 13 \
+                    --mono "Noto Sans Mono" --mono-size 13 --kitty-size 12 \
                     --title "Noto Sans" --title-size 12 \
                     --numbers "Noto Sans" \
                     --hintstyle hintfull --subpixel rgb "$@"
@@ -878,7 +881,7 @@ cmd_preset() {
             echo ""
             echo -e "${BOLD}Available font presets (full hinting + RGB):${NC}"
             echo -e "  ${CYAN}profile${NC} — This fork: Readex Pro + JetBrains Mono Nerd Font"
-            echo -e "  ${CYAN}apple${NC}   — SF Pro + SF Mono"
+            echo -e "  ${CYAN}apple${NC}   — SF Pro Text + SF Mono (UI 10, mono/Kitty 12, titles 11 pt)"
             echo -e "  ${CYAN}google${NC}  — Google Sans Flex + JetBrains Mono NF"
             echo -e "  ${CYAN}inter${NC}   — Inter Variable + JetBrains Mono NF"
             echo "  roboto-flex — Roboto Flex + JetBrains Mono Nerd Font"
@@ -922,6 +925,7 @@ cmd_help() {
     --ui-size <pt>                 UI font size (default: 11)
     --mono <name>                  Monospace font family
     --mono-size <pt>               Monospace font size (default: 13)
+    --kitty-size <pt>              Kitty size (default: --mono-size)
     --title <name>                 Title/header font (default: same as --ui)
     --title-size <pt>              Title font size (default: 12)
     --numbers <name>               Numbers font (default: same as --ui)
@@ -950,6 +954,10 @@ cmd_help() {
   Quickshell is restarted when running; Hyprland is intentionally not reloaded.
 
   PRESET SIZES
+    Default presets use Kitty one point smaller than before: 12 pt, or 11 pt
+    for profile. Apple uses UI 10, mono/Kitty 12, and titles 11 pt with SF Pro
+    Text for small UI text. --mono-size also sets Kitty unless followed by
+    --kitty-size. Other presets keep their desktop UI/mono/title sizes.
     Add -10pt to any preset name to use the Kitty size captured on 2026-09-04:
     10 pt for UI, monospace, and titles. Families and rendering follow the base
     preset. Explicit size options after the name override these defaults.

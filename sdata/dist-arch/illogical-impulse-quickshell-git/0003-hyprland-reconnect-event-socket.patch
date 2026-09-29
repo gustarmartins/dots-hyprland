@@ -1,0 +1,151 @@
+diff --git a/src/wayland/hyprland/ipc/connection.cpp b/src/wayland/hyprland/ipc/connection.cpp
+index 998bd8e..3b8b564 100644
+--- a/src/wayland/hyprland/ipc/connection.cpp
++++ b/src/wayland/hyprland/ipc/connection.cpp
+@@ -74,6 +74,14 @@ HyprlandIpc::HyprlandIpc() {
+ 
+ 	// clang-format on
+ 
++	// A slow UI frame can overflow Hyprland's bounded event queue. Losing
++	// socket2 must not leave all native models permanently frozen.
++	this->reconnectTimer.setSingleShot(true);
++	QObject::connect(&this->reconnectTimer, &QTimer::timeout, this, [this]() {
++		if (this->eventSocket.state() != QLocalSocket::UnconnectedState) return;
++		this->eventSocket.connectToServer(this->mEventSocketPath, QLocalSocket::ReadOnly);
++	});
++
+ 	this->makeRequest("j/status", [&, this](bool success, QByteArray resp) {
+ 		if (success) {
+ 			this->bUsingLua = [&]() {
+@@ -87,9 +95,6 @@ HyprlandIpc::HyprlandIpc() {
+ 		}
+ 
+ 		this->eventSocket.connectToServer(this->mEventSocketPath, QLocalSocket::ReadOnly);
+-		this->refreshMonitors(true);
+-		this->refreshWorkspaces(true);
+-		this->refreshToplevels();
+ 	});
+ }
+ 
+@@ -105,15 +110,26 @@ void HyprlandIpc::eventSocketError(QLocalSocket::LocalSocketError error) const {
+ }
+ 
+ void HyprlandIpc::eventSocketStateChanged(QLocalSocket::LocalSocketState state) {
+-	if (state == QLocalSocket::ConnectedState) {
++	const bool wasValid = this->valid;
++	this->valid = state == QLocalSocket::ConnectedState;
++	if (this->valid) {
++		this->reconnectTimer.stop();
++		this->reconnectDelay = 250;
+ 		this->eventReader.setDevice(&this->eventSocket);
+ 		qCInfo(logHyprlandIpc) << "Hyprland event socket connected.";
++		// Events missed while disconnected may include destruction and focus.
++		this->refreshMonitors(true);
++		this->refreshWorkspaces(true);
++		this->refreshToplevels(true);
+ 		emit this->connected();
+-	} else if (state == QLocalSocket::UnconnectedState && this->valid) {
+-		qCWarning(logHyprlandIpc) << "Hyprland event socket disconnected.";
++	} else if (state == QLocalSocket::UnconnectedState) {
++		this->eventReader.reset();
++		if (wasValid) qCWarning(logHyprlandIpc) << "Hyprland event socket disconnected; reconnecting.";
++		if (!this->reconnectTimer.isActive()) {
++			this->reconnectTimer.start(this->reconnectDelay);
++			this->reconnectDelay = std::min(this->reconnectDelay * 2, 5000);
++		}
+ 	}
+-
+-	this->valid = state == QLocalSocket::ConnectedState;
+ }
+ 
+ void HyprlandIpc::eventSocketReady() {
+@@ -704,16 +720,19 @@ HyprlandToplevel* HyprlandIpc::findToplevelByAddress(quint64 address, bool creat
+ 	return toplevel;
+ }
+ 
+-void HyprlandIpc::refreshToplevels() {
++void HyprlandIpc::refreshToplevels(bool reconcile) {
+ 	if (this->requestingToplevels) return;
+ 	this->requestingToplevels = true;
+ 
+-	this->makeRequest("j/clients", [this](bool success, const QByteArray& resp) {
++	this->makeRequest("j/clients", [this, reconcile](bool success, const QByteArray& resp) {
+ 		this->requestingToplevels = false;
+ 		if (!success) return;
+ 
+ 		qCDebug(logHyprlandIpc) << "Parsing j/clients response";
+-		auto json = QJsonDocument::fromJson(resp).array();
++		auto document = QJsonDocument::fromJson(resp);
++		if (!document.isArray()) return;
++		auto json = document.array();
++		QVector<quint64> addresses;
+ 
+ 		const auto& mList = this->mToplevels.valueList();
+ 
+@@ -735,7 +754,11 @@ void HyprlandIpc::refreshToplevels() {
+ 			auto exists = toplevel != nullptr;
+ 
+ 			if (!exists) toplevel = new HyprlandToplevel(this);
++			addresses.push_back(address);
++			auto* oldWorkspace = toplevel->bindableWorkspace().value();
+ 			toplevel->updateFromObject(object);
++			if (oldWorkspace && oldWorkspace != toplevel->bindableWorkspace().value())
++				oldWorkspace->removeToplevel(toplevel);
+ 
+ 			if (!exists) {
+ 				qCDebug(logHyprlandIpc) << "New toplevel created with address" << address;
+@@ -745,6 +768,24 @@ void HyprlandIpc::refreshToplevels() {
+ 			auto* workspace = toplevel->bindableWorkspace().value();
+ 			if (workspace) workspace->insertToplevel(toplevel);
+ 		}
++		if (reconcile) {
++			const auto previous = this->mToplevels.valueList();
++			for (auto* toplevel: previous) {
++				if (addresses.contains(toplevel->address())) continue;
++				if (toplevel == this->bActiveToplevel.value()) this->bActiveToplevel = nullptr;
++				if (auto* workspace = toplevel->bindableWorkspace().value())
++					workspace->removeToplevel(toplevel);
++				this->mToplevels.removeObject(toplevel);
++				delete toplevel;
++			}
++			this->makeRequest("j/activewindow", [this](bool ok, const QByteArray& data) {
++				if (!ok) return;
++				auto document = QJsonDocument::fromJson(data);
++				if (!document.isObject()) return;
++				auto address = document.object().value("address").toString().toULongLong(nullptr, 16);
++				this->bActiveToplevel = this->findToplevelByAddress(address, false);
++			});
++		}
+ 	});
+ }
+ 
+diff --git a/src/wayland/hyprland/ipc/connection.hpp b/src/wayland/hyprland/ipc/connection.hpp
+index 717e665..d25bc18 100644
+--- a/src/wayland/hyprland/ipc/connection.hpp
++++ b/src/wayland/hyprland/ipc/connection.hpp
+@@ -10,6 +10,7 @@
+ #include <qproperty.h>
+ #include <qqmlintegration.h>
+ #include <qtmetamacros.h>
++#include <qtimer.h>
+ #include <qtypes.h>
+ 
+ #include "../../../core/model.hpp"
+@@ -109,7 +110,7 @@ public:
+ 	// canCreate avoids making ghost workspaces when the connection races
+ 	void refreshWorkspaces(bool canCreate);
+ 	void refreshMonitors(bool canCreate);
+-	void refreshToplevels();
++	void refreshToplevels(bool reconcile = false);
+ 
+ 	// The last argument may contain commas, so the count is required.
+ 	[[nodiscard]] static QVector<QByteArrayView> parseEventArgs(QByteArrayView event, quint16 count);
+@@ -140,6 +141,8 @@ private:
+ 	static bool compareWorkspaces(HyprlandWorkspace* a, HyprlandWorkspace* b);
+ 
+ 	QLocalSocket eventSocket;
++	QTimer reconnectTimer;
++	int reconnectDelay = 250;
+ 	StreamReader eventReader;
+ 	QString mRequestSocketPath;
+ 	QString mEventSocketPath;
