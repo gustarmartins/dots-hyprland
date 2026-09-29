@@ -45,3 +45,6 @@ hl.window_rule({
 
 -- Cinematic effects layered over the selected animation preset.
 require("custom.cinematic-effects")
+
+-- Preserve floating coordinates when an output is powered off and reconnected.
+require("custom.float-hotplug")
