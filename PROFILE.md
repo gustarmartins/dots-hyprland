@@ -43,6 +43,11 @@ fontctl set --ui "SF Pro" --mono "SF Mono" --mono-size 13
 fontctl fix-rendering
 ```
 
+The [type collection](docs/font-profiles.md) adds 20 curated profiles and an
+[interactive specimen page](docs/font-specimens.html). Try
+`fontctl preset atelier --preview` to inspect a pairing without changing settings.
+Every font profile also has a `-10pt` variant.
+
 System-wide Fontconfig changes request elevation through `pkexec`. Quickshell
 is restarted after an applied change; Hyprland is intentionally left running.
 For an SSH/headless update, use `fontctl preset profile --user-only`.

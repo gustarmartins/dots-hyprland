@@ -51,7 +51,7 @@ die() { log_err "$@"; exit 1; }
 
 check_deps() {
     local missing=()
-    for cmd in jq xmlstarlet gsettings sed; do
+    for cmd in jq xmlstarlet gsettings sed fc-match; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if (( ${#missing[@]} )); then
@@ -681,7 +681,7 @@ cmd_set() {
     local title_font="" title_size="12"
     local numbers_font="" reading_font="" expressive_font=""
     local hintstyle="hintfull" subpixel="rgb" lcdfilter="lcddefault"
-    local dpi="" rendering_only=false user_only=false
+    local dpi="" rendering_only=false user_only=false preview=false
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -701,6 +701,7 @@ cmd_set() {
             --dpi)         dpi="$2"; shift 2 ;;
             --rendering-only) rendering_only=true; shift ;;
             --user-only)   user_only=true; shift ;;
+            --preview)     preview=true; shift ;;
             *) die "Unknown option: $1" ;;
         esac
     done
@@ -763,6 +764,26 @@ cmd_set() {
     echo -e "  Hint:  ${hintstyle}  Subpixel: ${subpixel}  LCD: ${lcdfilter}"
     echo ""
     
+    printf '  Numbers:    %s\n  Reading:    %s\n  Expressive: %s\n' \
+        "$numbers_font" "$reading_font" "$expressive_font"
+    # Explicit families can silently fall back on another machine. Report the
+    # effective match before applying; --preview stops before any desktop writes.
+    local resolved
+    local -A checked_families=()
+    for family in "$ui_font" "$mono_font" "$title_font" "$numbers_font" "$reading_font" "$expressive_font"; do
+        [[ -z "${checked_families[$family]:-}" ]] || continue
+        checked_families[$family]=1
+        resolved=$(fc-match -f '%{family}\n' "$family" 2>/dev/null | head -n1)
+        case ",${resolved,,}," in
+            *",${family,,},"*) ;;
+            *) log_warn "Missing family '$family'; Fontconfig fallback: ${resolved:-unknown}" ;;
+        esac
+    done
+    if [[ "$preview" == true ]]; then
+        log_info "Preview only; no settings changed."
+        return 0
+    fi
+
     # Backup
     create_backup
     echo ""
@@ -805,6 +826,50 @@ cmd_set() {
 }
 
 # ── Preset Command ─────────────────────────────────────────────────────────────
+# Curated collection. Fields: name|mood|ui|mono|title|numbers|reading|expressive|
+# ui-pt|mono-pt|title-pt|kitty-pt. Font names are references, not bundled assets.
+curated_presets() {
+    cat <<'PRESETS'
+atelier|Quiet studio; soft geometry and literary accents|Readex Pro|JetBrainsMono Nerd Font Mono|Noto Serif Display|Readex Pro|Noto Serif|Space Grotesk|11|12|13|11
+swiss|Swiss grid; restrained and precise|Nimbus Sans|Hack|Nimbus Sans|Nimbus Sans|Nimbus Sans|Inter Display|11|12|12|11
+nord|Cool minimalism; clean native desktop|Adwaita Sans|Adwaita Mono|Inter Display|Adwaita Sans|Adwaita Sans|Inter Display|11|12|12|11
+humanist|Warm open shapes for a working day|Fira Sans|Hack|Fira Sans|Fira Sans|Fira Sans|Fira Sans Condensed|11|12|12|11
+redhat|Coherent text, display and code family|Red Hat Text|Red Hat Mono|Red Hat Display|Red Hat Display|Red Hat Text|Red Hat Display|11|12|13|11
+oneplus|Airy mobile polish with narrow code|OnePlus Sans Text|Iosevka Nerd Font Mono|OnePlus Sans Display|OnePlus Sans Display|OnePlus Sans Text|OnePlus Sans Display|11|12|13|11
+orbit|Space-age headings; grounded everyday text|Space Grotesk|JetBrainsMono Nerd Font Mono|Orbitron|Space Grotesk|Readex Pro|Orbitron|11|12|12|11
+rubik|Playful rounded geometry, grown-up proportions|Rubik|RobotoMono Nerd Font Mono|Rubik|Rubik|Rubik|Rubik|11|12|13|11
+orchard|Soft rounded Apple surfaces|SF Pro Rounded|SF Mono|SF Pro Rounded|SF Pro Rounded|SF Pro Text|SF Pro Rounded|11|12|13|11
+compact|Small-screen Apple precision|SF Compact Text|SF Mono|SF Compact Display|SF Compact Text|SF Compact Text|SF Compact Rounded|10|11|12|11
+editorial|Magazine contrast; neutral UI and elegant serifs|Noto Sans|Iosevka Nerd Font Mono|Noto Serif Display|Noto Sans|Noto Serif|Noto Serif Display|11|12|13|11
+paperback|A bookish serif desktop with warm display type|Noto Serif|Noto Sans Mono|URW Bookman|Noto Sans|Noto Serif|URW Bookman|11|12|13|11
+slab|Confident slab-serif accents and familiar UI|Roboto|RobotoMono Nerd Font Mono|Roboto Slab|Roboto|Roboto Slab|Roboto Slab|11|12|13|11
+accessible|Distinct letterforms and generous reading sizes|Atkinson Hyperlegible|AtkynsonMono Nerd Font Mono|Atkinson Hyperlegible|Atkinson Hyperlegible|Atkinson Hyperlegible|Atkinson Hyperlegible|12|13|14|12
+terminal|An all-monospace cockpit; tall and compact|Iosevka|Iosevka Nerd Font Mono|Iosevka|Iosevka|Iosevka|Iosevka|12|12|13|11
+blueprint|Drafting-board precision with geometric headings|Iosevka|JetBrainsMono Nerd Font Mono|Space Grotesk|Iosevka|Fira Sans|Space Grotesk|11|12|13|11
+metropolis|Condensed urban typography for dense panels|Roboto Condensed|RobotoMono Nerd Font Mono|Fira Sans Condensed|Roboto Condensed|Roboto|Fira Sans Condensed|11|12|13|11
+bauhaus|Geometric modernism with a typewriter counterpoint|URW Gothic|Liberation Mono|URW Gothic|URW Gothic|Open Sans|URW Gothic|11|12|13|11
+arcade|Pixel display accents over friendly readable UI|Rubik|Iosevka Nerd Font Mono|Pixelon|Orbitron|Rubik|Pixelon|11|12|15|11
+journal|Open, unhurried UI with newspaper-style headings|Open Sans|Liberation Mono|Noto Serif Display|Open Sans|Noto Serif|Noto Serif Display|11|12|14|11
+PRESETS
+}
+
+apply_curated_preset() {
+    local requested="$1"
+    shift
+    local name mood ui mono title numbers reading expressive ui_pt mono_pt title_pt kitty_pt
+    while IFS='|' read -r name mood ui mono title numbers reading expressive ui_pt mono_pt title_pt kitty_pt; do
+        [[ "$name" == "$requested" ]] || continue
+        printf '\nPreset: %s — %s\n' "$name" "$mood"
+        cmd_set --ui "$ui" --ui-size "$ui_pt" \
+                --mono "$mono" --mono-size "$mono_pt" --kitty-size "$kitty_pt" \
+                --title "$title" --title-size "$title_pt" \
+                --numbers "$numbers" --reading "$reading" --expressive "$expressive" \
+                --hintstyle hintfull --subpixel rgb "$@"
+        return
+    done < <(curated_presets)
+    die "Unknown preset: $requested (run 'fontctl preset list' to see available presets)"
+}
+
 cmd_preset() {
     local name="${1:-}"
     shift || true
@@ -818,7 +883,7 @@ cmd_preset() {
             # Arzopa DDC is unavailable: no verified panel stripe order.
             cmd_set --rendering-only --hintstyle hintfull --subpixel none --lcdfilter lcddefault --dpi 98304 "$@"
             ;;
-        profile-10pt|apple-10pt|google-10pt|inter-10pt|noto-10pt|roboto-flex-10pt)
+        *-10pt)
             # Match the live Kitty size captured on 2026-09-04. Keep this
             # fixed so later terminal zoom does not change these presets.
             cmd_preset "${name%-10pt}" \
@@ -887,14 +952,21 @@ cmd_preset() {
             echo "  roboto-flex — Roboto Flex + JetBrains Mono Nerd Font"
             echo -e "  ${CYAN}noto${NC}    — Noto Sans + Noto Sans Mono"
             echo ""
-            echo -e "${BOLD}10 pt variants (UI, monospace, and titles):${NC}"
-            echo "  profile-10pt, apple-10pt, google-10pt, inter-10pt, noto-10pt, roboto-flex-10pt"
+            echo -e "${BOLD}Curated collection (full hinting + RGB):${NC}"
+            local preset mood ui mono rest
+            while IFS='|' read -r preset mood ui mono rest; do
+                printf '  %-12s %s\n               %s + %s\n' "$preset" "$mood" "$ui" "$mono"
+            done < <(curated_presets)
+            echo ""
+            echo "Add -10pt to any font preset for UI/mono/title/Kitty at 10 pt."
+            echo "Preview without applying: fontctl preset atelier --preview"
+            echo "Override rendering for grayscale: --subpixel none"
             ;;
         "")
             die "Usage: fontctl preset <name|list>"
             ;;
         *)
-            die "Unknown preset: $name (run 'fontctl preset list' to see available presets)"
+            apply_curated_preset "$name" "$@"
             ;;
     esac
 }
@@ -937,6 +1009,7 @@ cmd_help() {
     --dpi <value×1024>             GTK DPI (e.g. 98304 for 96dpi)
     --rendering-only               Only change rendering, keep current fonts
     --user-only                    Skip system Fontconfig and pkexec
+    --preview                      Show families, sizes and fallbacks; write nothing
 
   TARGETS UPDATED
     1.  ~/.config/fontconfig/fonts.conf + selected-family override
@@ -954,6 +1027,7 @@ cmd_help() {
   Quickshell is restarted when running; Hyprland is intentionally not reloaded.
 
   PRESET SIZES
+    The 20 curated profiles use individual sizes; preview before applying.
     Default presets use Kitty one point smaller than before: 12 pt, or 11 pt
     for profile. Apple uses UI 10, mono/Kitty 12, and titles 11 pt with SF Pro
     Text for small UI text. --mono-size also sets Kitty unless followed by
@@ -974,6 +1048,9 @@ cmd_help() {
     fontctl set --ui "SF Pro" --mono "SF Mono" --mono-size 13
     fontctl preset apple
     fontctl preset list
+    fontctl preset atelier --preview
+    fontctl preset editorial-10pt --user-only
+    fontctl preset orbit --subpixel none
     fontctl status
     fontctl fix-rendering
 
