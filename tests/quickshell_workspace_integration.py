@@ -59,7 +59,7 @@ def ctl(*args):
 
 try:
     shell = OUT / 'config/quickshell/ii'
-    shutil.copytree(REPO / 'dots/.config/quickshell/ii', shell)
+    shutil.copytree(Path(os.environ.get('QS_TEST_SHELL_ROOT', str(REPO / 'dots/.config/quickshell/ii'))), shell)
     widget = shell / 'modules/ii/bar/Workspaces.qml'
     widget.write_text(widget.read_text().replace('    id: root\n', '    id: root\n    property alias testModel: wsModel\n', 1))
     settings = OUT / 'config/illogical-impulse/config.json'
@@ -96,6 +96,7 @@ ShellRoot {
    implicitHeight: root.vertical ? 240 : 48
    color: "#202028"
    property alias widget: spaces
+   Bar.BarContent { x: 160; width: 1100; height: 48 }
    Bar.Workspaces { id: spaces; width: implicitWidth; height: implicitHeight; vertical: root.vertical }
    Component.onCompleted: root.panels.push(panel)
   }
@@ -185,7 +186,7 @@ ShellRoot {
             y = monitor['y'] - top + int(label['y'])
             pixels = screenshot.crop((x, y, x + int(label['width']), y + int(label['height'])))
             contrast = sum(max(abs(c - b) for c, b in zip(pixel, (32, 32, 40))) > 16
-                           for pixel in pixels.getdata())
+                           for pixel in (pixels.getpixel((x, y)) for y in range(pixels.height) for x in range(pixels.width)))
             assert contrast >= 3, ('Workspace label is not painted', panel['screen'], label)
     for quote in ['"', "'"]:
 
@@ -195,10 +196,14 @@ ShellRoot {
     assert r['id'] == 'arch' and r['icon'] == 'arch-symbolic', r
     for panel in state()['panels']:
         assert {'8', '9', '10'} <= {label['text'] for label in panel['labels'] if label['visible']}, panel
+    widget.write_text(widget.read_text() + "\n")
+    until(lambda: (OUT / 'shell.log').read_text().count('Configuration Loaded') >= 2)
+    until(lambda: state()['ready'] and len(state()['panels']) == 2)
     assert qs.poll() is None
     shell_log = (OUT / 'shell.log').read_text()
     errors = [line for line in shell_log.splitlines() if any(x in line for x in ['TypeError', 'ReferenceError', 'is not a type', 'Cannot assign', 'Binding loop', 'Failed to load configuration'])]
     assert not errors, errors
+    assert 'Reloading configuration' in shell_log, 'Hot reload was not exercised'
     (OUT / 'final.json').write_text(json.dumps(state(), indent=2))
     print('PASS: two monitors, populated/unfocused and empty workspaces, group selection, special toggle, live count changes, both orientations, distro parsing. Artifacts:', OUT, flush=True)
 finally:

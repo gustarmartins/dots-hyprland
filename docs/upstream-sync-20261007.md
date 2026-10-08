@@ -31,7 +31,9 @@ Validation:
 
 - Private two-output KWin/Hyprland test: real workspace widgets load; populated
   and empty workspaces, monitor focus, workspace groups, special workspaces,
-  count changes, both orientations, and distro parsing are exercised.
+  count changes, both orientations, distro parsing, full BarContent loading,
+  and a completed hot reload are exercised. Screenshots verify inactive labels
+  have visible pixels, in addition to checking their QML state.
 - Private Settings UI: browsing, persisted controls, validation, tile editing,
   font preview/application, unrelated value preservation, and compact layout.
 - 51 workspace placement assertions, 10 fullscreen assertions, four workspace
@@ -47,4 +49,10 @@ dbus-run-session -- python3 tests/quickshell_workspace_integration.py
 
 The test requires Quickshell, KWin Wayland, Hyprland with Lua configuration,
 Kitty, grim, and Python Pillow. It uses a disposable home, runtime directory, and D-Bus session,
-then terminates only its own processes. Artifact paths are printed on completion.
+then terminates only its own processes. Set `QS_TEST_SHELL_ROOT` to test a
+copy of an existing shell tree with the same isolated runtime. Artifact paths are printed on completion.
+
+Live delivery used a one-time Quickshell restart to clear types cached by the
+previous workspace implementation. Subsequent reloads are covered by the test.
+The foreground window, saved settings, and PipeWire/WirePlumber processes were
+preserved.
