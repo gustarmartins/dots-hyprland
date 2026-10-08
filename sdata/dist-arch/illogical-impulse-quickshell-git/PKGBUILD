@@ -1,4 +1,4 @@
-_commit='c6a516096dd84d5255b409482eb4bf740b952f88'
+_commit='5d5d49873fe8cf1f99ddfd5006ceb2057c5c9b13'
 # Useful links:
 # https://git.outfoxxed.me/quickshell/quickshell/commits/branch/master
 # https://aur.archlinux.org/packages/quickshell-git
@@ -7,8 +7,8 @@ groups=(illogical-impulse)
 _prefix='illogical-impulse'
 _pkgname=quickshell
 pkgname="$_prefix-$_pkgname-git"
-pkgver=0.3.1.r14.gc6a5160
-pkgrel=3
+pkgver=0.3.1.r19.g5d5d498
+pkgrel=1
 pkgdesc="$_pkgname-git pinned commit and extra deps for $_prefix"
 arch=(x86_64 aarch64)
 url='https://git.outfoxxed.me/quickshell/quickshell'
@@ -99,7 +99,7 @@ build() {
   cmake -GNinja -S "$PWD" -B "$qs_build_dir" \
     -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
     -DCMAKE_INSTALL_PREFIX=/usr \
-    -DDISTRIBUTOR="Mekki c6a5160 + PipeWire lifetime and Hyprland reconnect fixes" \
+    -DDISTRIBUTOR="Mekki 5d5d498 + PipeWire lifetime and Hyprland reconnect fixes" \
     -DBUILD_TESTING=ON \
     -DINSTALL_QML_PREFIX=lib/qt6/qml
 

@@ -13,11 +13,17 @@ QtObject {
         Hyprland.workspaces.values.some(ws => ws && ws.id === root.getWorkspaceIdAt(index)))
     readonly property var biggestWindow: Array.from({length: shownCount}, (_, index) =>
         HyprlandData.biggestWindowForWorkspace(root.getWorkspaceIdAt(index)))
+    // Each bar must judge its own active workspace, independent of keyboard focus.
+    readonly property bool currentWorkspaceNotFake: !!biggestWindow[(activeWorkspace - 1) % shownCount]
+    readonly property int fakeWorkspace: currentWorkspaceNotFake ? -9999 : activeWorkspace
     readonly property var specialWorkspace: HyprlandData.monitors.find(mon => mon.id === root.monitor?.id)?.specialWorkspace
     readonly property string specialWorkspaceName: specialWorkspace?.name?.replace(/^special:/, "") ?? ""
     readonly property bool specialWorkspaceActive: !!specialWorkspace?.id && specialWorkspaceName !== ""
 
-    function getWorkspaceIdAt(index) {
+    function getWorkspaceId(group, index) {
         return group * shownCount + index + 1;
+    }
+    function getWorkspaceIdAt(index) {
+        return getWorkspaceId(group, index);
     }
 }

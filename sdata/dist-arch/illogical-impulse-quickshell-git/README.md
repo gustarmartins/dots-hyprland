@@ -1,7 +1,7 @@
 # Pinned Mekki Quickshell package
 
-Native engine pinned to upstream `c6a516096dd84d5255b409482eb4bf740b952f88`
-(2026-09-15; 0.3.1 plus 14 fixes), retaining illogical-impulse dependencies.
+Native engine pinned to upstream `5d5d49873fe8cf1f99ddfd5006ceb2057c5c9b13`
+(0.3.1 plus 19 commits), retaining illogical-impulse dependencies.
 This package does not replace or import the user's desktop QML configuration.
 
 Local patches:
@@ -20,7 +20,7 @@ The build rejects stale or unpatched trees when the maintenance helper tries
 `--noextract`, allowing its normal fresh-source fallback to adopt the new pin.
 
 `makepkg` builds with two jobs by default (override
-`CMAKE_BUILD_PARALLEL_LEVEL`) and runs all nine upstream test suites. Debug
+`CMAKE_BUILD_PARALLEL_LEVEL`) and runs all nine upstream test suites.
 The private socket recovery regression also runs in `check()`, without touching
 the desktop compositor. It covers initial connection failure, disconnects,
 missed changes, partial events and repeated recovery. Run it separately with:
