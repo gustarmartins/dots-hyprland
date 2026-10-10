@@ -15,24 +15,24 @@ QuickToggleModel {
 
     icon: memoryState === "ram-plus" ? "add_to_drive" : "memory"
     statusText: memoryState === "ram-plus"
-        ? "Max Speed · disk 4 GiB"
-        : "Max Speed · disk off"
+        ? "Disk swap · 4 GiB"
+        : "Disk swap · off"
     toggled: memoryState === "ram-plus"
     altActionOnRightClick: true
 
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-mode.sh\" report"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-mode.sh report"])
     }
 
     altAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-mode.sh\" toggle"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-mode.sh toggle"])
         refreshDelay.restart()
     }
 
     Process {
         id: fetchActiveState
         running: true
-        command: ["bash", "-c", "exec \"$HOME/.local/bin/memory-mode.sh\" get_state"]
+        command: ["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-mode.sh get_state"]
         stdout: StdioCollector {
             onStreamFinished: {
                 const s = text.trim()
@@ -57,5 +57,5 @@ QuickToggleModel {
         onTriggered: fetchActiveState.running = true
     }
 
-    tooltipText: Translation.tr("Turbo VM. L: show info. R: toggle 4G low-priority NVMe.")
+    tooltipText: Translation.tr("Left: memory information. Right: toggle 4 GiB of low-priority disk swap.")
 }

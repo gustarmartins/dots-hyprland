@@ -10,7 +10,7 @@ QuickToggleModel {
     hasStatusText: false
     toggled: false
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" drop-caches"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh drop-caches"])
     }
     tooltipText: Translation.tr("Drop clean page cache, dentries, and inodes (vm.drop_caches=3).")
 }

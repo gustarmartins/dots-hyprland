@@ -24,19 +24,19 @@ QuickToggleModel {
     toggled: algoState.indexOf("->") >= 0 || liveAlgo !== "zstd"
 
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/zram-algo-mode.sh\" next"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec zram-algo-mode.sh next"])
         refreshDelay.restart()
     }
 
     altAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/zram-algo-mode.sh\" live"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec zram-algo-mode.sh live"])
         refreshDelay.restart()
     }
 
     Process {
         id: fetchActiveState
         running: true
-        command: ["bash", "-c", "exec \"$HOME/.local/bin/zram-algo-mode.sh\" status"]
+        command: ["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec zram-algo-mode.sh status"]
         stdout: StdioCollector {
             onStreamFinished: {
                 const s = text.trim()
@@ -59,5 +59,5 @@ QuickToggleModel {
         onTriggered: fetchActiveState.running = true
     }
 
-    tooltipText: Translation.tr("Left: stage next primary. Right: rebuild now; warnings never block the requested action. Status includes verified secondary levels.")
+    tooltipText: Translation.tr("Left: stage next primary. Right: rebuild ZRAM now after headroom checks. Status includes verified secondary levels.")
 }

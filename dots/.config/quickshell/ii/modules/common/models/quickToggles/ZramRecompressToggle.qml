@@ -16,18 +16,18 @@ QuickToggleModel {
     altActionOnRightClick: true
 
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" recompress-run"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh recompress-run"])
     }
 
     altAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" recompress-cycle"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh recompress-cycle"])
         refreshDelay.restart()
     }
 
     Process {
         id: fetchMode
         running: true
-        command: ["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" recompress-status"]
+        command: ["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh recompress-status"]
         stdout: StdioCollector {
             onStreamFinished: {
                 const s = text.trim()
@@ -43,5 +43,5 @@ QuickToggleModel {
         onTriggered: fetchMode.running = true
     }
 
-    tooltipText: Translation.tr("Left: run selected verified tier. Right: choose ZSTD 3 → 9 → 15.")
+    tooltipText: Translation.tr("Left: recompress eligible idle pages at the selected tier. Right: choose ZSTD 3 → 9 → 15.")
 }

@@ -16,19 +16,19 @@ QuickToggleModel {
     altActionOnRightClick: true
 
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" writeback-cold"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh writeback-cold"])
         refreshDelay.restart()
     }
 
     altAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" writeback-all"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh writeback-all"])
         refreshDelay.restart()
     }
 
     Process {
         id: fetchBudget
         running: true
-        command: ["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" writeback-status"]
+        command: ["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh writeback-status"]
         stdout: StdioCollector {
             onStreamFinished: {
                 const s = text.trim()
@@ -51,5 +51,5 @@ QuickToggleModel {
         onTriggered: fetchBudget.running = true
     }
 
-    tooltipText: Translation.tr("Left: guarded 24h-idle pass. Right: emergency writeback; warning is shown, action proceeds.")
+    tooltipText: Translation.tr("Left: guarded writeback using the configured idle age and budget. Right: emergency writeback; warning is shown, action proceeds.")
 }

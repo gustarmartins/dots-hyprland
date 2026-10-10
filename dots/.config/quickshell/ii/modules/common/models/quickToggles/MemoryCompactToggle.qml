@@ -11,10 +11,10 @@ QuickToggleModel {
     toggled: false
     altActionOnRightClick: true
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" compact-memory"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh compact-memory"])
     }
     altAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" compact-zram"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh compact-zram"])
     }
     tooltipText: Translation.tr("Left: global physical compaction. Right: compact zram's allocator.")
 }

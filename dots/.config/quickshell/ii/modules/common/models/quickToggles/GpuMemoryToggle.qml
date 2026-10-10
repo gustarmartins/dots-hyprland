@@ -16,17 +16,17 @@ QuickToggleModel {
     altActionOnRightClick: true
 
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" gpu-report"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh gpu-report"])
     }
 
     altAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" gpu-evict"])
+        Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh gpu-evict"])
     }
 
     Process {
         id: fetchGpu
         running: true
-        command: ["bash", "-c", "exec \"$HOME/.local/bin/memory-tools.sh\" gpu-status"]
+        command: ["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh gpu-status"]
         stdout: StdioCollector {
             onStreamFinished: {
                 const s = text.trim()
