@@ -34,6 +34,7 @@ ShellRoot {
         Wallpapers.load()
         WallpaperDiscovery.rotationOwner = true
         Updates.load()
+        CryoDSession.start()
     }
 
 

@@ -2,6 +2,9 @@
 // Kept in sync by tests/settings_catalog.py.
 .pragma library
 var paths = [
+  "cryod.enabled",
+  "cryod.protectForeground",
+  "cryod.protectVisible",
   "panelFamily",
   "policies.ai",
   "policies.weeb",

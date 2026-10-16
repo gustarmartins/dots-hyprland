@@ -98,6 +98,7 @@ var pages = [
     "icon": "settings",
     "description": "Interaction tuning, privacy rules and alternate shell options."
   },
+  {"id":"cryod", "title":"CryoD", "icon":"memory", "description":"Foreground and visible-window protection for the native memory service."},
   {
     "id": "about",
     "title": "About",
@@ -401,6 +402,9 @@ var retired = {
   "sidebar.booru.defaultProvider": "The provider is selected in the sidebar and persisted separately."
 };
 var managed = {
+  "cryod.enabled": "CryoD desktop integration",
+  "cryod.protectForeground": "CryoD focused workload protection",
+  "cryod.protectVisible": "CryoD visible window protection",
   "background.wallpaperPath": "Wallpaper chooser",
   "background.thumbnailPath": "Generated wallpaper thumbnail"
 };
@@ -427,6 +431,7 @@ function sections(pageId, query) {
 }
 
 var destinations = [
+    {page:"cryod", title:"CryoD desktop integration", description:"memory foreground focus visible windows monitor workload protection session bridge master off"},
     {page:"effects", title:"Desktop effects", description:"Saved looks, blur, glow, borders, opacity, transparency, springs, animation, workspace motion and presets"},
     {page:"fonts", title:"Desktop font profiles", description:"fontctl presets, typefaces, font preview, compact 10 pt, system fonts, Kitty fonts"},
     {page:"audio", title:"EasyEffects presets", description:"Equalizer, music, audio processing, output preset and EasyEffects"},

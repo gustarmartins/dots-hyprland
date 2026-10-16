@@ -29,8 +29,8 @@ ScrollView {
             Layout.fillWidth: true
             Layout.leftMargin: 20
             Layout.rightMargin: 20
-            active: !root.query.trim() && ["fonts", "wallpaper", "audio"].includes(root.pageId)
-            sourceComponent: root.pageId === "fonts" ? fontPage : root.pageId === "audio" ? audioPage : wallpaperPage
+            active: !root.query.trim() && ["fonts", "wallpaper", "audio", "cryod"].includes(root.pageId)
+            sourceComponent: root.pageId === "cryod" ? cryodPage : root.pageId === "fonts" ? fontPage : root.pageId === "audio" ? audioPage : wallpaperPage
         }
         Repeater {
             model: root.query.trim() ? Catalog.destinations.filter(e => Catalog.matches(e, root.query)) : []
@@ -74,6 +74,7 @@ ScrollView {
         Item { Layout.preferredHeight: 24 }
     }
     Timer { id: colorTimer; interval: 500; onTriggered: { Config.flushPendingWrites(); Quickshell.execDetached([Directories.wallpaperSwitchScriptPath, "--noswitch"]); } }
+    Component { id: cryodPage; CryoDSettings {} }
     Component { id: audioPage; AudioActions {} }
     Component { id: fontPage; FontProfiles {} }
     Component { id: wallpaperPage; WallpaperActions {} }
