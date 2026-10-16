@@ -9,39 +9,15 @@ QuickToggleModel {
     id: root
     name: Translation.tr("Focus Mode")
 
-    property bool active: false
+    readonly property bool active: FocusMode.enabled
 
     icon: root.active ? "center_focus_strong" : "center_focus_weak"
     toggled: root.active
-    statusText: root.active ? "Focused" : "Off"
+    statusText: FocusMode.statusText
 
     mainAction: () => {
-        Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/focus-mode.sh\" toggle"])
-        refreshDelay.restart()
+        FocusMode.setEnabled(!FocusMode.enabled)
     }
 
-    Process {
-        id: fetchState
-        running: true
-        command: ["bash", "-c", "exec \"$HOME/.local/bin/focus-mode.sh\" get_state"]
-        stdout: StdioCollector {
-            onStreamFinished: root.active = (text.trim() === "on")
-        }
-    }
-
-    Timer {
-        id: refreshDelay
-        interval: 700
-        repeat: false
-        onTriggered: fetchState.running = true
-    }
-
-    Timer {
-        interval: 3000
-        running: true
-        repeat: true
-        onTriggered: fetchState.running = true
-    }
-
-    tooltipText: Translation.tr("Keeps the focused app hot: CPU/GPU boost, RAM and OOM protection")
+    tooltipText: FocusMode.error || Translation.tr("Prioritizes an isolated focused app through CryoD. GPU and latency boost are separate controls in CryoD settings.")
 }

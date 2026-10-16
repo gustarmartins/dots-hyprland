@@ -98,7 +98,7 @@ var pages = [
     "icon": "settings",
     "description": "Interaction tuning, privacy rules and alternate shell options."
   },
-  {"id":"cryod", "title":"CryoD", "icon":"memory", "description":"Foreground and visible-window protection for the native memory service."},
+  {"id":"cryod", "title":"CryoD", "icon":"memory", "description":"Foreground protection, Focus Mode CPU priority and optional GPU/latency boost."},
   {
     "id": "about",
     "title": "About",
@@ -431,7 +431,7 @@ function sections(pageId, query) {
 }
 
 var destinations = [
-    {page:"cryod", title:"CryoD desktop integration", description:"memory foreground focus visible windows monitor workload protection session bridge master off"},
+    {page:"cryod", title:"CryoD desktop integration", description:"memory foreground focus mode cpu priority gpu latency boost visible windows monitor workload protection session bridge master off"},
     {page:"effects", title:"Desktop effects", description:"Saved looks, blur, glow, borders, opacity, transparency, springs, animation, workspace motion and presets"},
     {page:"fonts", title:"Desktop font profiles", description:"fontctl presets, typefaces, font preview, compact 10 pt, system fonts, Kitty fonts"},
     {page:"audio", title:"EasyEffects presets", description:"Equalizer, music, audio processing, output preset and EasyEffects"},

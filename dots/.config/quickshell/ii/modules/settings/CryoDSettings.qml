@@ -56,11 +56,37 @@ ColumnLayout {
             Layout.fillWidth: true; wrapMode: Text.WordWrap
             text: "Protects verified window processes and their descendants from ordinary termination. Shared terminal jobs retain their explicit policies. Emergency runaway protection follows its separate policy. No window titles or keyboard input are recorded."
         }
+        RowLayout {
+            Layout.fillWidth: true
+            StyledText { Layout.fillWidth: true; text: "Focus Mode CPU boost" }
+            SettingsSwitch {
+                checked: FocusMode.enabled
+                enabled: !FocusMode.busy && (FocusMode.available || FocusMode.enabled)
+                onToggled: FocusMode.setEnabled(checked)
+            }
+        }
+        StyledText {
+            Layout.fillWidth: true; wrapMode: Text.WordWrap
+            text: FocusMode.statusText + ". Prioritizes an isolated app group while focused. Shared terminal jobs and build quotas keep their own settings."
+        }
+    }
+    RowLayout {
+        Layout.fillWidth: true
+        StyledText { Layout.fillWidth: true; text: "GPU and latency boost" }
+        SettingsSwitch {
+            checked: FocusMode.hardwareEnabled
+            enabled: !FocusMode.busy
+            onToggled: FocusMode.setHardwareEnabled(checked)
+        }
+    }
+    StyledText {
+        Layout.fillWidth: true; wrapMode: Text.WordWrap
+        text: "Optional manual hardware boost. Uses more power and restores its previous settings when turned off."
     }
     StyledText {
         Layout.fillWidth: true; wrapMode: Text.WordWrap
         visible: text.length > 0
-        text: CryoDSession.error || CryoDSession.fallbackError
+        text: FocusMode.error || CryoDSession.error || CryoDSession.fallbackError
         color: Appearance.m3colors.m3error
     }
 }
