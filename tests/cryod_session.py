@@ -42,6 +42,11 @@ Singleton {
 }
 ''')
     window = subprocess.Popen(['/usr/bin/sleep', '60'])
+    service_calls = root/'service-calls.jsonl'
+    service_stub = root/'service-stub'
+    service_stub.write_text('#!/usr/bin/python3\nimport json,sys\nfrom pathlib import Path\n'
+        +f'with Path({str(service_calls)!r}).open("a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n')
+    service_stub.chmod(0o755)
     daemon = subprocess.Popen([str(native), '--observe', '--config', str(source/'native.conf'),
         '--guard', str(source/'desktop_guard.py'), '--runtime-dir', str(root/'native-run'),
         '--state-dir', str(root/'native-state')], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -61,6 +66,7 @@ ShellRoot {
  Component.onCompleted: {
   CryoDSession.runtimePath = RUNTIME;
   CryoDSession.bridgeExecutable = BRIDGE;
+  CryoDSession.serviceExecutable = SERVICE;
   HyprlandData.windowList = [{pid: PID, address:"0x1", workspace:{id:1}, monitor:0, mapped:true, hidden:false}];
   HyprlandData.monitors = [{id:0, activeWorkspace:{id:1}}];
   CryoDSession.start();
@@ -87,7 +93,7 @@ ShellRoot {
   }
  }
 }
-'''.replace('RUNTIME', json.dumps(str(root/'native-run'))).replace('BRIDGE', json.dumps(str(native.with_name('cryod-session-bridge')))).replace('PID', str(window.pid)))
+'''.replace('RUNTIME', json.dumps(str(root/'native-run'))).replace('BRIDGE', json.dumps(str(native.with_name('cryod-session-bridge')))).replace('SERVICE', json.dumps(str(service_stub))).replace('PID', str(window.pid)))
         env = dict(os.environ, HOME=str(root/'home'), XDG_CONFIG_HOME=str(root/'home/config'),
                    XDG_CACHE_HOME=str(root/'cache'), XDG_RUNTIME_DIR=str(root/'runtime'),
                    QT_QPA_PLATFORM='offscreen', QT_QUICK_BACKEND='software',
@@ -105,6 +111,8 @@ ShellRoot {
         while receipt['producer_pid'] and time.monotonic()<deadline:
             time.sleep(.02);receipt=json.loads((root/'native-run/focus.json').read_text())
         assert receipt['producer_pid'] == 0, receipt
+        calls=[json.loads(line) for line in service_calls.read_text().splitlines()]
+        assert calls == [['--user', action, 'cryod-session-fallback.service'] for action in ['stop','start','stop']], calls
         print('PASS: QML events use one persistent native bridge; master Off acknowledged and bridge exited')
     finally:
         daemon.terminate();daemon.wait(timeout=15)

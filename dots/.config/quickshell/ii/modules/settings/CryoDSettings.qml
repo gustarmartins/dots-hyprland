@@ -60,7 +60,7 @@ ColumnLayout {
     StyledText {
         Layout.fillWidth: true; wrapMode: Text.WordWrap
         visible: text.length > 0
-        text: CryoDSession.error
+        text: CryoDSession.error || CryoDSession.fallbackError
         color: Appearance.m3colors.m3error
     }
 }

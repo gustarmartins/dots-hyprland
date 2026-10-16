@@ -15,6 +15,11 @@ Singleton {
     property string error: ""
     property string runtimePath: "/run/cryod"
     property string bridgeExecutable: "/usr/local/libexec/cryod-desktop/cryod-session-bridge"
+    property string serviceExecutable: "/usr/bin/systemctl"
+    property bool manageFallback: true
+    property var fallbackApplied: null
+    property bool fallbackRequested: false
+    property string fallbackError: ""
     property double wallNow: Date.now()
     readonly property bool enabled: Config.ready && Config.options.cryod.enabled
     readonly property bool wanted: enabled && (Config.options.cryod.protectForeground || Config.options.cryod.protectVisible)
@@ -25,6 +30,7 @@ Singleton {
     function start() { owner = true; sync(); }
     function sync() {
         if (!owner || !Config.ready) return;
+        if (manageFallback && fallbackApplied !== wanted) fallbackControlTimer.restart();
         if (wanted) {
             offAttempted = false;
             if (!bridge.running) bridge.running = true;
@@ -46,11 +52,11 @@ Singleton {
         const windows = HyprlandData.windowList.map(win => {
             const monitor = HyprlandData.monitors.find(mon => mon.id === win.monitor);
             const workspace = win.workspace?.id ?? 0;
-            return {pid: win.pid ?? 0, address: win.address,
+            return {pid: win.pid ?? 0, address: win.address, app_id: win.class ?? "",
                 monitor: win.monitor, workspace: workspace,
                 focused: active.length > 0 && normalize(active) === normalize(win.address),
                 visible: win.mapped !== false && win.hidden !== true &&
-                    (monitor?.activeWorkspace?.id === workspace || monitor?.specialWorkspace?.id === workspace),
+                    (win.pinned === true || monitor?.activeWorkspace?.id === workspace || monitor?.specialWorkspace?.id === workspace),
                 fullscreen: (win.fullscreen ?? 0) > 0 || (win.fullscreenClient ?? 0) > 0};
         });
         return {enabled:true, session:Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE"),
@@ -88,6 +94,25 @@ Singleton {
         function onWorkspacesChanged() { root.publish(); }
     }
     Process {
+        id: fallbackControl
+        command: [root.serviceExecutable, "--user", root.fallbackRequested ? "start" : "stop", "cryod-session-fallback.service"]
+        onExited: (code, status) => {
+            root.fallbackError = code === 0 ? "" : "Standalone fallback is unavailable.";
+            if (code === 0) root.fallbackApplied = root.fallbackRequested;
+            if (code === 0 && root.fallbackApplied !== root.wanted) fallbackControlTimer.restart();
+        }
+    }
+    Timer {
+        id: fallbackControlTimer
+        interval: 150
+        onTriggered: {
+            if (!root.owner || !root.manageFallback || !Config.ready) return;
+            if (fallbackControl.running) { restart(); return; }
+            root.fallbackRequested = root.wanted;
+            fallbackControl.running = true;
+        }
+    }
+    Process {
         id: bridge
         command: [root.bridgeExecutable, "--socket", root.runtimePath + "/session.sock"]
         stdinEnabled: true
@@ -96,6 +121,7 @@ Singleton {
             onRead: data => {
                 try {
                     const reply = JSON.parse(data);
+                    if (reply.resync === true) { root.publish(true); return; }
                     root.receipt = reply;
                     root.wallNow = Date.now();
                     root.error = reply.accepted ? "" : "Waiting for verified window information.";
@@ -135,7 +161,8 @@ Singleton {
         target: "cryodSession"
         function status(): string {
             return JSON.stringify({enabled:root.enabled, wanted:root.wanted,
-                bridgeRunning:bridge.running, fresh:root.fresh, receipt:root.receipt, error:root.error});
+                bridgeRunning:bridge.running, fresh:root.fresh, receipt:root.receipt, error:root.error,
+                fallbackError:root.fallbackError});
         }
     }
 }
