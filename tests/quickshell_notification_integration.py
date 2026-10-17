@@ -67,7 +67,7 @@ try:
  time.sleep(.55);pump()
  check("early dismissal destroys wrapper and timer",not state()["list"] and state()["discarded"]==3)
  check("dismiss reports exactly one close",sum(x[0]==n for x in closed)==1)
- n=notify("hover",220);r=record(n);call("watch");call("hover",r["id"]);time.sleep(.3)
+ n=notify("hover",1200);r=record(n);call("watch");call("hover",r["id"]);time.sleep(1.3)
  check("hover stops and destroys timer while retaining popup",record(n)["popup"] and not record(n)["timer"] and state()["timersLive"]==0)
  call("leave",r["id"]);check("hover leave times out popup",not record(n)["popup"])
  call("dismiss",r["id"]);until(lambda:state()["watchedLive"]==0)

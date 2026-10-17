@@ -29,8 +29,8 @@ ScrollView {
             Layout.fillWidth: true
             Layout.leftMargin: 20
             Layout.rightMargin: 20
-            active: !root.query.trim() && ["fonts", "wallpaper", "audio", "cryod"].includes(root.pageId)
-            sourceComponent: root.pageId === "cryod" ? cryodPage : root.pageId === "fonts" ? fontPage : root.pageId === "audio" ? audioPage : wallpaperPage
+            active: !root.query.trim() && ["fonts", "wallpaper", "audio", "mail", "memory", "company", "cryod"].includes(root.pageId)
+            sourceComponent: root.pageId === "cryod" ? cryodPage : root.pageId === "company" ? companyPage : root.pageId === "memory" ? memoryPage : root.pageId === "mail" ? mailPage : root.pageId === "fonts" ? fontPage : root.pageId === "audio" ? audioPage : wallpaperPage
         }
         Repeater {
             model: root.query.trim() ? Catalog.destinations.filter(e => Catalog.matches(e, root.query)) : []
@@ -44,7 +44,7 @@ ScrollView {
             }
         }
         Repeater {
-            model: root.groups
+            model: extra.item?.libraryOpen ? [] : root.groups
             delegate: ColumnLayout {
                 required property var modelData
                 Layout.fillWidth: true
@@ -70,11 +70,14 @@ ScrollView {
                 }
             }
         }
-        StyledText { Layout.fillWidth: true; Layout.margins: 24; visible: root.groups.length === 0; text: "No settings match your search. Try a feature, application, or setting name."; wrapMode: Text.WordWrap }
+        StyledText { Layout.fillWidth: true; Layout.margins: 24; visible: root.groups.length === 0 && !extra.active; text: "No settings match your search. Try a feature, application, or setting name."; wrapMode: Text.WordWrap }
         Item { Layout.preferredHeight: 24 }
     }
     Timer { id: colorTimer; interval: 500; onTriggered: { Config.flushPendingWrites(); Quickshell.execDetached([Directories.wallpaperSwitchScriptPath, "--noswitch"]); } }
     Component { id: cryodPage; CryoDSettings {} }
+    Component { id: companyPage; CompanyTools {} }
+    Component { id: memoryPage; MemoryLocks {} }
+    Component { id: mailPage; MailSettings {} }
     Component { id: audioPage; AudioActions {} }
     Component { id: fontPage; FontProfiles {} }
     Component { id: wallpaperPage; WallpaperActions {} }

@@ -4,51 +4,42 @@ import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
 
-Rectangle {
+ColumnLayout {
     id: root
-    color: Appearance.m3colors.m3surfaceContainerHigh
-    radius: 24
-    implicitHeight: content.implicitHeight + 24
-
+    spacing: 5
     function label(name) {
-        const labels = {"astra-music": "Music", "astra-rock": "Rock",
-                        "astra-osu": "osu!", "astra-mk8dx": "MK8DX"}
-        return labels[name] ?? name.replace(/^astra-/, "")
+        const labels = {"astra-music": "Music", "astra-rock": "Rock", "astra-osu": "osu!", "astra-mk8dx": "MK8DX"};
+        return labels[name] ?? name.replace(/^astra-/, "");
     }
-
-    ColumnLayout {
-        id: content
-        anchors.fill: parent
-        anchors.margins: 12
-        spacing: 8
-
-        RowLayout {
-            Layout.fillWidth: true
-            StyledText {
-                Layout.fillWidth: true
-                text: "EasyEffects"
-                font.pixelSize: Appearance.font.pixelSize.small
-                color: Appearance.m3colors.m3onSurface
-            }
-            StyledText {
-                text: EasyEffects.busy ? "Applying…" : !EasyEffects.active ? "Off"
-                    : EasyEffects.bypassed ? "Bypassed" : root.label(EasyEffects.preset)
-                font.pixelSize: Appearance.font.pixelSize.smaller
-                color: Appearance.m3colors.m3onSurfaceVariant
-            }
-        }
-        ConfigSelectionArray {
-            enabled: !EasyEffects.busy
-            currentValue: EasyEffects.active ? EasyEffects.preset : ""
-            options: EasyEffects.presets.map(name => ({displayName: root.label(name), value: name}))
-            onSelected: value => EasyEffects.selectPreset(value)
-        }
-        StyledText {
-            visible: EasyEffects.error.length > 0
-            Layout.fillWidth: true
-            text: EasyEffects.error
-            wrapMode: Text.WordWrap
-            color: Appearance.m3colors.m3error
-        }
+    StyledText {
+        text: EasyEffects.busy ? "EasyEffects · Applying…" : "EasyEffects"
+        font.pixelSize: 11
+        color: Appearance.m3colors.m3onSurfaceVariant
+    }
+    StyledComboBox {
+        id: picker
+        objectName: "controlPresetPicker"
+        Layout.fillWidth: true
+        implicitHeight: 38
+        buttonRadius: 12
+        buttonIcon: "graphic_eq"
+        colBackground: Appearance.m3colors.m3surfaceContainerHigh
+        enabled: !EasyEffects.busy
+        model: EasyEffects.presets.map(name => ({label:root.label(name), value:name}))
+        textRole: "label"
+        valueRole: "value"
+        currentIndex: EasyEffects.presets.indexOf(EasyEffects.preset)
+        displayText: currentIndex >= 0 ? root.label(EasyEffects.preset) : !EasyEffects.active ? "Off · Select a preset" : "Select a preset"
+        onActivated: EasyEffects.selectPreset(currentValue)
+        Accessible.name: "EasyEffects preset"
+        StyledToolTip { text: EasyEffects.error || EasyEffects.preset }
+    }
+    StyledText {
+        visible: EasyEffects.error.length > 0
+        Layout.fillWidth: true
+        text: EasyEffects.error
+        font.pixelSize: 11
+        wrapMode: Text.WordWrap
+        color: Appearance.m3colors.m3error
     }
 }

@@ -108,6 +108,21 @@ Singleton {
             .replace(/&(?!(?:[a-zA-Z][a-zA-Z0-9]+|#[0-9]+|#x[0-9a-fA-F]+);)/g, '&amp;')
             .replace(/<img/gi, '\n\n<img');
         
+        // Link plain URLs without nesting existing notification anchors or
+        // interpreting arbitrary schemes. Qt still receives only styled text.
+        let insideAnchor = false;
+        processedBody = processedBody.split(/(<[^>]*>)/g).map(part => {
+            if (part.startsWith("<")) {
+                if (/^<a\s/i.test(part)) insideAnchor = true;
+                if (/^<\/a\s*>/i.test(part)) insideAnchor = false;
+                return part;
+            }
+            if (insideAnchor) return part;
+            return part.replace(/https?:\/\/[^\s<>"']+/gi, url => {
+                const clean = url.replace(/[.,;!?)]+$/, "");
+                return '<a href="' + clean + '">' + clean + '</a>' + url.slice(clean.length);
+            });
+        }).join("");
         return processedBody
     }
 }

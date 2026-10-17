@@ -21,7 +21,9 @@ Scope {
         }
 
         exclusiveZone: 0
-        implicitWidth: sidebarWidth
+        implicitWidth: Math.min(screen.width - 32, Config.options.sidebar.quickToggles.style === "android"
+            ? Math.max(sidebarWidth, Config.options.sidebar.quickToggles.android.columns * 88 + 44)
+            : sidebarWidth)
         WlrLayershell.namespace: "quickshell:sidebarRight"
         WlrLayershell.keyboardFocus: GlobalStates.sidebarRightOpen ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
         color: "transparent"

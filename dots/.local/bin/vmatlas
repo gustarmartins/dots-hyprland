@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, os, sys, glob, re, subprocess
+import json, os, sys, glob, re, subprocess, configparser, shutil, textwrap, time, fcntl
 
 HOME = os.path.expanduser("~")
 SHARE = os.path.join(HOME, ".local/share/vmatlas")
@@ -7,10 +7,16 @@ DOCFILE = os.path.join(SHARE, "vm-sysctl.txt")
 GUIDE = os.path.join(SHARE, "GUIDE.md")
 VM = "/proc/sys/vm"
 Z = "/sys/block/zram0"
-STATE = "/run/memory-profile.state"
+STATE = "/run/vmatlas-profile.state" if os.path.exists("/run/vmatlas-profile.state") else "/run/memory-profile.state"
 PROFILE_TOOL = "/usr/local/bin/vmatlas-profile"
 RAM_PLUS = "/var/lib/ram-plus.swap"
 WB_BOOT_CAP_PAGES = 4 * 1024 * 1024 * 1024 // 4096
+try:
+    for line in open('/etc/vmatlas/zram-tiers.conf'):
+        match=re.fullmatch(r'WRITEBACK_BOOT_QUOTA_MIB=([0-9]+)\s*',line)
+        if match: WB_BOOT_CAP_PAGES=int(match.group(1))*1024*1024//4096
+except OSError:
+    pass
 
 
 def on():
@@ -44,47 +50,6 @@ DEFAULTS = {
     "hugetlb_optimize_vmemmap": "0", "percpu_pagelist_high_fraction": "0",
     "dirtytime_expire_seconds": "43200", "laptop_mode": "0", "memfd_noexec": "0",
 }
-
-PROFILES = {
-    "ultra":       (False, "200 1 0 131072 10 10G 5G 15000 0"),
-    "blazing":     (False, "150 10 0 262144 150 512M 128M 15000 0"),
-    "optimized":   (True,  "100 20 0 262144 125 256M 64M 15000 0"),
-    "heavy":       (True,  "60 70 0 524288 200 128M 32M 15000 0"),
-    "anti-freeze": (True,  "90 50 0 524288 300 192M 48M 15000 0"),
-}
-ZRAM_PROFILES = {
-    "main":          ("lz4 -> zstd:3/9/15",       "raw", "ram*2.25", "ram/1.6"),
-    "multi-tier-wb": ("lz4 -> zstd:3/9/15",       "raw", "ram*2.25", "ram/1.6"),
-    "tiered-wb":     ("lz4 -> zstd:3/9/15",       "raw", "ram*2.25", "ram/1.6"),
-    "zstd-wb":       ("zstd:3 -> zstd:9/15",      "raw", "ram*2.25", "ram/1.6"),
-    "lz4-wb":        ("lz4 -> zstd:3/9/15",       "raw", "ram*2.25", "ram/1.6"),
-    "zstd":          ("zstd:3 only",              "no",  "ram*2.25", "ram/1.6"),
-    "lz4":           ("lz4 only",                 "no",  "ram*2.25", "ram/1.6"),
-    "lz4hc":         ("lz4hc only",               "no",  "ram*2.25", "ram/1.6"),
-}
-PRESET_KEYS = ["swappiness", "vfs_cache_pressure", "page-cluster", "min_free_kbytes",
-               "watermark_scale_factor", "dirty_bytes", "dirty_background_bytes",
-               "watermark_boost_factor", "zone_reclaim_mode"]
-
-MAX_SPEED = {
-    "swappiness": "120",
-    "vfs_cache_pressure": "60",
-    "page-cluster": "0",
-    "min_free_kbytes": "131072",
-    "watermark_scale_factor": "100",
-    "watermark_boost_factor": "15000",
-    "zone_reclaim_mode": "0",
-    "dirty_bytes": "268435456",
-    "dirty_background_bytes": "67108864",
-    "compaction_proactiveness": "0",
-    "compact_unevictable_allowed": "1",
-    "defrag_mode": "0",
-    "extfrag_threshold": "750",
-    "numa_stat": "1",
-    "stat_interval": "1",
-    "max_map_count": "1048576",
-}
-
 
 def rd(p):
     try:
@@ -189,7 +154,7 @@ def kconfig():
     return _KCONF
 
 
-def zram_info():
+def _zram_info():
     if not os.path.isdir(Z):
         return None
     z = {}
@@ -218,7 +183,7 @@ def zram_info():
     z["recomp"] = " → ".join(tiers) if tiers else (selected(rec) if rec and "#" in rec else None)
     z["disksize"] = int(rd(Z + "/disksize") or 0)
     ml = rd(Z + "/mem_limit")
-    z["mem_limit"] = int(ml) if ml and ml.isdigit() else 0
+    z["mem_limit"] = int(ml) if ml and ml.isdigit() else None
     z["backing"] = rd(Z + "/backing_dev")
     mm = (rd(Z + "/mm_stat") or "").split()
     if len(mm) >= 8:
@@ -230,13 +195,16 @@ def zram_info():
         z["huge"] = int(mm[7])
         z["huge_since"] = int(mm[8]) if len(mm) >= 9 else None
     bd = (rd(Z + "/bd_stat") or "").split()
+    z["bd_stats_available"] = len(bd) >= 3
     z["bd_pages"] = int(bd[0]) if bd else 0
     z["bd_reads"] = int(bd[1]) if len(bd) >= 2 else 0
     z["bd_writes"] = int(bd[2]) if len(bd) >= 3 else 0
     boot_writes = rd("/run/vmatlas-tier/writeback_pages")
+    z["wb_boot_stats_available"] = z["bd_stats_available"] or bool(boot_writes and boot_writes.isdigit())
     z["wb_boot_writes"] = max(z["bd_writes"], int(boot_writes)) if boot_writes and boot_writes.isdigit() else z["bd_writes"]
     z["wb_enable"] = rd(Z + "/writeback_limit_enable")
     wl = rd(Z + "/writeback_limit")
+    z["wb_limit_readable"] = bool(wl and wl.isdigit())
     z["wb_limit"] = int(wl) if wl and wl.isdigit() else 0
     z["compressed_wb"] = rd(Z + "/compressed_writeback")
     z["wb_batch"] = rd(Z + "/writeback_batch_size")
@@ -268,13 +236,10 @@ def writeback_state(z):
 
 
 def profile_catalog():
-    """Read the one canonical profile catalog without requiring root."""
     try:
-        result = subprocess.run([PROFILE_TOOL, "list", "--json"], text=True,
-                                capture_output=True, check=True)
-        return json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return {"profiles": [], "state": {"detected": None, "configured": None, "drift": []}}
+        return backend(['list', '--json'])
+    except CLIError as e:
+        return {'profiles': [], 'state': {}, 'error': str(e)}
 
 
 def mode_name(vm=None):
@@ -338,383 +303,539 @@ def meminfo():
     return d
 
 
-def hdr(t):
-    print(f"{c.cy}─ {c.B}{t}{c.R}{c.cy} {'─' * max(2, 58 - len(t))}{c.R}")
+def zram_info():
+    lock = None
+    try:
+        try:
+            lock = open('/run/lock/vmatlas-zram-tier.lock')
+            fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return {'busy': True}
+        return _zram_info()
+    finally:
+        if lock is not None: lock.close()
+
+
+class UI:
+    """One compact, wrapping renderer for terminals and redirected output."""
+    def __init__(self):
+        self.width = max(20, min(110, shutil.get_terminal_size((96, 24)).columns - 1))
+
+    def line(self, text='', indent=0, tone=''):
+        text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', str(text))
+        text = ''.join(ch if ch.isprintable() else ' ' for ch in text)
+        lines = textwrap.wrap(text, width=max(1, self.width-indent), break_long_words=True,
+                              break_on_hyphens=False) or ['']
+        for line in lines:
+            print(' '*indent + (tone + line + c.R if tone else line))
+
+    def title(self, text):
+        self.line(text, tone=c.B+c.cy)
+
+    def field(self, label, value):
+        if self.width < 60 or len(label) > 17:
+            self.line(label + ':', 2, c.D)
+            self.line(value, 4)
+        else:
+            prefix = '  ' + label.ljust(17) + '  '
+            text = re.sub(r'\s+', ' ', str(value))
+            lines = textwrap.wrap(text, max(1, self.width-len(prefix)), break_on_hyphens=False) or ['']
+            for i, line in enumerate(lines):
+                print((prefix if i == 0 else ' '*len(prefix)) + line)
+
+    def table(self, headers, rows):
+        rows = [[str(x) for x in row] for row in rows]
+        if not rows:
+            self.line('None.', 2); return
+        widths = [max(len(headers[i]), *(len(row[i]) for row in rows)) for i in range(len(headers))]
+        if sum(widths) + 2*(len(widths)-1) + 2 <= self.width:
+            self.line('  '.join(h.ljust(w) for h, w in zip(headers, widths)), 2, c.D)
+            for row in rows:
+                self.line('  '.join(x.ljust(w) for x, w in zip(row, widths)), 2)
+        else:
+            for row in rows:
+                self.line(row[0], 2, c.B)
+                for h, x in zip(headers[1:], row[1:]): self.line(f'{h}: {x}', 4)
+
+    def footer(self, text):
+        self.line()
+        for line in text.splitlines(): self.line(line, tone=c.D)
+
+
+class CLIError(Exception):
+    def __init__(self, message, code=2):
+        super().__init__(message); self.code = code
+
+
+def size(n):
+    if n is None: return 'unavailable'
+    n = float(n)
+    for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
+        if abs(n) < 1024 or unit == 'TiB': return f'{n:.1f} {unit}' if unit != 'B' else f'{n:.0f} B'
+        n /= 1024
+
+
+def writeback_bytes(z, key):
+    flag='wb_boot_stats_available' if key=='wb_boot_writes' else 'bd_stats_available'
+    return z.get(key,0)*4096 if z.get(flag,True) else None
+
+
+def writeback_guard_readable(z):
+    return z.get('wb_enable') in ('0','1') and z.get('wb_limit_readable',True)
+
+
+def backend(args):
+    try:
+        result = subprocess.run([PROFILE_TOOL, *args], text=True, capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise CLIError(f'Profile information unavailable: {e}') from e
+    if result.returncode:
+        raise CLIError(result.stderr.strip() or 'Profile helper failed.', result.returncode)
+    try: return json.loads(result.stdout)
+    except ValueError as e: raise CLIError('Profile helper returned invalid JSON.') from e
+
+
+def read_policy():
+    out = {}
+    for line in (rd('/etc/vmatlas/zram-tiers.conf') or '').splitlines():
+        m = re.fullmatch(r'\s*([A-Z0-9_]+)\s*=\s*([^#]*?)(?:\s*#.*)?', line)
+        if m: out[m[1]] = m[2].strip().strip('\"\'')
+    return out
+
+
+def profile_overrides(catalog):
+    """The profile controller applies numeric vmscope pins over saved VM values."""
+    configured=catalog.get('state',{}).get('configured')
+    profile=next((p for p in catalog.get('profiles',[]) if p.get('name')==configured),None)
+    if not profile: return []
+    saved=profile.get('vm',{}); effective={}
+    for filename,key,value in pins():
+        if filename=='99-vmscope.conf' and value.isdigit() and key in saved:
+            effective[key]=value
+    return [{'key':'vm.'+key,'profile':saved[key],'override':value,'source':'99-vmscope.conf'}
+            for key,value in sorted(effective.items()) if value!=saved[key]]
+
+
+def profile_summary(ui, state, overrides=()):
+    ui.field('Configured', state.get('configured') or 'none')
+    drift = state.get('drift', [])
+    match = state.get('detected')
+    ui.field('Live state', f'{len(drift)} difference(s) from configured profile' if drift else
+             (f'matches {match}' if match and state.get('exact') else 'no exact profile match'))
+    if overrides: ui.field('Saved overrides', f'{len(overrides)} VM values override the profile via 99-vmscope.conf; included in this comparison')
 
 
 def status():
-    mi = meminfo()
-    avail = mi.get("MemAvailable", 0)
-    free = mi.get("MemFree", 0)
-    hdr("vmatlas · VM & swap snapshot")
-    print(f"  {c.B}RAM{c.R}   {human(mi.get('MemTotal',0))} total · {human(free)} free · "
-          f"{c.gr}{human(avail)} avail{c.R}   PSI mem some10={psi_mem()}")
-    print(f"  {c.B}swap{c.R}  {swap_line()}")
-
-    vm = read_vm()
-    rp = f"{c.gr}ON · 4 GiB NVMe swap{c.R}" if ram_plus_on() else f"{c.D}off{c.R}"
-    print(f"  {c.B}mode{c.R}  {mode_name(vm)} · RAM Plus {rp}")
-
-    z = zram_info()
-    if z:
-        print()
-        hdr("zram0")
-        rec = f" → recomp {z['recomp']} (idle pages)" if z.get("recomp") else ""
-        print(f"  {c.B}compress{c.R}  {c.gr}{z['primary']}{c.R}{rec}")
-        size = f"{human(z['disksize'])} disksize"
-        if z["mem_limit"]:
-            size += f" · mem_limit {human(z['mem_limit'])}"
-        print(f"  {c.B}size{c.R}      {size}")
-        if "orig" in z and z["compr"]:
-            ratio = z["orig"] / z["compr"] if z["compr"] else 0
-            print(f"  {c.B}stored{c.R}    {human(z['orig'])} → {human(z['compr'])} "
-                  f"in RAM  ({c.cy}{ratio:.2f}x{c.R}, uses {human(z['used'])})")
-        bk = z.get("backing")
-        if bk and bk != "none":
-            wb_state = writeback_state(z)
-            if wb_state == "cap-reached":
-                health = f"{c.yl}4 GiB boot cap reached ({human(z['bd_writes']*4096)} written){c.R}"
-            elif wb_state == "pass-active":
-                health = f"{c.gr}guarded pass: {human(z['wb_limit']*4096)} left{c.R}"
-            elif wb_state == "guarded":
-                remaining = max(0, WB_BOOT_CAP_PAGES - z.get("bd_writes", 0))
-                health = f"{c.gr}locked between passes · {human(remaining*4096)} boot quota{c.R}"
-            else:
-                health = f"{c.rd}UNSAFE: write budget unlimited{c.R}"
-            extra = ""
-            if z.get("compressed_wb") is not None:
-                extra = f" · compressed_wb={z.get('compressed_wb')}"
-            print(f"  {c.B}writeback{c.R} {bk} · {human(z['bd_pages']*4096)} on backing · {health}{extra}")
-            if "loop" in bk:
-                print(f"  {c.D}            (loop file on fs — deadlock-prone under pressure){c.R}")
-
-    docs = load_docs()
-    tuned = []
-    for k, v in vm.items():
-        dft = DEFAULTS.get(k)
-        if dft is None or v == dft:
-            continue
-        if k == "dirty_ratio" and vm.get("dirty_bytes", "0") != "0":
-            continue
-        if k == "dirty_background_ratio" and vm.get("dirty_background_bytes", "0") != "0":
-            continue
-        tuned.append((k, v, dft))
-    if tuned:
-        print()
-        hdr(f"tuned away from kernel default ({len(tuned)})")
-        for k, v, dft in tuned:
-            print(f"  {c.yl}{k:<29}{c.R}{c.B}{v:<14}{c.R}{c.D}(default {dft}){c.R}")
-
-    print()
-    print(f"{c.D}  vmatlas all | zram | explain <knob> | pins | profiles | guide{c.R}")
+    ui = UI(); m = meminfo(); z = zram_info(); catalog = profile_catalog()
+    ui.title('VM Atlas · memory overview')
+    ui.field('RAM available', f"{size(m.get('MemAvailable'))} / {size(m.get('MemTotal'))}")
+    ui.field('Swap used', f"{size(m.get('SwapTotal', 0)-m.get('SwapFree', 0))} / {size(m.get('SwapTotal'))}")
+    ui.field('Memory stalls', f'{psi_mem()}% some, last 10 seconds')
+    if catalog.get('error'): ui.field('Profile', catalog['error'])
+    else: profile_summary(ui, catalog.get('state', {}), profile_overrides(catalog))
+    if z and z.get('busy'): ui.field('ZRAM', 'maintenance in progress; counters deferred')
+    elif z:
+        ui.field('ZRAM in RAM', f"{size(z.get('orig'))} stored in {size(z.get('used'))} physical RAM")
+        ui.field('Compression', z.get('primary') or 'unavailable')
+        if z.get('backing') not in (None, 'none', ''):
+            ui.field('On backing disk', size(writeback_bytes(z, 'bd_pages')))
+    else: ui.field('ZRAM', 'zram0 not present')
+    ui.footer('Check setup: vmatlas check\nDetails: vmatlas zram | tiers | profiles | all | pins\nLive dashboard: vminfo')
 
 
-def show_all():
-    vm = read_vm()
-    docs = load_docs()
-    hdr(f"all vm.* knobs ({len(vm)})")
-    for k in sorted(vm):
-        v = vm[k]
-        dft = DEFAULTS.get(k)
-        mark = " " if dft is None or v == dft else f"{c.yl}•{c.R}"
-        print(f" {mark}{c.B}{k:<30}{c.R}{v:<16}{c.D}{summary(docs.get(k,''))}{c.R}")
-    print(f"\n{c.D}  {c.yl}•{c.D} = differs from kernel default · vmatlas explain <knob> for full docs{c.R}")
+def show_all(args=()):
+    details = '--details' in args; changed = '--changed' in args
+    filters = [x for x in args if not x.startswith('--')]
+    if any(x.startswith('--') and x not in ('--details', '--changed') for x in args) or len(filters)>1:
+        raise CLIError('Usage: vmatlas all [FILTER] [--changed] [--details]')
+    ui = UI(); ui.title('VM settings · live values')
+    ui.line('Reference values are built-in examples, not this distribution’s defaults.', 2)
+    docs = load_docs() if details else {}; rows = []
+    for k, v in read_vm().items():
+        if filters and filters[0].removeprefix('vm.') not in k: continue
+        if changed and (k not in DEFAULTS or v == DEFAULTS[k]): continue
+        rows.append((k, v, DEFAULTS.get(k, '—')))
+    ui.table(('Setting', 'Live', 'Reference'), rows)
+    if details:
+        ui.line()
+        for k, _, _ in rows:
+            if docs.get(k): ui.field(k, summary(docs[k], 240))
+    ui.footer('Explain a setting: vmatlas explain swappiness')
 
 
-def explain(knob):
-    knob = knob.replace("vm.", "")
-    vm = read_vm()
-    docs = load_docs()
-    hdr(f"explain {knob}")
-    if knob in vm:
-        dft = DEFAULTS.get(knob, "?")
-        print(f"  {c.B}current{c.R} {c.gr}{vm[knob]}{c.R}    {c.B}default{c.R} {dft}\n")
-    if knob in docs:
-        for ln in docs[knob].splitlines():
-            print("  " + ln)
-    else:
-        print(f"  {c.D}(no kernel.org doc for this knob){c.R}")
+def explain(key):
+    key = key.removeprefix('vm.')
+    if not re.fullmatch(r'[a-zA-Z0-9_-]+', key): raise CLIError('Invalid VM setting name.')
+    vm = read_vm(); docs = load_docs()
+    if key not in vm and key not in docs: raise CLIError(f'Unknown or unavailable setting: {key}')
+    ui = UI(); ui.title(f'vm.{key}'); ui.field('Live', vm.get(key, 'unavailable'))
+    ui.field('Reference', DEFAULTS.get(key, 'not specified'))
+    ui.line()
+    for paragraph in (docs.get(key) or 'Local kernel documentation is not installed.').split('\n\n'):
+        ui.line(paragraph, 2); ui.line()
 
 
 def show_pins():
-    hdr("sysctl.d pins (survive reboot)")
-    ps = pins()
-    if not ps:
-        print("  (none)")
-    for f, k, v in ps:
-        ext = "" if f == "99-vmscope.conf" else f"  {c.rd}⚠ external — invisible to vmscope{c.R}"
-        print(f"  {c.B}vm.{k:<26}{c.R}= {v:<12}{c.D}{f}{c.R}{ext}")
-    print(f"\n{c.D}  vmscope owns 99-vmscope.conf (pin/unpin). External pins cause phantom"
-          f"\n  'drift' the profile widget can't fix — see: vmatlas guide{c.R}")
+    ui = UI(); ui.title('Saved VM settings · /etc/sysctl.d')
+    grouped = {}
+    for filename, key, value in pins(): grouped.setdefault(filename, []).append((key, value))
+    if not grouped: ui.line('No VM settings found here.', 2)
+    for filename, entries in grouped.items():
+        ui.line(); ui.title(filename); ui.table(('Setting', 'Saved'), entries)
+    ui.footer('Saved values may differ from live settings. Other sysctl directories and services can also write them. Compare with: vmatlas all')
 
 
-def show_profiles():
-    data = profile_catalog()
-    state = data.get("state", {})
-    hdr("canonical VM profiles (/etc/vmatlas/profiles.d)")
-    for profile in data.get("profiles", []):
-        name = profile["name"]
-        marker = f" {c.gr}← live match{c.R}" if name == state.get("detected") else ""
-        kind = profile.get("kind", "persistent")
-        swap = profile.get("swap", "keep")
-        print(f"  {c.B}{name:<28}{c.R}{c.cy}{kind:<11}{c.R} {swap}{marker}")
-        knobs = profile.get("vm", {})
-        line = " ".join(f"{key}={value}" for key, value in knobs.items())
-        ttl = profile.get("mglru_min_ttl_ms")
-        if ttl:
-            line += f" mglru_ttl={ttl}"
-        print(f"  {c.D}    {line}{c.R}")
-        print(f"  {c.D}    {profile.get('description', '')}{c.R}")
-    if state.get("configured") and state.get("drift"):
-        print(f"\n  {c.yl}configured {state['configured']} has {len(state['drift'])} live drifted values; run `vmatlas profile detect` for them.{c.R}")
-    print(f"\n{c.D}  apply: vmatlas profile apply <name>"
-          f"\n  create: vmatlas profile create <name> --from-live"
-          f"\n  inspect: vmatlas profile show <name> | detect{c.R}")
-
-    print()
-    hdr("zram boot profiles (/usr/local/bin/zram-profile-stage)")
-    for name, (algo, wb, size, limit) in ZRAM_PROFILES.items():
-        wb_text = f"{c.cy}raw-writeback{c.R}" if wb == "raw" else "no-writeback"
-        print(f"  {c.B}{name:<12}{c.R}{algo:<24} {wb_text}  disksize={size} mem_limit={limit}")
-    print(f"\n{c.D}  stage only: sudo zram-profile-stage <name>   (effective next boot)"
-          f"\n  no live zram reset, no swapoff; see: vmatlas guide → 'Stage zram boot profile'{c.R}")
+def legacy(p):
+    return p.get('kind') == 'historical' or p['name'].startswith('legacy-') or p.get('description', '').lower().startswith('legacy ')
 
 
-def guide():
-    if os.path.exists(GUIDE):
-        sys.stdout.write(open(GUIDE).read())
-    else:
-        print("guide not found at", GUIDE)
-
-
-def helpme():
-    print(f"""{c.B}vmatlas{c.R} — Linux VM/zram/swap reader  ({c.D}read-only except explicit `profile apply/create`{c.R})
-  {c.cy}vmatlas{c.R}              snapshot: RAM, swap, zram, profile, tuned knobs
-  {c.cy}vmatlas all{c.R}          every vm.* knob + one-line kernel doc
-  {c.cy}vmatlas zram{c.R}         zram deep-dive only
-  {c.cy}vmatlas tiers{c.R}        primary → verified zstd recompression → NVMe chain
-  {c.cy}vmatlas explain <k>{c.R}  full kernel.org doc for one knob + current/default
-  {c.cy}vmatlas pins{c.R}         what's pinned in /etc/sysctl.d (+ flags externals)
-  {c.cy}vmatlas profiles{c.R}     every canonical VM profile and live match
-  {c.cy}vmatlas profile ...{c.R}  list/show/detect/create/apply canonical profiles
-  {c.cy}vmatlas restore-default [--check]{c.R}  restore/check the saved workstation default
-  {c.cy}vmatlas guide{c.R}        how to change zram / make profiles / safety
-  {c.cy}vmatlas json{c.R}         machine-readable dump""")
-
-
-def as_json():
-    import json
-    z = zram_info() or {}
-    if z and z.get("compr"):
-        z["ratio"] = round(z["orig"] / z["compr"], 3)
-    print(json.dumps({"vm": read_vm(), "zram": z, "profile": profile_catalog().get("state"),
-                      "pins": pins()}, indent=2))
-
-
-def restore_default_command(args):
-    # The installed helper owns privilege escalation, checking, and exit codes.
-    result = subprocess.run(["/usr/local/libexec/vmatlas-restore-default", *args])
-    raise SystemExit(result.returncode)
+def show_profiles(args=()):
+    if any(a not in ('--all', '--json') for a in args): raise CLIError('Usage: vmatlas profiles [--all | --json]')
+    catalog = backend(['list', '--json'])
+    if '--json' in args: print(json.dumps(catalog, indent=2)); return
+    ui = UI(); ui.title('VM profiles'); state = catalog.get('state', {}); profile_summary(ui, state, profile_overrides(catalog))
+    hidden = 0; groups = {'Saved': [], 'Temporary': [], 'Legacy': []}
+    for p in catalog.get('profiles', []):
+        current = p['name'] in (state.get('configured'), state.get('detected'))
+        if legacy(p) and not current and '--all' not in args: hidden += 1; continue
+        group = 'Legacy' if legacy(p) else ('Temporary' if p.get('kind') == 'runtime' else 'Saved')
+        groups[group].append(p)
+    for name, entries in groups.items():
+        if not entries: continue
+        ui.line(); ui.title(name)
+        for p in entries:
+            tag = ' [configured]' if p['name'] == state.get('configured') else ''
+            if p['name'] == state.get('detected') and p['name'] != state.get('configured'): tag += ' [live]'
+            ui.line(p['name'] + tag, 2, c.B)
+            description = p.get('description', '').strip()
+            if description: ui.line(description, 4)
+    if not catalog.get('profiles'): ui.line('No saved profiles installed.', 2)
+    if hidden: ui.footer(f'{hidden} legacy profiles hidden. Show them: vmatlas profiles --all')
+    ui.footer('Inspect: vmatlas profile show NAME\nCompare live: vmatlas profile detect\nApply: vmatlas profile apply NAME')
 
 
 def profile_command(args):
-    sub = args[0] if args else "list"
-    if sub == "restore-default":
-        restore_default_command(args[1:])
-    if sub in {"list", "detect", "show"}:
-        command = [PROFILE_TOOL, sub, *args[1:]]
-    elif sub == "apply" and len(args) == 2:
-        command = ["sudo", "-n", PROFILE_TOOL, "apply", args[1]]
-    elif sub == "create" and len(args) == 3 and args[2] == "--from-live":
-        command = ["sudo", "-n", PROFILE_TOOL, "create", args[1], "--from-live"]
+    sub = args[0] if args else 'list'; rest = list(args[1:])
+    if sub in ('help', '-h', '--help'): helpme(); return
+    if sub == 'list': return show_profiles(rest)
+    if sub == 'restore-default': return restore_default_command(rest)
+    if sub == 'detect' and rest in ([], ['--json']):
+        state = backend(['detect', '--json'])
+        if rest: print(json.dumps(state, indent=2)); return
+        ui = UI(); ui.title('Profile · live comparison'); profile_summary(ui, state)
+        ui.table(('Setting', 'Expected', 'Live'), [(d['key'], d['expected'], d['actual']) for d in state.get('drift', [])]) if state.get('drift') else None
+        ui.footer('The comparison includes numeric overrides from 99-vmscope.conf. Inspect: vmatlas pins')
+        return
+    if sub == 'show' and len(rest) in (1,2) and (len(rest)==1 or rest[1]=='--json'):
+        p = backend(['show', rest[0]])
+        if len(rest)==2: print(json.dumps(p, indent=2)); return
+        ui = UI(); ui.title(p['name']); ui.line(p.get('description', ''), 2)
+        ui.field('Lifetime', p.get('kind', 'persistent'))
+        swap = p.get('swap', 'keep'); ui.field('Swap policy', 'preserve current devices' if swap=='keep' else swap)
+        ui.line(); ui.title('VM settings'); ui.table(('Setting', 'Saved'), sorted(p.get('vm', {}).items()))
+        if p.get('thp'):
+            ui.line(); ui.title('Transparent huge pages'); ui.table(('Setting', 'Saved'), sorted(p['thp'].items()))
+        ui.field('MGLRU', p.get('mglru_enabled') or 'unchanged'); ui.field('MGLRU TTL (ms)', p.get('mglru_min_ttl_ms') or 'unchanged')
+        action = 'build-memory-profile start [duration]' if p.get('runtime_source')=='build-memory-profile' else ('See the profile’s owning tool.' if p.get('kind')=='runtime' else f"vmatlas profile apply {p['name']}")
+        ui.footer('Apply: '+action); return
+    if sub == 'apply' and len(rest)==1:
+        command = ['sudo', '-n', PROFILE_TOOL, sub, rest[0]]
+    elif sub == 'create' and len(rest)==2 and rest[1]=='--from-live':
+        command = ['sudo', '-n', PROFILE_TOOL, sub, *rest]
+    else: raise CLIError('Usage: vmatlas profile list | detect | show NAME | apply NAME | create NAME --from-live')
+    # The existing privileged helper owns validation and all policy changes.
+    return subprocess.run(command).returncode
+
+
+def zram_view(args=()):
+    if args == ['config']:
+        ui = UI(); ui.title('ZRAM · saved generator configuration')
+        files = [p for p in ['/etc/systemd/zram-generator.conf', *sorted(glob.glob('/etc/systemd/zram-generator.conf.d/*.conf'))] if os.path.isfile(p)]
+        for path in files:
+            ui.line(); ui.title(path)
+            for line in (rd(path) or '').splitlines():
+                if line.strip() and not line.lstrip().startswith('#'): ui.line(line, 2)
+        if not files: ui.line('No local generator configuration found.', 2)
+        ui.footer('Saved settings can differ from the active device. Presets: zram-profile-stage --list'); return
+    if any(x!='--details' for x in args): raise CLIError('Usage: vmatlas zram [--details | config]')
+    ui = UI(); ui.title('ZRAM · zram0'); z = zram_info()
+    if not z: ui.line('Device not present.', 2); return
+    if z.get('busy'): ui.line('Maintenance is running; try again after the current pass.', 2); return
+    ui.field('Primary', z.get('primary', 'unavailable'))
+    ui.field('Logical capacity', size(z.get('disksize')))
+    limit = z.get('mem_limit'); ui.field('Physical RAM cap', size(limit) if limit else ('unlimited' if limit==0 else 'unavailable'))
+    ui.field('Data in RAM', size(z.get('orig'))); ui.field('Compressed data', size(z.get('compr')))
+    ui.field('Physical RAM used', size(z.get('used')))
+    if z.get('used'): ui.field('Physical ratio', f"{z['orig']/z['used']:.2f}:1 (data / physical RAM)")
+    ui.field('Peak RAM used', size(z.get('used_max')))
+    backing = z.get('backing'); ui.line(); ui.title('Disk writeback')
+    if backing in (None, '', 'none'): ui.line('No backing device configured.' if backing=='none' else 'Backing device unavailable.', 2)
     else:
-        print("usage: vmatlas profile {list|detect|show NAME|apply NAME|create NAME --from-live}", file=sys.stderr)
-        return
-    result = subprocess.run(command, text=True, capture_output=True)
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
-
-
-def zram_view():
-    z = zram_info()
-    if not z:
-        print("no zram0")
-        return
-    hdr("zram0")
-    rec = f" → recomp {z['recomp']} (multi-tier)" if z.get("recomp") else ""
-    print(f"  {c.B}primary algo{c.R}   {c.gr}{z['primary']}{c.R}{rec}")
-    print(f"  {c.B}disksize{c.R}       {human(z['disksize'])}")
-    print(f"  {c.B}mem_limit{c.R}      {human(z['mem_limit']) if z['mem_limit'] else 'none'}")
-    if z.get("recomp_raw"):
-        print(f"  {c.B}recomp algo{c.R}    {c.D}{z['recomp_raw']}{c.R}")
-    if "orig" in z:
-        raw_ratio = z["orig"] / z["compr"] if z["compr"] else 0
-        phys_ratio = z["orig"] / z["used"] if z["used"] else 0
-        overhead = z["used"] - z["compr"] if z["used"] >= z["compr"] else 0
-        print(f"  {c.B}stored{c.R}         {human(z['orig'])} orig → {human(z['compr'])} compressed "
-              f"({c.cy}{phys_ratio:.2f}x phys{c.R}, {raw_ratio:.2f}x raw)")
-        print(f"  {c.B}RAM used{c.R}       {human(z['used'])} (overhead {human(overhead)}) · peak {human(z.get('used_max',0))}")
-        print(f"  {c.B}incompr/dedup{c.R}  {human(z.get('huge',0)*4096)} raw in {z.get('huge',0)} huge "
-              f"· {human(z.get('same',0)*4096)} in {z.get('same',0)} same-pages")
-    bk = z.get("backing")
-    print(f"  {c.B}backing_dev{c.R}    {bk}")
-    if bk and bk != "none":
-        wb_state = writeback_state(z)
-        if wb_state == "cap-reached":
-            budget = f"4 GiB boot cap reached ({human(z.get('wb_boot_writes',0)*4096)} written)"
-        elif wb_state == "pass-active":
-            budget = f"guarded pass active, {human(z.get('wb_limit',0)*4096)} left"
-        elif wb_state == "guarded":
-            remaining = max(0, WB_BOOT_CAP_PAGES - z.get("wb_boot_writes", 0))
-            budget = f"locked, {human(remaining*4096)} boot quota remains"
-        else:
-            budget = "UNSAFE unlimited"
-        print(f"  {c.B}writeback{c.R}      {human(z['bd_pages']*4096)} on backing · "
-              f"{budget}")
-        print(f"  {c.B}wb traffic{c.R}     reads {z.get('bd_reads',0)} · session/boot writes "
-              f"{z.get('bd_writes',0)}/{z.get('wb_boot_writes',0)} {c.D}(4K pages){c.R}")
-        if z.get("compressed_wb") is not None:
-            print(f"  {c.B}compressed_wb{c.R}  {z.get('compressed_wb')} · batch={z.get('wb_batch')}")
-        if wb_state == "cap-reached":
-            print(f"  {c.yl}  Boot quota complete: new pages remain compressed in RAM;"
-                  f" the existing backing pages remain readable.{c.R}")
-        elif wb_state == "guarded":
-            print(f"  {c.gr}  limit=0 is the intentional lock between 256 MiB guarded passes.{c.R}")
-        elif wb_state == "unlimited":
-            print(f"  {c.rd}  ⚠ writeback enforcement is disabled; a caller can write without a cap.{c.R}")
-    print(f"\n{c.D}  eviction chain + verdicts: vmatlas tiers · change settings: vmatlas guide{c.R}")
+        ui.field('Device', backing)
+        ui.field('Stored on disk', size(writeback_bytes(z, 'bd_pages')))
+        ui.field('Writes / reads', f"{size(writeback_bytes(z, 'bd_writes'))} / {size(writeback_bytes(z, 'bd_reads'))} since device initialization")
+        ui.field('Guard', 'unavailable' if not writeback_guard_readable(z) else 'locked between passes' if z.get('wb_enable')=='1' and z.get('wb_limit')==0 else ('pass allowance '+size(z.get('wb_limit', 0)*4096) if z.get('wb_enable')=='1' else 'limiter disabled or unavailable'))
+        policy=read_policy()
+        ui.field('Written this boot', size(writeback_bytes(z, 'wb_boot_writes')))
+        ui.field('Automatic quota', (policy['WRITEBACK_BOOT_QUOTA_MIB']+' MiB per boot') if policy.get('WRITEBACK_BOOT_QUOTA_MIB') else 'not specified in policy')
+    if '--details' in args:
+        ui.line(); ui.title('Kernel capabilities')
+        ui.table(('Capability', 'Available'), [(k.removeprefix('CONFIG_ZRAM_'), 'unknown' if v is None else ('yes' if v else 'no')) for k,v in z.get('caps', {}).items()])
+        ui.field('Same-filled pages', z.get('same', 'unavailable')); ui.field('Incompressible', z.get('huge', 'unavailable'))
+    ui.footer('Automatic actions: vmatlas tiers | Saved setup: vmatlas zram config')
 
 
 def tiers_view():
-    z = zram_info()
+    ui = UI(); ui.title('Compression tiers · policy and evidence'); z = zram_info(); policy = read_policy()
+    if z and z.get('busy'): ui.line('Maintenance running; live compressor readback deferred.', 2)
+    elif z:
+        ui.field('Primary', z.get('primary', 'unavailable'))
+        for i, tier in enumerate(z.get('recomp_tiers', []), 1): ui.field(f'Recompression {i}', tier)
+        if not z.get('recomp_tiers'): ui.field('Recompression', 'no secondary compressors reported')
+    else: ui.line('zram0 not present.', 2)
+    active=[]
+    for unit in ('vmatlas-zram-tier-manager.timer','zram-writeback.timer'):
+        try:
+            r=subprocess.run(['systemctl','is-active',unit],capture_output=True,text=True,timeout=2)
+            if r.returncode==0: active.append(unit)
+        except (OSError,subprocess.TimeoutExpired): pass
+    ui.field('Active timers', ', '.join(active) or 'none found')
+    if len(active)>1: ui.line('Multiple timers active; check service ownership.', 2, c.yl)
+    rows=[]
+    for n in range(1,4):
+        prefix=f'TIER{n}_'
+        if policy.get(prefix+'ALGO'):
+            rows.append((str(n), policy.get(prefix+'IDLE_AGE','default')+' s', policy.get(prefix+'INTERVAL','default')+' s',policy.get(prefix+'BUDGET_MIB','default')+' MiB'))
+    if rows:
+        ui.line(); ui.title('Configured recompression'); ui.table(('Tier','Idle age','Interval','Budget'),rows)
+    ui.field('Auto writeback', {'0':'disabled','1':'enabled'}.get(policy.get('WRITEBACK_ENABLED'),'not specified'))
+    for key,label,unit in [('WRITEBACK_LOW_RATIO','Low trigger','% of resident cap'),('WRITEBACK_HIGH_RATIO','High trigger','% of resident cap'),('WRITEBACK_PASS_MIB','Writeback pass','MiB'),('WRITEBACK_BOOT_QUOTA_MIB','Boot quota','MiB')]:
+        if key in policy: ui.field(label,policy[key]+' '+unit)
+    ui.line(); ui.title('Recorded automatic actions')
+    events=[]
+    for line in (rd('/run/vmatlas-tier/events') or '').splitlines():
+        row=dict(x.split('=',1) for x in line.split() if '=' in x)
+        if row.get('src')=='auto': events.append(row)
+    boot=time.time()-float((rd('/proc/uptime') or '0').split()[0])
+    events=[e for e in events if e.get('ts','').isdigit() and int(e['ts'])>=boot]
+    if not events: ui.line('No retained events for this boot. An active timer alone does not prove an action ran.',2)
+    for mode in sorted({e.get('mode',e.get('action','unknown')) for e in events}):
+        matching=[e for e in events if e.get('mode',e.get('action','unknown'))==mode]; last=matching[-1]
+        stamp=time.strftime('%m-%d %H:%M',time.localtime(int(last['ts'])))
+        ok=sum(e.get('rc')=='0' or e.get('result') in ('ok','budget_exhausted') for e in matching)
+        ui.field(mode,f'{ok}/{len(matching)} successful records; last {stamp}')
+    if events and not any(e.get('action')=='writeback' for e in events): ui.line('No automatic writeback event recorded this boot.',2)
+    ui.footer('Events record requests and results; per-tier byte totals are not available. Manual actions are excluded here.')
+
+
+def service_states():
+    names = ['vmatlas-zram-tier-manager.timer', 'vmatlas-zram-tier-manager.service',
+             'zram-writeback.timer', 'zram-writeback.service', 'zram-optimize.timer',
+             'zram-optimize.service', 'zram-custom.service', 'systemd-zram-setup@zram0.service',
+             'cryo-pressure.service', 'vmatlas-desktop-profile.service', 'memory-profile.service']
+    try:
+        result = subprocess.run(['systemctl','show',*names,'-p','Id','-p','LoadState',
+            '-p','ActiveState','-p','UnitFileState','-p','Result','-p','ExecStart',
+            '-p','LastTriggerUSec','-p','FragmentPath'], text=True,capture_output=True,timeout=5)
+    except (OSError,subprocess.TimeoutExpired) as e: return {}, str(e)
+    states={}
+    for block in result.stdout.split('\n\n'):
+        row=dict(line.split('=',1) for line in block.splitlines() if '=' in line)
+        if row.get('Id'): states[row['Id']]=row
+    return states, (result.stderr.strip() or 'systemd unavailable') if not states else None
+
+
+def boot_events():
+    try: boot=time.time()-float((rd('/proc/uptime') or '0').split()[0])
+    except ValueError: boot=time.time()
+    rows=[]
+    for line in (rd('/run/vmatlas-tier/events') or '').splitlines():
+        row=dict(x.split('=',1) for x in line.split() if '=' in x)
+        if row.get('ts','').isdigit() and boot<=int(row['ts'])<=time.time()+5: rows.append(row)
+    return rows
+
+
+def check_facts():
+    units,error=service_states()
+    catalog=profile_catalog()
+    vmstat=dict(line.split() for line in (rd('/proc/vmstat') or '').splitlines() if len(line.split())==2)
+    return {'zram':zram_info(), 'policy':read_policy(), 'units':units,'service_error':error,
+            'interfaces':{name:os.path.exists(Z+'/'+name) for name in ('recompress','recomp_algorithm','algorithm_params','writeback','idle')},
+            'events':boot_events(), 'profile':catalog, 'profile_overrides':profile_overrides(catalog),
+            'swaps':rd('/proc/swaps'), 'oom_kill':vmstat.get('oom_kill'),
+            'mglru':rd('/sys/kernel/mm/lru_gen/enabled'), 'meminfo':meminfo()}
+
+
+def assess(facts):
+    findings=[]
+    def add(key,state,detail,action=None):
+        finding={'feature':key,'status':state,'detail':detail}
+        if action: finding['next']=action
+        findings.append(finding)
+    units=facts['units']; z=facts['zram']; policy=facts['policy']; abi=facts['interfaces']
+    def active(name): return units.get(name,{}).get('ActiveState')=='active'
+    if facts.get('service_error'): add('Services','UNKNOWN',facts['service_error'])
+    for name,u in units.items():
+        if u.get('LoadState')=='loaded' and (u.get('ActiveState')=='failed' or u.get('Result') not in (None,'','success')):
+            add('Failed service','FAIL',name, f'journalctl -b -u {name}')
+    owners=[name for name in ('zram-custom.service','systemd-zram-setup@zram0.service') if active(name)]
+    if len(owners)>1: add('ZRAM ownership','FAIL','Multiple active setup services: '+', '.join(owners),'Inspect and migrate the existing ZRAM owner before installation.')
     if not z:
-        print("no zram0")
-        return
-    caps = z.get("caps", {})
-
-    def cap(flag):
-        v = caps.get(flag)
-        return f"{c.gr}✓{c.R}" if v else (f"{c.rd}✗{c.R}" if v is False else f"{c.yl}?{c.R}")
-
-    raw_ratio = z["orig"] / z["compr"] if z.get("compr") else 0
-    phys_ratio = z["orig"] / z["used"] if z.get("used") else 0
-    huge_b = z.get("huge", 0) * 4096
-    same_b = z.get("same", 0) * 4096
-    bd_b = z.get("bd_pages", 0) * 4096
-    armed = bool(z.get("recomp_tiers")) and caps.get("CONFIG_ZRAM_MULTI_COMP")
-    wb_on = z.get("backing") and z.get("backing") != "none"
-    demote_ran = z.get("bd_writes", 0) > 0
-    wb_state = writeback_state(z)
-
-    hdr("zram tiered eviction - five-stage zram/writeback chain")
-    print(f"  {c.B}[ Active RAM ]{c.R}")
-    print(f"  {c.D}     │  memory pressure / inactive anonymous pages selected for swap{c.R}")
-    print(f"  {c.D}     ▼{c.R}")
-
-    # Tier 0 (Primary)
-    if z["primary"] == "lz4":
-        t0 = f"{c.gr}optimal swap-out latency ✓{c.R}"
-        t0_note = "lowest CPU latency on the immediate swap-out path"
-    elif z["primary"] == "zstd":
-        t0 = f"{c.yl}dense primary{c.R}"
-        t0_note = "higher CPU cost during active reclaim"
+        add('ZRAM','GAP','zram0 is not present; module capability cannot be inferred from absent device files.','Run the installer with --dry-run to inspect this host.')
+    elif z.get('busy'):
+        add('ZRAM','UNKNOWN','A maintenance pass holds the lock; live reads deferred.','Run vmatlas check again after the pass.')
     else:
-        t0 = f"{c.yl}primary = {z['primary']}{c.R}"
-        t0_note = "custom primary algorithm"
-    print(f"  {c.B}[ Tier 0 · Primary {z['primary']} ]{c.R}   {t0}  {c.D}{t0_note}{c.R}")
-    if z.get("compr"):
-        print(f"      logical: {c.cy}{human(z['orig'])}{c.R} → compressed: {c.cy}{human(z['compr'])}{c.R} in RAM")
-        print(f"      density: {c.cy}{phys_ratio:.2f}x physical{c.R} ({raw_ratio:.2f}x raw) · uses {human(z['used'])} physical RAM")
-    print(f"  {c.D}     │  pages prove cold (~30 min idle){c.R}")
-    print(f"  {c.D}     ▼{c.R}")
-
-    # Tier 1 (Priority 1)
-    p1_armed = any("#1, verified" in t for t in z.get("recomp_tiers", []))
-    t1_status = f"{c.gr}level verified ✓{c.R}" if p1_armed else f"{c.rd}level unverified{c.R}"
-    print(f"  {c.B}[ Tier 1 · ZSTD Level 3 (Priority 1) ]{c.R}   {t1_status}  {c.D}fast idle recompression (~30m idle){c.R}")
-    print(f"      purpose: quickly regain zstd compression density with minimal CPU overhead")
-    print(f"  {c.D}     │  pages remain colder (~3 hours idle){c.R}")
-    print(f"  {c.D}     ▼{c.R}")
-
-    # Tier 2 (Priority 2)
-    p2_armed = any("#2, verified" in t for t in z.get("recomp_tiers", []))
-    t2_status = f"{c.gr}level verified ✓{c.R}" if p2_armed else f"{c.rd}level unverified{c.R}"
-    print(f"  {c.B}[ Tier 2 · ZSTD Level 9 (Priority 2) ]{c.R}   {t2_status}  {c.D}selective deep compression (~3h idle){c.R}")
-    print(f"      purpose: denser compression for sustained cold pages during low CPU load")
-    print(f"  {c.D}     │  pages remain ancient (~12 hours idle) and CPU strictly idle{c.R}")
-    print(f"  {c.D}     ▼{c.R}")
-
-    # Tier 3 (Priority 3)
-    p3_armed = any("#3, verified" in t for t in z.get("recomp_tiers", []))
-    t3_status = f"{c.gr}level verified ✓{c.R}" if p3_armed else f"{c.rd}level unverified{c.R}"
-    print(f"  {c.B}[ Tier 3 · ZSTD Level 15 (Priority 3) ]{c.R}  {t3_status}  {c.D}archival cold tier (~12h idle){c.R}")
-    print(f"      purpose: maximum density archival; background waits for idle CPU, manual runs warn and proceed")
-    print(f"  {c.D}     │  resident limit pressure / incompressible pages / cold writeback{c.R}")
-    print(f"  {c.D}     ▼{c.R}")
-
-    # Tier 4 (NVMe Writeback)
-    if not wb_on:
-        print(f"  {c.B}[ Tier 4 · NVMe writeback ]{c.R}   {c.rd}no backing_dev — disabled{c.R}")
-    else:
-        v = f"{c.gr}active ✓{c.R}" if demote_ran else f"{c.yl}configured, nothing evicted yet{c.R}"
-        print(f"  {c.B}[ Tier 4 · NVMe writeback ]{c.R}   {z['backing']}  {v}")
-        print(f"      {c.cy}{human(bd_b)}{c.R} on SSD ({z.get('bd_pages',0)} pages) · "
-              f"reads {z.get('bd_reads',0)} · writes {z.get('bd_writes',0)}")
-        if wb_state == "cap-reached":
-            print(f"      {c.yl}4 GiB boot quota reached after {human(z.get('wb_boot_writes',0)*4096)} writes;"
-                  f" new pages stay in zram{c.R}")
-        elif wb_state == "guarded":
-            remaining = max(0, WB_BOOT_CAP_PAGES - z.get("wb_boot_writes", 0))
-            print(f"      {c.gr}locked between guarded passes · {human(remaining*4096)} boot quota remains{c.R}")
-            print(f"      policy: max 256 MiB/pass, threshold > 70-85% resident limit, wear-capped")
-        elif wb_state == "pass-active":
-            print(f"      {c.gr}guarded pass active · {human(z.get('wb_limit',0)*4096)} allowance remains{c.R}")
+        swap_active=bool(re.search(r'^/dev/zram0\s',facts.get('swaps') or '',re.M))
+        add('ZRAM swap','OK' if swap_active else 'GAP',f"Primary {z.get('primary','unknown')}; logical capacity {size(z.get('disksize'))}; "+('active swap' if swap_active else 'not active swap'))
+        supported=all(abi.get(n) for n in ('recompress','recomp_algorithm','algorithm_params'))
+        tiers=z.get('recomp_tiers',[])
+        if not supported: add('Recompression','UNSUPPORTED','Required multi-compressor interfaces are absent on this running device. Single-compressor ZRAM can still work.')
+        elif not tiers:
+            disabled='TIER1_ALGO' in policy and not policy['TIER1_ALGO']
+            add('Recompression','OFF' if disabled else 'GAP','Kernel interfaces exist, but no secondary compressor is configured.','Inspect vmatlas zram config and the installer’s --tiers option.')
+        else: add('Recompression','OK',f'{len(tiers)} secondary compressor(s) reported: '+', '.join(tiers))
+        combined=[]
+        for timer in ('vmatlas-zram-tier-manager.timer','zram-writeback.timer'):
+            service=timer.replace('.timer','.service')
+            command=units.get(service,{}).get('ExecStart','')
+            if active(timer) and re.search(r'/(?:vmatlas-zram-tier-manager|zram-tier-manager)(?:\s|;|$)',command): combined.append(timer)
+        custom_recomp=active('zram-optimize.timer')
+        custom_wb=active('zram-writeback.timer') and 'zram-writeback.timer' not in combined
+        if tiers and not facts.get('service_error'):
+            if combined:
+                pending=all('LastTriggerUSec' in units.get(timer,{}) and units[timer]['LastTriggerUSec'] in ('','n/a') for timer in combined)
+                detail='Scheduled by '+', '.join(combined)
+                if pending: detail+='; awaiting the first timer activation this boot.'
+                add('Auto recompression','OK',detail)
+            elif custom_recomp: add('Auto recompression','UNKNOWN','Custom zram-optimize.timer is active; its script and outcomes need validation.')
+            else: add('Auto recompression','GAP','Secondary compressors exist, but no supported active recompression timer was found. Custom daemons may need separate review.','Inspect systemctl status vmatlas-zram-tier-manager.timer')
+        if len(combined)+(1 if custom_recomp else 0)>1:
+            add('Maintenance ownership','FAIL','Multiple recompression timers are active.','Retain one policy owner; migrate existing services before enabling the kit.')
+        backing=z.get('backing'); has_backing=backing not in (None,'','none')
+        if not abi.get('writeback'): add('Disk writeback','UNSUPPORTED','The running device has no writeback interface.')
+        elif backing is None: add('Disk writeback','UNKNOWN','Cannot read the backing-device configuration.')
+        elif not has_backing: add('Disk writeback','OFF','No backing device configured. Optional; normal disk swap is separate.','Only provision inspected, explicitly selected raw storage.')
         else:
-            print(f"      {c.rd}⚠ writeback enforcement disabled: budget is unlimited{c.R}")
-        print(f"      compressed_wb={z.get('compressed_wb')} batch={z.get('wb_batch')}")
-
-    print()
-    print(f"  {c.B}kernel features{c.R}  "
-          f"MULTI_COMP {cap('CONFIG_ZRAM_MULTI_COMP')}  "
-          f"WRITEBACK {cap('CONFIG_ZRAM_WRITEBACK')}  "
-          f"ACTIME {cap('CONFIG_ZRAM_TRACK_ENTRY_ACTIME')}  "
-          f"MEM_TRACK {cap('CONFIG_ZRAM_MEMORY_TRACKING')}")
-    print(f"  {c.D}adaptive management handled by zram-writeback.service / timer.{c.R}")
-    print(f"\n{c.D}  verify passes: vmatlas guide · live monitoring: vmscope{c.R}")
-
-
-def main():
-    a = sys.argv[1:] or ["status"]
-    cmd = a[0]
-    if cmd in ("status", "snapshot"):
-        status()
-    elif cmd == "all":
-        show_all()
-    elif cmd == "zram":
-        zram_view()
-    elif cmd in ("tiers", "tier"):
-        tiers_view()
-    elif cmd == "explain" and len(a) > 1:
-        explain(a[1])
-    elif cmd == "pins":
-        show_pins()
-    elif cmd == "restore-default":
-        restore_default_command(a[1:])
-    elif cmd == "profiles":
-        show_profiles()
-    elif cmd == "profile":
-        profile_command(a[1:])
-    elif cmd == "guide":
-        guide()
-    elif cmd == "json":
-        as_json()
-    elif cmd in ("help", "-h", "--help"):
-        helpme()
+            add('Disk writeback','OK',f"Backing device configured; {size(writeback_bytes(z, 'bd_pages'))} stored; {size(writeback_bytes(z, 'bd_writes'))} written since device initialization.")
+            if not writeback_guard_readable(z): add('Writeback guard','UNKNOWN','Limiter or allowance readback is unavailable.')
+            elif z.get('wb_enable')!='1': add('Writeback guard','FAIL','Writeback limiter is disabled.','Inspect vmatlas zram before requesting any writeback.')
+            else: add('Writeback guard','OK','Locked between passes.' if z.get('wb_limit')==0 else f"Pass allowance: {size(z.get('wb_limit',0)*4096)}")
+            if policy.get('WRITEBACK_ENABLED')=='0': add('Auto writeback','OFF','Explicitly disabled in the policy.')
+            elif combined and policy.get('WRITEBACK_ENABLED')=='1':
+                quota=policy.get('WRITEBACK_BOOT_QUOTA_MIB')
+                written=z.get('wb_boot_writes',z.get('bd_writes',0))*4096
+                exhausted=quota is not None and quota.isdigit() and written>=int(quota)*1048576
+                add('Auto writeback','WAIT' if exhausted else 'OK', 'Boot quota reached; automatic writes are intentionally deferred.' if exhausted else 'Scheduled; residency, page eligibility, pressure and quota gates still apply.')
+            elif custom_wb: add('Auto writeback','UNKNOWN','Custom writeback timer is active; its policy and results need validation.')
+            elif not facts.get('service_error'): add('Auto writeback','GAP','Backing storage exists, but no supported active writeback policy was found.','Inspect the timer and /etc/vmatlas/zram-tiers.conf.')
+    auto=[e for e in facts['events'] if e.get('src')=='auto']
+    for action,label in (('recompress','Recompression evidence'),('writeback','Writeback evidence')):
+        records=[e for e in auto if e.get('action')==action]
+        failures=[e for e in records if e.get('rc') not in (None,'0') or e.get('result') in ('failed','error')]
+        successful=[e for e in records if e.get('rc')=='0' or e.get('result') in ('ok','budget_exhausted')]
+        if failures: add(label,'FAIL',f'{len(failures)} failed automatic request(s) retained this boot.','Inspect journalctl -b -u vmatlas-zram-tier-manager.service -u zram-writeback.service')
+        elif successful:
+            modes=sorted({e.get('mode','unspecified') for e in successful})
+            add(label,'OK',f'{len(successful)} successful automatic request(s) this boot: '+', '.join(modes)+'. This is not a performance benchmark.')
+        else: add(label,'UNPROVEN','No successful automatic action record this boot. Manual activity and counters alone do not establish automatic operation.')
+    profile=facts['profile']
+    if profile.get('error'): add('VM profile','UNKNOWN',profile['error'])
     else:
-        helpme()
+        state=profile.get('state',{}); drift=state.get('drift',[])
+        add('VM profile','GAP' if drift else ('OK' if state.get('exact') else 'OFF'), f"{state.get('configured') or 'none configured'}; {len(drift)} live difference(s)", 'vmatlas profile detect' if drift else None)
+        overrides=facts.get('profile_overrides',[])
+        if overrides: add('Saved VM overrides','OK',f'{len(overrides)} VM values from 99-vmscope.conf override the named profile; comparison includes them.','vmatlas pins')
+    mglru=facts.get('mglru')
+    try: mglru_state='OFF' if int(mglru,0)==0 else 'OK'
+    except (ValueError,TypeError): mglru_state='UNSUPPORTED' if mglru is None else 'UNKNOWN'
+    add('MGLRU',mglru_state,mglru or 'Interface absent.')
+    cryo=units.get('cryo-pressure.service',{})
+    add('Cryo governor','OK' if active('cryo-pressure.service') else 'OFF','Running.' if active('cryo-pressure.service') else 'Not running; an optional desktop pressure governor.')
+    count=facts.get('oom_kill')
+    add('Kernel OOM kills','UNKNOWN' if count is None else ('OK' if count=='0' else 'ATTENTION'), 'Counter unavailable.' if count is None else f'{count} this boot; userspace-managed exits are separate.')
+    return findings
 
 
-if __name__ == "__main__":
-    main()
+def check_view(args=()):
+    if list(args) not in ([],['--json']): raise CLIError('Usage: vmatlas check [--json]')
+    facts=check_facts(); findings=assess(facts)
+    code=2 if any(f['status']=='FAIL' for f in findings) else (1 if any(f['status']=='GAP' for f in findings) else 0)
+    report={'schema_version':1,'exit_status':code,'findings':findings,'facts':facts}
+    if '--json' in args: print(json.dumps(report,indent=2))
+    else:
+        ui=UI();ui.title('VM Atlas · system check')
+        for f in findings:
+            ui.line(f"{f['status']}  {f['feature']}",2,c.yl if f['status'] in ('FAIL','GAP','ATTENTION') else c.B)
+            ui.line(f['detail'],4)
+            if f.get('next'): ui.line('Next: '+f['next'],4,c.D)
+        ui.footer('Read-only. OFF/UNSUPPORTED are not failures. UNPROVEN means evidence is missing. Exit: 0 no detected gap/failure; 1 setup gap; 2 failure. No automatic tuning was applied.')
+    return code
+
+
+def guide(topic=None):
+    ui=UI(); ui.title('VM Atlas · quick guide')
+    topics={
+        'profiles': [('Inspect before applying','vmatlas profiles → vmatlas profile show NAME'),('Compare live settings','vmatlas profile detect'),('Apply a saved profile','vmatlas profile apply NAME'),('Save current VM values','vmatlas profile create NAME --from-live'),('Check saved baseline','vmatlas restore-default --check'),('Restore saved baseline','vmatlas restore-default')],
+        'zram': [('Live device','vmatlas zram'),('Saved boot settings','vmatlas zram config'),('Available presets','zram-profile-stage --list'),('Preview a preset','zram-profile-stage NAME --dry-run')],
+        'tiers': [('Automatic policy and recorded actions','vmatlas tiers'),('Policy file','/etc/vmatlas/zram-tiers.conf'),('Detailed manager checks','vmatlas-zram doctor')],
+        'pins': [('Saved VM values','vmatlas pins'),('Current VM values','vmatlas all'),('Setting explanation','vmatlas explain swappiness')],
+    }
+    if topic and topic not in topics: raise CLIError('Guide topics: profiles | zram | tiers | pins')
+    for name, entries in topics.items():
+        if topic and name!=topic: continue
+        ui.line(); ui.title(name.capitalize())
+        for label,cmd in entries: ui.line(label,2); ui.line(cmd,4,c.cy)
+    ui.footer('Reading a view does not apply settings. Profile apply, create, restore-default and external staging tools change state; inspect their help before use. ZRAM logical capacity is not additional physical RAM.')
+
+
+def helpme():
+    ui=UI(); ui.title('VM Atlas · Linux memory tools')
+    ui.table(('Read current state','Purpose'), [('vmatlas','Compact memory overview'),('vmatlas check [--json]','Capabilities, service gaps and action evidence'),('vmatlas profiles [--all]','Saved profiles; optional legacy entries'),('vmatlas profile show NAME','Inspect one profile'),('vmatlas profile detect','Compare the configured profile with live values'),('vmatlas zram [--details]','Compression, RAM use and disk writeback'),('vmatlas tiers','Automatic policy and recorded actions'),('vmatlas all [FILTER] [--changed] [--details]','VM settings and reference values'),('vmatlas explain KEY','Local kernel documentation'),('vmatlas pins','Saved settings by file'),('vmatlas zram config','Saved generator configuration'),('vmatlas guide [TOPIC]','Task-oriented instructions'),('vmatlas json','Machine-readable snapshot')])
+    ui.line(); ui.title('Explicit changes')
+    for cmd in ('vmatlas profile apply NAME','vmatlas profile create NAME --from-live','vmatlas restore-default [--check]'): ui.line(cmd,2)
+    ui.footer('profile, profiles and profile list show the same catalog. list, show and detect accept --json. NO_COLOR disables terminal colors. --check only compares the saved baseline.')
+
+
+def as_json():
+    z=zram_info() or {}
+    if z.get('compr'): z['ratio']=round(z['orig']/z['compr'],3)
+    catalog=profile_catalog()
+    data={'vm':read_vm(),'zram':z,'profile':catalog.get('state'),'pins':pins()}
+    if catalog.get('error'): data['profile_error']=catalog['error']
+    print(json.dumps(data,indent=2))
+
+
+def restore_default_command(args):
+    if list(args) not in ([],['--check']): raise CLIError('Usage: vmatlas restore-default [--check]')
+    return subprocess.run(['/usr/local/libexec/vmatlas-restore-default',*args]).returncode
+
+
+def main(argv=None):
+    a=list(sys.argv[1:] if argv is None else argv) or ['status']; cmd,*args=a
+    try:
+        if cmd in ('help','--help','-h'): helpme()
+        elif cmd=='profile': return profile_command(args) or 0
+        elif cmd=='profiles': show_profiles(args)
+        elif cmd in ('check','doctor'): return check_view(args)
+        elif cmd=='all': show_all(args)
+        elif cmd=='zram': zram_view(args)
+        elif cmd=='restore-default': return restore_default_command(args)
+        elif cmd=='explain' and len(args)==1: explain(args[0])
+        elif cmd=='guide' and len(args)<=1: guide(args[0] if args else None)
+        elif not args and cmd in ('status','snapshot'): status()
+        elif not args and cmd in ('tiers','tier'): tiers_view()
+        elif not args and cmd=='pins': show_pins()
+        elif not args and cmd=='json': as_json()
+        else: raise CLIError('Unknown command or extra arguments. Run: vmatlas help')
+        return 0
+    except CLIError as e:
+        print(f'vmatlas: {e}',file=sys.stderr); return e.code
+    except OSError as e:
+        print(f'vmatlas: {e}',file=sys.stderr); return 2
+
+
+if __name__=='__main__':
+    try: sys.exit(main())
+    except BrokenPipeError: os._exit(0)

@@ -1,0 +1,11 @@
+[Unit]
+Description=Low-rate PC reconnection check
+
+[Timer]
+OnActiveSec=1s
+OnUnitActiveSec=60s
+AccuracySec=1s
+Unit=pc-reconnect-watch.service
+
+[Install]
+WantedBy=timers.target

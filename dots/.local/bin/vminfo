@@ -5,8 +5,10 @@ Shows memory, CPU, swap, pressure, and process data in a responsive,
 continuously updating TUI that adapts to terminal size.
 
 Keys:
+  m      Freeze the process snapshot and enter/leave manager mode
   1-4    Switch process view (RSS / CPU / Swap / Total)
   +/-    Show more / fewer processes
+  v      Cycle All / User / System processes
   f      Force-swap (evict) selected PIDs/names into swap
   u      Unswap (fault back) selected PIDs/names into RAM
   k      Send an explicit signal to selected PIDs
@@ -14,6 +16,16 @@ Keys:
   w      Run guarded ZRAM writeback
   Space  Pause
   q      Quit
+
+Manager keys:
+  Up/Down, j/k  Move; PgUp/PgDn, Home/End jump
+  Space         Tick/untick a process
+  a / c         Select all matching processes / clear selection
+  b             Select only the currently visible rows
+  /             Search by PID, user, UID, name, or command line
+  i             Inspect the cursor process
+  f / u / x     Force-swap / unswap / signal checked processes
+  m / Esc       Leave manager and restore the prior pause state
 """
 import sys
 import os
@@ -25,6 +37,9 @@ import signal
 import shutil
 import unicodedata
 import fcntl
+import fnmatch
+import pwd
+import shlex
 
 def keyboard_input(prompt=''):
     """Read a keyboard line, excluding terminal events and bracketed paste."""
@@ -839,6 +854,38 @@ def _read_proc_field(pid, field_path):
         return None
 
 
+def process_start_ticks(stat_text):
+    # The comm field may itself contain spaces and closing parentheses.
+    return int(stat_text.rsplit(')', 1)[1].split()[19])
+
+
+def read_process_identity(pid):
+    """Read start time and owner without accepting a PID recycled mid-read."""
+    try:
+        start = process_start_ticks(_read_proc_field(pid, 'stat'))
+        status = _read_proc_field(pid, 'status')
+        uid = int(next(line.split()[1] for line in status.splitlines()
+                       if line.startswith('Uid:')))
+        if start != process_start_ticks(_read_proc_field(pid, 'stat')):
+            return None
+        return {'start': start, 'uid': uid}
+    except (AttributeError, IndexError, StopIteration, TypeError, ValueError):
+        return None
+
+
+def snapshot_identity(proc):
+    if proc.get('start') is None or proc.get('uid') is None:
+        return None
+    return {'start': proc['start'], 'uid': proc['uid']}
+
+
+def display_user(uid):
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except (KeyError, TypeError):
+        return str(uid) if uid is not None else '?'
+
+
 def _display_comm(pid, comm):
     """Give Firefox's otherwise ambiguous content processes useful labels."""
     firefox_comms = {
@@ -912,8 +959,10 @@ def get_enriched_processes(limit=10):
         except (ValueError, IndexError):
             continue
 
-        comm = _read_proc_field(pid, 'comm') or '?'
-        comm = _display_comm(pid, comm)
+        stat_before = _read_proc_field(pid, 'stat')
+        raw_comm = _read_proc_field(pid, 'comm') or '?'
+        comm = _display_comm(pid, raw_comm)
+        cmdline = (_read_proc_field(pid, 'cmdline') or '').replace('\0', ' ').strip()
 
         # Use inexpensive status counters to separate anonymous resident RAM,
         # file-backed mappings, and swapped pages. This avoids a full smaps
@@ -951,11 +1000,16 @@ def get_enriched_processes(limit=10):
 
         # Cumulative CPU time (utime + stime from /proc/pid/stat)
         cputime_s = 0.0
+        start = None
         try:
             stat_raw = _read_proc_field(pid, 'stat')
             if stat_raw:
+                current_start = process_start_ticks(stat_raw)
+                if current_start != process_start_ticks(stat_before):
+                    continue
+                start = current_start
                 # Split on ')' to skip comm field (may contain spaces)
-                after_comm = stat_raw.split(')', 1)[1].split()
+                after_comm = stat_raw.rsplit(')', 1)[1].split()
                 # utime is field 14, stime is field 15 (1-indexed from start)
                 # After splitting past comm: index 11=utime, 12=stime
                 utime = int(after_comm[11])
@@ -967,6 +1021,8 @@ def get_enriched_processes(limit=10):
         processes.append({
             'pid': pid,
             'comm': comm,
+            'raw_comm': raw_comm,
+            'cmdline': cmdline,
             'rss': rss,
             'vsz': vsz,
             'swap': swap,
@@ -983,6 +1039,8 @@ def get_enriched_processes(limit=10):
             'total_mem': rss + swap,
             'cputime_s': cputime_s,
             'uid': uid,
+            'user': display_user(uid),
+            'start': start,
             'owned': uid == os.getuid(),
         })
 
@@ -1059,8 +1117,12 @@ def footer_rows(width, count, filter_label='Filter', android=False, lite=False):
         controls += [('f', 'swap', BMAGENTA), ('u', 'unswap', BGREEN),
                      ('k', 'sig', BRED), ('r', 'recomp', BMAGENTA), ('w', 'wb', BCYAN)]
     controls += [('Space', 'pause', DIM)]
-    if android and not lite:
+    if not lite:
         controls += [('m', 'select', BYELLOW)]
+    return control_rows(controls, width)
+
+
+def control_rows(controls, width):
     rows, current = [], ' '
     for key, label, color in controls:
         item = f'{color}[{key}]{RESET} {label}'
@@ -1070,6 +1132,23 @@ def footer_rows(width, count, filter_label='Filter', android=False, lite=False):
         else:
             current += ('' if current == ' ' else ' ') + item
     rows.append(current)
+    return rows
+
+
+def manager_footer_rows(manager, width, count, filter_label):
+    query = f" · search={manager.query!r}" if manager.query else ''
+    rows = [f" {BYELLOW}{len(manager.selected)} selected{RESET}{query}"]
+    rows += control_rows([
+        ('↑↓/jk', 'move', BYELLOW), ('PgUp/PgDn', 'page', DIM),
+        ('Home/End', 'jump', DIM), ('Space', 'tick', BYELLOW),
+        ('a', 'all matches', DIM), ('b', 'visible', BYELLOW),
+        ('c', 'clear', DIM), ('/', 'search', DIM),
+        ('i', 'inspect', BCYAN), ('1-4', 'view', DIM), ('v', filter_label, DIM),
+        ('+/-', count, DIM), ('f', 'swap', BMAGENTA), ('u', 'unswap', BGREEN),
+        ('x', 'signal', BRED), ('m/Esc', 'exit', DIM),
+    ], width)
+    if manager.notice:
+        rows.append(f" {BYELLOW}{manager.notice}{RESET}")
     return rows
 
 
@@ -1141,7 +1220,7 @@ def dirty_fields(knobs):
 
 def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                    proc_limit, cpu_pct, temps, loadavg, uptime_s,
-                   zones=None, vmstat_deltas=None):
+                   zones=None, vmstat_deltas=None, proc_filter=0, manager=None):
     """Render the complete dashboard, adapting to terminal width AND height."""
     lines = []
     tw, th = get_term_size()
@@ -1181,6 +1260,12 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     vm_knobs = get_vm_knobs()
     memory_cells = memory_breakdown_cells(mem, mem.get('MemAvailable', 0))
     memory_grid_lines = memory_grid(memory_cells, tw)
+    manager_active = manager is not None and manager.active
+    ordered = (manager.ordered(view_idx, proc_filter) if manager_active else
+               ordered_processes(processes, view_idx, proc_filter))
+    filter_label = ('All', 'User', 'Sys')[proc_filter]
+    if manager_active:
+        manager.cursor = min(max(0, manager.cursor), max(0, len(ordered) - 1))
 
     has_zram = zr.get('orig', 0) > 0
     zram_busy = bool(zr.get('busy'))
@@ -1192,7 +1277,8 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     show_zones = not is_tiny and th >= 40 and tw >= 75 and bool(display_zones)
 
     # ── Header ──────────────────────────────────────────────────────
-    status = (f"{BRED}PAUSED{RESET}" if paused else f"{BGREEN}LIVE{RESET}")
+    status = (f"{BYELLOW}MANAGER{RESET}" if manager_active else
+              f"{BRED}PAUSED{RESET}" if paused else f"{BGREEN}LIVE{RESET}")
     if is_tiny:
         emit(f" {BOLD}{BCYAN}vminfo{RESET} {status}")
     else:
@@ -1401,9 +1487,29 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     # The upper dashboard now wraps telemetry according to the live width.
     # Measure the rendered lines directly so process rows fill only genuinely
     # unused height instead of relying on stale fixed-line estimates.
-    table_chrome = 5 + len(footer_rows(tw, f"{min(proc_limit, len(processes))}/{len(processes)}"))
+    count_hint = f"{min(proc_limit, len(ordered))}/{len(ordered)}"
+    if manager_active:
+        count_hint = f"{len(ordered)}-{len(ordered)}/{len(ordered)}"
+    footer_height = len(manager_footer_rows(manager, tw, count_hint, filter_label)
+                        if manager_active else footer_rows(tw, count_hint, filter_label))
+    table_chrome = 5 + footer_height
+    if manager_active and len(lines) + table_chrome + min(5, len(ordered)) > th:
+        # Keep navigation, checkmarks, and actions visible in short split panes.
+        lines = lines[:2]
+        emit_packed(' ', [f"CPU {cpu_pct or 0:.0f}%",
+                         f"RAM avail {to_human(avail_ram)}/{to_human(total_ram)}",
+                         f"Swap {to_human(used_swap)}/{to_human(total_swap)}",
+                         f"PSI {s10:.2f}% / full {f10:.2f}%"])
     max_procs_by_height = max(1, th - len(lines) - table_chrome)
     effective_limit = min(proc_limit, max_procs_by_height)
+    window_start = 0
+    if manager_active:
+        manager.page_size = effective_limit
+        manager.offset = min(manager.offset, manager.cursor)
+        if manager.cursor >= manager.offset + effective_limit:
+            manager.offset = manager.cursor - effective_limit + 1
+        manager.offset = min(max(0, manager.offset), max(0, len(ordered) - effective_limit))
+        window_start = manager.offset
 
     # ── Process Table ───────────────────────────────────────────────
     emit("")
@@ -1416,19 +1522,23 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     emit(f" {' '.join(tabs)}")
     emit(f" {CYAN}{'─' * max(1, tw - 2)}{RESET}")
 
-    # Sort processes
     sort_key = view['sort']
-    if sort_key == 'pcpu':
-        sorted_procs = sorted(processes, key=lambda p: p.get('pcpu', 0), reverse=True)
-    elif sort_key == 'swap':
-        sorted_procs = sorted(processes, key=lambda p: p.get('swap', 0), reverse=True)
-    elif sort_key == 'total_mem':
-        sorted_procs = sorted(processes, key=lambda p: p.get('total_mem', 0), reverse=True)
-    else:
-        sorted_procs = sorted(processes, key=lambda p: p.get('rss', 0), reverse=True)
+    display_procs = ordered[window_start:window_start + effective_limit]
+    if manager is not None:
+        manager.visible_rows = [dict(proc) for proc in display_procs]
+    total_procs = len(ordered)
+    prefix_width = 6 if manager_active else 3
+    header_prefix = ' ' * prefix_width
+    table_width = tw - (prefix_width - 3)
 
-    display_procs = sorted_procs[:effective_limit]
-    total_procs = len(sorted_procs)
+    def row_prefix(proc, index):
+        if not manager_active:
+            return '   '
+        current = window_start + index == manager.cursor
+        checked = str(proc['pid']) in manager.selected
+        arrow, box = ('›' if current else ' '), ('x' if checked else ' ')
+        color = BYELLOW if current else BGREEN if checked else DIM
+        return f" {color}{arrow}[{box}]{RESET} "
 
     def command_cell(command, width):
         """Truncate/pad the process name without wasting responsive columns."""
@@ -1439,50 +1549,50 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
             return command[:width]
         return f"{command[:width - 1]}…"
 
-    if tw < 55:
+    if table_width < 55:
         # At genuinely tiny widths, retain a useful PID/command/value view.
-        command_width = max(6, tw - 3 - 8 - 10 - 1)
+        command_width = max(6, tw - prefix_width - 8 - 10 - 1)
         sort_label = 'TOTAL' if sort_key == 'total_mem' else sort_key.upper()
-        emit(f"   {DIM}{'PID':<8}{'CMD':<{command_width}}{sort_label:>10}{RESET}")
-        for p in display_procs:
+        emit(f"{header_prefix}{DIM}{'PID':<8}{'CMD':<{command_width}}{sort_label:>10}{RESET}")
+        for index, p in enumerate(display_procs):
             if sort_key == 'pcpu': val = f"{p['pcpu']:.1f}%"
             elif sort_key == 'swap': val = to_human(p['swap'])
             elif sort_key == 'total_mem': val = to_human(p['total_mem'])
             else: val = to_human(p['rss'])
-            emit(f"   {CYAN}{p['pid']:<8}{RESET}"
+            emit(f"{row_prefix(p, index)}{CYAN}{p['pid']:<8}{RESET}"
                  f"{command_cell(p['comm'], command_width)}"
                  f"{BWHITE}{val:>10}{RESET}")
-    elif tw < 65:
+    elif table_width < 65:
         # Preserve the operator-critical process state, OOM score, and age
         # before optional CPU/thread columns in a cramped pane.
         fixed_width = 7 + 8 + 8 + 4 + 4 + 7  # PID, RSS, SWAP, ST, OOM, AGE
-        command_width = max(8, tw - 3 - fixed_width - 1)
-        emit(f"   {DIM}{'PID':<7}{'COMMAND':<{command_width}}"
+        command_width = max(8, tw - prefix_width - fixed_width - 1)
+        emit(f"{header_prefix}{DIM}{'PID':<7}{'COMMAND':<{command_width}}"
              f"{'RSS':>8}{'SWAP':>8}{'ST':>4}{'OOM':>4}{'UP':>7}{RESET}")
-        for p in display_procs:
+        for index, p in enumerate(display_procs):
             oom = p['oom_score']
             oom_c = BRED if oom > 800 else (BYELLOW if oom > 400 else GRAY)
             swap_c = BMAGENTA if p['swap'] > 0 else DIM
-            emit(f"   {CYAN}{p['pid']:<7}{RESET}"
+            emit(f"{row_prefix(p, index)}{CYAN}{p['pid']:<7}{RESET}"
                  f"{command_cell(p['comm'], command_width)}"
                  f"{BWHITE}{to_human(p['rss']):>8}{RESET}"
                  f"{swap_c}{to_human(p['swap']):>8}{RESET}"
                  f" {fmt_state(p['state'])}"
                  f"{oom_c}{oom:>4}{RESET}"
                  f"{DIM}{fmt_duration(p['elapsed']):>7}{RESET}")
-    elif tw < 90:
+    elif table_width < 90:
         # In the normal split-pane range, keep ST/OOM/AGE and drop MEM%/THR;
         # those are less actionable than knowing whether a process is stopped,
         # OOM-prioritized, and how long it has been alive.
         fixed_width = 8 + 10 + 10 + 7 + 4 + 5 + 8
-        command_width = max(8, tw - 3 - fixed_width - 1)
-        emit(f"   {DIM}{'PID':<8}{'COMMAND':<{command_width}}"
+        command_width = max(8, tw - prefix_width - fixed_width - 1)
+        emit(f"{header_prefix}{DIM}{'PID':<8}{'COMMAND':<{command_width}}"
              f"{'RSS':>10}{'SWAP':>10}{'CPU%':>7}{'ST':>4}{'OOM':>5}{'UPTIME':>8}{RESET}")
-        for p in display_procs:
+        for index, p in enumerate(display_procs):
             oom = p['oom_score']
             oom_c = BRED if oom > 800 else (BYELLOW if oom > 400 else GRAY)
             swap_c = BMAGENTA if p['swap'] > 0 else DIM
-            emit(f"   {CYAN}{p['pid']:<8}{RESET}"
+            emit(f"{row_prefix(p, index)}{CYAN}{p['pid']:<8}{RESET}"
                  f"{command_cell(p['comm'], command_width)}"
                  f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
                  f"{swap_c}{to_human(p['swap']):>10}{RESET}"
@@ -1492,11 +1602,11 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                  f"{DIM}{fmt_duration(p['elapsed']):>8}{RESET}")
     else:
         fixed_width = 8 + 10 + 10 + 7 + 7 + 5 + 5 + 5 + 8
-        command_width = max(8, tw - 3 - fixed_width - 1)
-        emit(f"   {DIM}{'PID':<8}{'COMMAND':<{command_width}}"
+        command_width = max(8, tw - prefix_width - fixed_width - 1)
+        emit(f"{header_prefix}{DIM}{'PID':<8}{'COMMAND':<{command_width}}"
              f"{'RSS':>10}{'SWAP':>10}{'CPU%':>7}{'MEM%':>7}"
              f"{'THR':>5}{'ST':>5}{'OOM':>5}{'UPTIME':>8}{RESET}")
-        for p in display_procs:
+        for index, p in enumerate(display_procs):
             oom = p['oom_score']
             if oom > 800:
                 oom_c = BRED
@@ -1507,7 +1617,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
 
             swap_c = BMAGENTA if p['swap'] > 0 else DIM
 
-            emit(f"   {CYAN}{p['pid']:<8}{RESET}"
+            emit(f"{row_prefix(p, index)}{CYAN}{p['pid']:<8}{RESET}"
                  f"{command_cell(p['comm'], command_width)}"
                  f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
                  f"{swap_c}{to_human(p['swap']):>10}{RESET}"
@@ -1524,8 +1634,12 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     # ── Footer ──────────────────────────────────────────────────────
     emit("")
     shown = len(display_procs)
-    count_info = f"{shown}" if shown == total_procs else f"{shown}/{total_procs}"
-    for row in footer_rows(tw, count_info):
+    count_info = (f"{window_start + 1}-{window_start + shown}/{total_procs}"
+                  if manager_active and shown else
+                  f"{shown}" if shown == total_procs else f"{shown}/{total_procs}")
+    footer = (manager_footer_rows(manager, tw, count_info, filter_label)
+              if manager_active else footer_rows(tw, count_info, filter_label))
+    for row in footer:
         emit(row)
 
     return "\n".join(lines)
@@ -1549,14 +1663,7 @@ def _partial_suffix(data, marker):
 
 
 def parse_terminal_input(data, in_paste=False, text=False):
-    """Return command keys while consuming terminal control/mouse events.
-
-    Kitty sends scroll actions as cursor-key escape sequences on the alternate
-    screen. Mouse tracking sends SGR mouse events instead. Consume either form
-    as a complete event so neither can leave bytes queued ahead of real
-    keyboard commands. Bracketed paste is ignored as well, preventing a
-    middle-click paste from accidentally invoking dashboard actions.
-    """
+    """Decode navigation and keys; consume mouse/paste packets atomically."""
     keys = []
     pos = 0
 
@@ -1613,11 +1720,32 @@ def parse_terminal_input(data, in_paste=False, text=False):
                 end += 1
             if end >= len(data):
                 break
+            sequence = data[pos:end + 1]
+            csi_keys = {
+                b'\033[A': 'UP', b'\033[B': 'DOWN',
+                b'\033[C': 'RIGHT', b'\033[D': 'LEFT',
+                b'\033[H': 'HOME', b'\033[F': 'END',
+                b'\033[1~': 'HOME', b'\033[4~': 'END',
+                b'\033[7~': 'HOME', b'\033[8~': 'END',
+                b'\033[5~': 'PAGEUP', b'\033[6~': 'PAGEDOWN',
+            }
+            if sequence in csi_keys:
+                keys.append(csi_keys[sequence])
+            elif re.fullmatch(rb'\x1b\[<(64|65);\d+;\d+M', sequence):
+                keys.append('WHEEL_UP' if sequence.startswith(b'\033[<64;')
+                            else 'WHEEL_DOWN')
             pos = end + 1
         elif introducer == ord('O'):
             # SS3 cursor/function-key form, e.g. ESC O A.
             if pos + 2 >= len(data):
                 break
+            ss3_keys = {
+                ord('A'): 'UP', ord('B'): 'DOWN',
+                ord('C'): 'RIGHT', ord('D'): 'LEFT',
+                ord('H'): 'HOME', ord('F'): 'END',
+            }
+            if data[pos + 2] in ss3_keys:
+                keys.append(ss3_keys[data[pos + 2]])
             pos += 3
         elif introducer in (ord(']'), ord('P'), ord('_'), ord('^')):
             # OSC replies end in BEL or ST (ESC backslash).
@@ -1641,12 +1769,43 @@ def parse_terminal_input(data, in_paste=False, text=False):
     return keys, data[pos:], in_paste
 
 
+class DashboardRenderer:
+    """Write changed rows only; an unchanged or paused frame emits no bytes."""
+    def __init__(self):
+        self.previous = None
+        self.size = None
+        self.generation = None
+
+    def encode(self, output, size, generation=0):
+        width, height = size
+        rows = output.split('\n')[:height]
+        full = (self.previous is None or self.size != size or
+                self.generation != generation)
+        previous = [] if full else self.previous
+        parts = ['\033[H\033[2J'] if full else []
+        for index, row in enumerate(rows):
+            if index >= len(previous) or row != previous[index]:
+                parts.append(f'\033[{index + 1};1H\033[0m{row}\033[K')
+        if len(rows) < len(previous) and len(rows) < height:
+            parts.append(f'\033[{len(rows) + 1};1H\033[0m\033[J')
+        self.previous, self.size, self.generation = rows, size, generation
+        return ''.join(parts)
+
+    def write(self, output, generation=0):
+        change = self.encode(output, get_term_size(), generation)
+        if change:
+            sys.stdout.write(change)
+            sys.stdout.flush()
+
+
 class RawTerminal:
     def __init__(self):
         self.fd = sys.stdin.fileno()
         self.old_settings = None
         self.input_buffer = b''
         self.in_paste = False
+        self.screen_generation = 0
+        self.input_buffer_since = None
 
     def __enter__(self):
         global _dashboard_terminal_active
@@ -1684,11 +1843,18 @@ class RawTerminal:
             chunks.append(chunk)
 
         if not chunks:
+            if (self.input_buffer == b'\033' and
+                    self.input_buffer_since is not None and
+                    time.monotonic() - self.input_buffer_since >= 0.08):
+                # Keep the prefix to consume a delayed terminal packet safely.
+                self.input_buffer_since = None
+                return ['ESC']
             return []
 
         data = self.input_buffer + b''.join(chunks)
         keys, self.input_buffer, self.in_paste = parse_terminal_input(
             data, self.in_paste)
+        self.input_buffer_since = time.monotonic() if self.input_buffer else None
         return keys
 
     def suspend(self):
@@ -1699,6 +1865,7 @@ class RawTerminal:
             sys.stdout.flush()
 
     def resume(self):
+        self.screen_generation += 1
         if self.old_settings is not None:
             import tty
             tty.setcbreak(self.fd)
@@ -1714,111 +1881,310 @@ def sort_processes(processes, view_idx):
     return sorted(processes, key=lambda p: p.get(key, 0), reverse=True)
 
 
-def resolve_selection(raw, shown):
-    """Map a typed selection to PIDs against the currently shown rows.
+def ordered_processes(processes, view_idx, proc_filter=0, query=''):
+    rows = filtered_processes(processes, proc_filter)
+    query = query.strip().casefold()
+    if query:
+        rows = [p for p in rows if any(query in str(p.get(field, '')).casefold()
+                for field in ('pid', 'comm', 'raw_comm', 'cmdline', 'user', 'uid'))]
+    return sort_processes(rows, view_idx)
 
-    Accepts raw PIDs, comm substrings, and 'all' (= everything on screen).
-    """
-    raw = raw.strip()
-    if not raw:
-        return []
-    pids = []
-    seen = set()
 
-    def add(pid):
-        if pid > 0 and pid not in seen:
-            seen.add(pid)
-            pids.append(pid)
+def parse_action_size(value):
+    match = re.fullmatch(r'(\d+(?:\.\d+)?)\s*([kmgt])(?:i?b)?', value.strip(), re.I)
+    if not match:
+        raise ValueError('size needs a unit, for example 512M or 2G')
+    return int(float(match[1]) * 1024 ** ('kmgt'.index(match[2].casefold()) + 1))
 
-    for tok in re.split(r'[,\s]+', raw):
-        if not tok:
-            continue
-        if tok.lower() == 'all':
-            for p in shown:
-                add(int(p['pid']))
-        elif tok.isdigit():
-            add(int(tok))
+
+def parse_action_specification(choice):
+    try:
+        tokens = shlex.split(choice)
+    except ValueError as error:
+        return None, str(error)
+    selectors, excludes = [], []
+    maximum, minimum, index = None, 0, 0
+    while index < len(tokens):
+        token = tokens[index]
+        option, equals, value = token.partition('=')
+        if option == '--all' and not equals:
+            selectors.append('all')
+        elif option in {'--except', '--exclude', '--except-bigger-than',
+                        '--exclude-above', '--max-rss', '--max-swap', '--min-rss'}:
+            if not equals:
+                index += 1
+                if index >= len(tokens):
+                    return None, f'{option} needs a value'
+                value = tokens[index]
+            if not value:
+                return None, f'{option} needs a value'
+            if option in {'--except', '--exclude'}:
+                excludes.extend(part.strip() for part in value.split(',') if part.strip())
+            else:
+                try:
+                    size = parse_action_size(value)
+                except ValueError as error:
+                    return None, str(error)
+                if option == '--min-rss':
+                    minimum = size
+                else:
+                    maximum = size
+        elif token.startswith('-'):
+            return None, f'unknown option {token}'
         else:
-            for p in shown:
-                if tok.lower() in p['comm'].lower():
-                    add(int(p['pid']))
-    return pids
+            selectors.extend(part.strip() for part in token.split(',') if part.strip())
+        index += 1
+    if not selectors:
+        return None, 'select PIDs, exact names, globs, or all'
+    is_all = any(part.casefold() == 'all' for part in selectors)
+    if is_all and len(selectors) != 1:
+        return None, 'all must be used alone; filters may follow it'
+    return {'selectors': selectors, 'excludes': excludes, 'maximum': maximum,
+            'minimum': minimum, 'all': is_all}, ''
 
 
-def run_swap_action(op, processes, view_idx, proc_limit, term):
-    """Suspend the TUI, run `sudo <op> <pids>`, then resume."""
+def action_selector_matches(proc, selector):
+    if selector.isdigit():
+        return int(proc['pid']) == int(selector)
+    pattern = selector.casefold()
+    names = {str(proc.get(field, '')).casefold() for field in ('comm', 'raw_comm')}
+    if any(ch in pattern for ch in '*?['):
+        return any(fnmatch.fnmatchcase(name, pattern) for name in names)
+    return pattern in names
+
+
+def resolve_process_selection(choice, processes, view_idx, action):
+    spec, error = parse_action_specification(choice)
+    if error:
+        return [], [], [], error
+    ordered = sort_processes(processes, view_idx)
+    candidates, unknown = [], []
+    if spec['all']:
+        candidates = ordered
+    else:
+        for selector in spec['selectors']:
+            matches = [p for p in ordered if action_selector_matches(p, selector)]
+            if not matches:
+                unknown.append(selector)
+            candidates.extend(matches)
+    selected, skipped, seen = [], [], set()
+    metric = 'swap' if action == 'unswap' else 'rss'
+    for proc in candidates:
+        pid = str(proc['pid'])
+        if pid in seen:
+            continue
+        seen.add(pid)
+        excluded = next((s for s in spec['excludes'] if action_selector_matches(proc, s)), None)
+        if excluded is not None:
+            skipped.append((proc, f'excluded by {excluded!r}'))
+        elif spec['all'] and proc.get('rss', 0) < spec['minimum']:
+            skipped.append((proc, 'below --min-rss'))
+        elif spec['maximum'] is not None and proc.get(metric, 0) > spec['maximum']:
+            skipped.append((proc, f'{metric} exceeds size filter'))
+        elif action != 'signal' and proc.get(metric, 0) <= 0:
+            skipped.append((proc, 'no swap to recover' if action == 'unswap' else 'no resident memory'))
+        else:
+            selected.append(proc)
+    return selected, unknown, skipped, ''
+
+
+def resolve_selection(raw, shown):
+    selected, _, _, _ = resolve_process_selection(raw, shown, 0, 'signal')
+    return [int(proc['pid']) for proc in selected]
+
+
+def prompt_process_selection(processes, view_idx, proc_limit, action, preselected=None):
+    if preselected is None:
+        print("PIDs, exact names, globs, or all in this filtered snapshot. Empty cancels.")
+        print("Filters: --except names/PIDs/globs --except-bigger-than 2G --min-rss 32M")
+        for p in sort_processes(processes, view_idx)[:proc_limit]:
+            print(f"  {p['pid']:>8}  {p['comm']}  rss {to_human(p['rss'])}  swap {to_human(p['swap'])}")
+        choice = keyboard_input(f'\n{action} which? ').strip()
+    else:
+        choice = ','.join(str(p['pid']) for p in preselected)
+    if not choice:
+        print('Cancelled.')
+        return []
+    selected, unknown, skipped, error = resolve_process_selection(choice, processes, view_idx, action)
+    if error:
+        print(f'[-] {error}')
+    for token in unknown:
+        print(f'[-] No snapshot match: {token}')
+    for proc, reason in skipped:
+        print(f"[*] Skipping {proc['pid']} {proc['comm']}: {reason}")
+    if not selected:
+        print('[-] No actionable process selected.')
+    return selected
+
+
+def action_identities(processes, expected_identities=None):
+    identities = {}
+    for proc in processes:
+        pid = str(proc['pid'])
+        expected = (expected_identities.get(pid) if expected_identities is not None
+                    else snapshot_identity(proc))
+        current = read_process_identity(pid)
+        if int(pid) <= 1 or int(pid) == os.getpid():
+            print(f'[-] Refusing PID {pid}.')
+        elif expected is None or current is None or expected != current:
+            print(f'[-] Skipping PID {pid}: exited, reused, changed owner, or unavailable.')
+        else:
+            identities[pid] = current
+    return identities
+
+
+def resolved_arguments(identities):
+    args = []
+    for pid, identity in identities.items():
+        args += ['--_resolved', f"{pid}:{identity['start']}:{identity['uid']}"]
+    return args
+
+
+def print_process_selection(selected):
+    print(f"[*] {len(selected)} selected · RSS {to_human(sum(p['rss'] for p in selected))}"
+          f" · swap {to_human(sum(p['swap'] for p in selected))}")
+    for p in selected:
+        print(f"  {p['pid']:>8}  {p['comm']}  UID {p.get('uid', '?')}")
+
+
+def return_to_dashboard(term):
+    try:
+        keyboard_input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    finally:
+        term.resume()
+
+
+def run_swap_action(op, processes, view_idx, proc_limit, term,
+                    preselected=None, expected_identities=None):
+    """Hand confirmed PID/start/UID selections to the existing memory helper."""
     exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), op)
-    shown = sort_processes(processes, view_idx)[:proc_limit]
-
     term.suspend()
     try:
         verb = "Force-swap (evict)" if op == 'forceswap' else "Unswap (fault back)"
         print(f"\n{BOLD}{BCYAN}== {verb} =={RESET}")
-        print(f"{DIM}Type PIDs and/or names from the table, or 'all'. "
-              f"Empty to cancel.{RESET}")
-        for p in shown[:proc_limit]:
-            print(f"  {CYAN}{p['pid']:>8}{RESET}  {p['comm'][:24]:<24}"
-                  f"  {DIM}rss {to_human(p['rss'])}  swap {to_human(p['swap'])}{RESET}")
-        try:
-            raw = keyboard_input(f"\n{op} which? ")
-        except (EOFError, KeyboardInterrupt):
-            raw = ""
-
-        pids = resolve_selection(raw, shown)
-        if not pids:
-            print("Cancelled.")
-        else:
-            print(f"{BOLD}-> sudo {op} {' '.join(str(p) for p in pids)}{RESET}")
-            try:
-                subprocess.run(["sudo", exe, "-y"] + [str(p) for p in pids])
-            except Exception as e:
-                print(f"[-] Failed to run {op}: {e}")
-
-        try:
-            keyboard_input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
-        except (EOFError, KeyboardInterrupt):
-            pass
+        selected = prompt_process_selection(processes, view_idx, proc_limit, op, preselected)
+        if not selected:
+            return
+        print_process_selection(selected)
+        print('[!] Applications can stall while their pages move between RAM and swap.')
+        if keyboard_input('Confirm [y/N]: ').strip().casefold() not in {'y', 'yes'}:
+            print('Cancelled.')
+            return
+        identities = action_identities(selected, expected_identities)
+        if not identities:
+            print('[-] No selected process passed identity checks.')
+            return
+        command = ['sudo', '--', exe, '--yes']
+        if any(identity['uid'] != os.getuid() for identity in identities.values()):
+            command.append('--system-wide')
+        command += resolved_arguments(identities)
+        print(f"[>] {op} · {len(identities)} verified PID(s)", flush=True)
+        result = subprocess.run(command)
+        if result.returncode:
+            print(f'[-] {op} exited {result.returncode}.')
+    except (EOFError, KeyboardInterrupt):
+        print('Cancelled.')
+    except OSError as error:
+        print(f'[-] Failed to run {op}: {error}')
     finally:
-        term.resume()
+        return_to_dashboard(term)
 
 
-def run_signal_action(processes, view_idx, proc_limit, term):
-    """Send one explicitly chosen signal to selected caller-owned PIDs."""
-    shown = sort_processes(processes, view_idx)[:proc_limit]
+def normalize_signal(value):
+    value = value.strip().upper() or 'TERM'
+    if value.startswith('SIG'):
+        value = value[3:]
+    try:
+        signum = int(value) if value.isdigit() else getattr(signal, f'SIG{value}')
+        if signum == 0 or signum in signal.valid_signals():
+            return signum
+    except AttributeError:
+        pass
+    raise ValueError(f'unknown signal: {value}')
+
+
+def signal_name(signum):
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f'SIG{int(signum)}'
+
+
+def signal_snapshot_pids(signum, identities):
+    """Bind signals to pidfds; a recycled numeric PID is never a fallback."""
+    failed = False
+    for pid, expected in identities.items():
+        descriptor = None
+        try:
+            if int(pid) <= 1 or int(pid) == os.getpid():
+                raise ValueError(f'refusing PID {pid}')
+            descriptor = os.pidfd_open(int(pid), 0)
+            if read_process_identity(pid) != expected:
+                raise ValueError('process exited, PID reused, or owner changed')
+            signal.pidfd_send_signal(descriptor, signum)
+            print(f'[+] {signal_name(signum)} sent to PID {pid}.')
+        except (AttributeError, OSError, ValueError) as error:
+            failed = True
+            print(f'[-] PID {pid}: {error}')
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    return 1 if failed else 0
+
+
+def run_guarded_signal_cli(argv):
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--_signal', type=int, required=True)
+    parser.add_argument('--_resolved', action='append', required=True)
+    args = parser.parse_args(argv)
+    try:
+        signum = normalize_signal(str(args._signal))
+        identities = {}
+        for token in args._resolved:
+            if not re.fullmatch(r'\d+:\d+:\d+', token):
+                raise ValueError('invalid resolved PID/start/UID')
+            pid, start, uid = token.split(':')
+            identities[pid] = {'start': int(start), 'uid': int(uid)}
+        return signal_snapshot_pids(signum, identities)
+    except ValueError as error:
+        print(f'[-] {error}')
+        return 2
+
+
+def run_signal_action(processes, view_idx, proc_limit, term,
+                      preselected=None, expected_identities=None):
     term.suspend()
     try:
-        print(f"\n{BOLD}{BRED}== Signal process =={RESET}")
-        print(f"{DIM}Enter PID/name/all, then a signal (default TERM). Empty cancels.{RESET}")
-        raw = keyboard_input("signal which? ").strip()
-        pids = resolve_selection(raw, shown)
-        if not pids:
-            print("Cancelled.")
+        print(f"\n{BOLD}{BRED}== Signal selected processes =={RESET}")
+        selected = prompt_process_selection(processes, view_idx, proc_limit, 'signal', preselected)
+        if not selected:
             return
-        sig_raw = keyboard_input("signal [TERM]: ").strip().upper() or "TERM"
-        if sig_raw.startswith("SIG"):
-            sig_raw = sig_raw[3:]
-        sig = getattr(signal, f"SIG{sig_raw}", None)
-        if not isinstance(sig, signal.Signals):
-            print(f"[-] Unknown signal: {sig_raw}")
-            return
-        print(f"[!] Sending SIG{sig_raw} to {len(pids)} PID(s): {' '.join(map(str, pids))}")
+        sig = normalize_signal(keyboard_input('signal [TERM]: '))
+        print_process_selection(selected)
+        print(f'[!] Sending {signal_name(sig)} to {len(selected)} selected PID(s).')
         if keyboard_input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
             print("Cancelled.")
             return
-        result = subprocess.run(["sudo", "kill", f"-{sig.value}"] + [str(p) for p in pids],
+        identities = action_identities(selected, expected_identities)
+        if not identities:
+            print('[-] No selected process passed identity checks.')
+            return
+        result = subprocess.run(['sudo', '--', sys.executable, os.path.realpath(__file__),
+                                 '--_signal', str(int(sig))] + resolved_arguments(identities),
                                 text=True, capture_output=True)
+        if result.stdout.strip():
+            print(result.stdout.strip())
         if result.returncode:
-            print(result.stderr.strip() or f"[-] kill exited {result.returncode}")
-        else:
-            print(f"[+] SIG{sig_raw} sent to {len(pids)} PID(s).")
+            print(result.stderr.strip() or f'[-] Signal action exited {result.returncode}.')
     except (EOFError, KeyboardInterrupt):
         print("Cancelled.")
+    except (OSError, ValueError) as error:
+        print(f'[-] {error}')
     finally:
-        try:
-            keyboard_input(f"\n{DIM}[Enter] return to vminfo{RESET} ")
-        except (EOFError, KeyboardInterrupt):
-            pass
-        term.resume()
+        return_to_dashboard(term)
 
 
 def run_zram_action(kind, term):
@@ -1877,9 +2243,221 @@ def filtered_processes(processes, mode):
     return processes
 
 
+def prompt_manager_search(term, current=''):
+    term.suspend()
+    try:
+        return keyboard_input(f'Find PID, user, UID, name, or command [{current}]: ').strip()
+    except (EOFError, KeyboardInterrupt):
+        return current
+    finally:
+        term.resume()
+
+
+def run_process_inspector(proc, term, expected_identity=None):
+    term.suspend()
+    try:
+        pid = str(proc['pid'])
+        expected = expected_identity or snapshot_identity(proc)
+        print(f"\n{BOLD}{BCYAN}== Process inspector: {pid} {proc['comm']} =={RESET}")
+        if expected is None or read_process_identity(pid) != expected:
+            print('[-] Process exited, PID reused, or owner changed since the snapshot.')
+            return
+        details = []
+        status = _read_proc_field(pid, 'status') or ''
+        wanted = {'Name', 'Pid', 'PPid', 'Uid', 'Gid', 'State', 'Threads',
+                  'VmPeak', 'VmSize', 'VmHWM', 'VmRSS', 'RssAnon', 'RssFile',
+                  'RssShmem', 'VmSwap', 'voluntary_ctxt_switches', 'nonvoluntary_ctxt_switches'}
+        details += [line for line in status.splitlines() if line.partition(':')[0] in wanted]
+        for field in ('oom_score', 'oom_score_adj', 'wchan', 'cgroup', 'cmdline'):
+            value = _read_proc_field(pid, field)
+            details.append(f"{field}: {value.replace(chr(0), ' ') if value is not None else '(unavailable)'}")
+        for field in ('exe', 'cwd'):
+            try:
+                value = os.readlink(f'/proc/{pid}/{field}')
+            except OSError:
+                value = '(unavailable)'
+            details.append(f'{field}: {value}')
+        if read_process_identity(pid) != expected:
+            print('[-] Process changed during inspection; details discarded.')
+        else:
+            print('\n'.join(details))
+    finally:
+        return_to_dashboard(term)
+
+
+class ProcessManager:
+    """A frozen process list and selection transaction, independent of paging."""
+    def __init__(self):
+        self.active = False
+        self.processes = []
+        self.visible_rows = []
+        self.cursor = self.offset = 0
+        self.page_size = 1
+        self.selected = set()
+        self.identities = {}
+        self.query = self.notice = ''
+        self.was_paused = False
+
+    def enter(self, processes, paused):
+        self.active = True
+        self.was_paused = paused
+        self.processes = [dict(proc) for proc in processes]
+        self.cursor = self.offset = 0
+        self.selected.clear()
+        self.identities.clear()
+        self.query = ''
+        self.notice = f'Frozen {len(self.processes)} processes. Tick rows with Space.'
+
+    def ordered(self, view_idx, proc_filter):
+        return ordered_processes(self.processes, view_idx, proc_filter, self.query)
+
+    def select(self, proc):
+        pid = str(proc['pid'])
+        expected = snapshot_identity(proc)
+        if expected is None or read_process_identity(pid) != expected:
+            return False
+        self.identities[pid] = expected
+        self.selected.add(pid)
+        return True
+
+    def handle_key(self, ch, term, view_idx, proc_filter, proc_limit):
+        ordered = self.ordered(view_idx, proc_filter)
+        maximum = max(0, len(ordered) - 1)
+        self.cursor = min(self.cursor, maximum)
+        if ch in ('UP', 'WHEEL_UP', 'k'):
+            self.cursor = max(0, self.cursor - 1)
+        elif ch in ('DOWN', 'WHEEL_DOWN', 'j'):
+            self.cursor = min(maximum, self.cursor + 1)
+        elif ch in ('PAGEUP', 'LEFT'):
+            self.cursor = max(0, self.cursor - self.page_size)
+        elif ch in ('PAGEDOWN', 'RIGHT'):
+            self.cursor = min(maximum, self.cursor + self.page_size)
+        elif ch in ('HOME', 'g'):
+            self.cursor = 0
+        elif ch in ('END', 'G'):
+            self.cursor = maximum
+        elif ch == ' ' and ordered:
+            proc = ordered[self.cursor]
+            pid = str(proc['pid'])
+            if pid in self.selected:
+                self.selected.remove(pid)
+                self.identities.pop(pid, None)
+                self.notice = ''
+            elif self.select(proc):
+                self.notice = ''
+            else:
+                self.notice = f'PID {pid} changed or exited; start a new snapshot.'
+        elif ch in ('a', 'A'):
+            count = sum(self.select(proc) for proc in ordered)
+            self.notice = f'Selected {count} matching rows.'
+            if count != len(ordered):
+                self.notice += f' {len(ordered) - count} unavailable.'
+        elif ch in ('b', 'B'):
+            self.selected.clear()
+            self.identities.clear()
+            count = sum(self.select(proc) for proc in self.visible_rows)
+            self.notice = f'Selected {count} visible rows.'
+            if count != len(self.visible_rows):
+                self.notice += f' {len(self.visible_rows) - count} unavailable.'
+        elif ch in ('c', 'C'):
+            self.selected.clear()
+            self.identities.clear()
+            self.notice = 'Selection cleared.'
+        elif ch == '/':
+            self.query = prompt_manager_search(term, self.query)
+            self.cursor = self.offset = 0
+            self.notice = ''
+        elif ch in ('1', '2', '3', '4'):
+            view_idx = int(ch) - 1
+            self.cursor = self.offset = 0
+        elif ch in ('v', 'V'):
+            proc_filter = (proc_filter + 1) % 3
+            self.cursor = self.offset = 0
+        elif ch in ('+', '='):
+            proc_limit = min(50, proc_limit + 5)
+        elif ch in ('-', '_'):
+            proc_limit = max(3, proc_limit - 5)
+        elif ch in ('i', 'I') and ordered:
+            inspected = ordered[self.cursor]
+            run_process_inspector(inspected, term, snapshot_identity(inspected))
+        elif ch in ('f', 'F', 'u', 'U', 'x', 'X'):
+            checked = [proc for proc in sort_processes(self.processes, view_idx)
+                       if str(proc['pid']) in self.selected]
+            if not checked:
+                self.notice = 'Nothing selected; tick rows with Space first.'
+            else:
+                if ch.casefold() == 'x':
+                    run_signal_action(self.processes, view_idx, proc_limit, term,
+                                      preselected=checked, expected_identities=self.identities)
+                else:
+                    op = 'forceswap' if ch.casefold() == 'f' else 'unswap'
+                    run_swap_action(op, self.processes, view_idx, proc_limit, term,
+                                    preselected=checked, expected_identities=self.identities)
+                # A completed or cancelled action ends this selection transaction.
+                self.processes = get_enriched_processes()
+                self.selected.clear()
+                self.identities.clear()
+                self.cursor = self.offset = 0
+                self.notice = 'Snapshot refreshed; selection cleared.'
+        elif ch in ('m', 'M', 'ESC'):
+            self.active = False
+            self.selected.clear()
+            self.identities.clear()
+            self.notice = ''
+        return view_idx, proc_filter, proc_limit
+
+
+def print_usage():
+    print('''vminfo - Desktop memory and process dashboard
+
+Usage: vminfo [--static] [--low-data | --fast]
+Default: 5-second samples, changed rows only; --fast: 0.5-second samples.
+
+Dashboard:
+  m             Freeze the process snapshot and enter manager mode
+  1-4           Sort by RSS / CPU / Swap / RSS + Swap
+  v             Cycle All / User / System processes
+  +/-           Show more / fewer process rows
+  f / u / k     Choose processes to force-swap / unswap / signal
+  r / w         ZRAM recompression / writeback
+  Space         Pause / resume
+  q             Quit
+
+Manager:
+  Up/Down, j/k  Move through the complete frozen list; mouse wheel also moves
+  PgUp/PgDn     Move one visible page (Left/Right also work)
+  Home/End,g/G  First / last matching process
+  Space         Tick / untick the cursor process
+  a / c         Select all matching processes / clear selection
+  b             Replace selection with only the rows currently shown
+  /             Search by PID, user, UID, name, or command line; blank clears
+  i             Inspect the cursor process
+  f / u / x     Force-swap / unswap / signal checked processes
+  1-4, v, +/-   Change sort, process filter, or visible row count
+  m / Esc       Leave manager, restoring the prior pause state
+
+Selection survives searches, filters, and sorting. Actions include every
+checked row, including rows hidden by a later filter. PID start time and UID
+are rechecked before actions. Signals use pidfds to guard against PID reuse.
+
+Typed selections accept PIDs, exact names, globs, or all in the filtered
+snapshot, plus --except, --except-bigger-than, and --min-rss. For example:
+  all --except eden,codex,python* --except-bigger-than 2G
+  'Isolated Web Co'   or   ff:tab*   or   1234,5678
+
+Actions show their targets and require confirmation. The existing forceswap
+and unswap helpers retain their warnings, pressure checks, and readback.''')
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 def main():
+    if sys.argv[1:2] == ['--_signal']:
+        raise SystemExit(run_guarded_signal_cli(sys.argv[1:]))
+    low_data = '--fast' not in sys.argv
+    if '--help' in sys.argv or '-h' in sys.argv:
+        print_usage()
+        return
     # Static / non-interactive mode
     if not sys.stdout.isatty() or '--static' in sys.argv or '-s' in sys.argv:
         mem = get_meminfo()
@@ -1899,6 +2477,7 @@ def main():
     view_idx = 0
     paused = False
     proc_filter = 0
+    manager = ProcessManager()
     proc_limit = preferred_proc_limit()
     auto_proc_limit = True
     tracker = DeltaTracker(alpha=0.3)
@@ -1932,6 +2511,9 @@ def main():
     sys.stdout.flush()
 
     tick_count = 0
+    sample_interval = 5.0 if low_data else 0.5
+    next_sample_at = 0.0
+    renderer = DashboardRenderer()
 
     with RawTerminal() as term:
         try:
@@ -1942,6 +2524,19 @@ def main():
                     if ch in ('q', 'Q'):
                         quit_requested = True
                         break
+                    if manager.active:
+                        if ch in ('+', '=', '-', '_'):
+                            auto_proc_limit = False
+                        view_idx, proc_filter, proc_limit = manager.handle_key(
+                            ch, term, view_idx, proc_filter, proc_limit)
+                        processes = manager.processes
+                        if not manager.active:
+                            paused = manager.was_paused
+                            next_sample_at = 0.0
+                        continue
+                    if ch in ('m', 'M'):
+                        manager.enter(processes, paused)
+                        paused = True
                     elif ch == '1':
                         view_idx = 0
                     elif ch == '2':
@@ -1977,12 +2572,13 @@ def main():
                 if quit_requested:
                     break
 
-                if not paused:
+                if not paused and time.monotonic() >= next_sample_at:
+                    next_sample_at = time.monotonic() + sample_interval
                     if auto_proc_limit:
                         proc_limit = preferred_proc_limit()
                     mem = get_meminfo()
                     psi = get_psi()
-                    zr = get_zram_stats()
+                    zr = get_zram_stats(zr)
                     loadavg = get_loadavg()
                     uptime_s = get_uptime()
                     zones, vmstat = get_watermark_snapshot()
@@ -2016,15 +2612,13 @@ def main():
                 resized[0] = False
 
                 # Redraw
-                sys.stdout.write("\033[H")
                 output = draw_dashboard(mem, psi, zr, view_idx, paused, deltas,
-                                        filtered_processes(processes, proc_filter), proc_limit, cpu_pct, temps,
-                                        loadavg, uptime_s, zones, vmstat_deltas)
-                sys.stdout.write(output)
-                sys.stdout.write(f"\n{ERASE_BELOW}")
-                sys.stdout.flush()
+                                        processes, proc_limit, cpu_pct, temps,
+                                        loadavg, uptime_s, zones, vmstat_deltas,
+                                        proc_filter=proc_filter, manager=manager)
+                renderer.write(output, term.screen_generation)
 
-                time.sleep(0.5)
+                select.select([term.fd], [], [], 0.2)
         except KeyboardInterrupt:
             pass
 
@@ -2035,5 +2629,6 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         pass
     # Restore terminal on exit
-    sys.stdout.write('\033[?1049l\033[?25h')
-    sys.stdout.flush()
+    if sys.stdout.isatty():
+        sys.stdout.write('\033[?1049l\033[?25h')
+        sys.stdout.flush()

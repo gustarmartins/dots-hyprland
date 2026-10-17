@@ -1,0 +1,10 @@
+[Unit]
+Description=Check pinned SSH access for a requested PC reconnection alert
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/pc-reconnect-watch check
+TimeoutStartSec=30
+UMask=0077
+Nice=10
+NoNewPrivileges=yes

@@ -21,3 +21,14 @@ __pycache__/
 *.bak
 *.bak-*
 *.old
+
+# Account settings, mailbox profiles and runtime records belong outside public dots.
+/dots/.config/qs-mail/
+/dots/.config/imak-sspr/
+/dots/.config/pc-reconnect-watch/
+/dots/.thunderbird/
+/dots/.mozilla/native-messaging-hosts/
+/dots/.local/state/qs-mail/
+/dots/.local/state/imak-sspr/
+/dots/.local/state/pc-reconnect-watch/
+/dots/.local/state/codex-tmux/

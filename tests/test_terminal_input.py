@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import signal
 import sys
@@ -18,7 +19,7 @@ def load_input(path):
     nodes = [n for n in tree.body if
              (isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names) or
              (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in constants for t in n.targets))]
-    ns = {'sys': sys, 'os': os, 'select': select, 'time': time}
+    ns = {'sys': sys, 'os': os, 'select': select, 'time': time, 're': re}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), ns)
     return ns
 
@@ -34,15 +35,27 @@ def check_packets(ns):
                 b'\x1b]0;fukrpw\x07', b'\x1bPfwkrup\x1b\\']
     count = 0
     parse = ns['parse_terminal_input']
+    navigation = parse(b'\x1b[A')[0] == ['UP']
     for packet in packets:
+        expected = ['q']
+        if navigation and re.fullmatch(rb'\x1b\[<(64|65);\d+;\d+M', packet):
+            expected.insert(0, 'WHEEL_UP' if packet.startswith(b'\x1b[<64;') else 'WHEEL_DOWN')
         for split in range(len(packet) + 1):
             keys, pending, pasting = parse(packet[:split])
             more, pending, pasting = parse(pending + packet[split:] + b'q', pasting)
-            assert keys + more == ['q'], (packet, split, keys, more)
+            assert keys + more == expected, (packet, split, keys, more)
             assert not pending and not pasting
             count += 1
     assert parse(b'fukrpw1234+- ')[0] == list('fukrpw1234+- ')
     assert parse('á猫'.encode(), text=True)[0] == ['á', '猫']
+    if navigation:
+        for packet, key in [(b'\x1b[A', 'UP'), (b'\x1b[B', 'DOWN'),
+                            (b'\x1b[5~', 'PAGEUP'), (b'\x1b[6~', 'PAGEDOWN'),
+                            (b'\x1bOH', 'HOME'), (b'\x1bOF', 'END')]:
+            for split in range(len(packet) + 1):
+                first, pending, pasting = parse(packet[:split])
+                rest, pending, pasting = parse(pending + packet[split:])
+                assert first + rest == [key] and not pending and not pasting
     return count
 
 

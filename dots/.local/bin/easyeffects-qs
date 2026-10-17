@@ -12,6 +12,29 @@ import time
 
 RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
 DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "easyeffects"
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "easyeffects"
+LOCK_HELD = False
+
+
+def state_file():
+    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "easyeffects-qs-state.json"
+
+
+def startup_locked():
+    if LOCK_HELD:
+        return False
+    lock_path = RUNTIME / "easyeffects-qs.lock"
+    if not lock_path.exists():
+        return False
+    try:
+        with lock_path.open("rb") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            return False
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
 
 
 def exchange(command, reply=True):
@@ -31,103 +54,213 @@ def exchange(command, reply=True):
 def state():
     result = {"available": shutil.which("easyeffects") is not None,
               "active": False, "preset": "", "bypassed": False,
+              "known": True, "error": "",
               "presets": sorted(p.stem for p in (DATA / "output").glob("*.json"))}
     try:
+        bypass = exchange("get_global_bypass")
+        if bypass not in ("0", "1", "2"):
+            raise ValueError("Invalid bypass response")
+        result["bypassed"] = bypass == "1"
         result["preset"] = exchange("get_last_loaded_preset:output")
-        result["bypassed"] = exchange("get_global_bypass") == "1"
         result["active"] = True
-    except OSError:
-        pass
+    except (FileNotFoundError, ConnectionRefusedError):
+        if startup_locked():
+            result["known"] = False
+    except (OSError, ValueError):
+        result["known"] = False
+        result["error"] = "EasyEffects is not responding; retrying status."
     return result
 
 
+def confirmed_state():
+    current = state()
+    if not current["known"]:
+        raise RuntimeError(current["error"])
+    return current
+
+
 def wait_for_tray():
-    for _ in range(60):
-        result = subprocess.run(
-            ["busctl", "--user", "--timeout=1", "get-property", "org.kde.StatusNotifierWatcher",
-             "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher", "IsStatusNotifierHostRegistered"],
-            capture_output=True, text=True, timeout=2)
+    # Prefer a ready tray, but audio must still start if Quickshell is slow,
+    # disabled, or restarting. Bound elapsed time as well as D-Bus calls.
+    deadline = time.monotonic() + 15
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            result = subprocess.run(
+                ["busctl", "--user", "--timeout=1", "get-property", "org.kde.StatusNotifierWatcher",
+                 "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher", "IsStatusNotifierHostRegistered"],
+                capture_output=True, text=True, timeout=min(2, remaining))
+        except FileNotFoundError:
+            return False
+        except subprocess.TimeoutExpired:
+            continue
         if result.returncode == 0 and result.stdout.strip() == "b true":
-            return
-        time.sleep(0.25)
-    raise RuntimeError("The system tray is not ready; EasyEffects was not started. Try again once Quickshell is running.")
+            return True
+        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+    return False
+
+
+def clear_persisted_bypass():
+    rc = CONFIG / "db/easyeffectsrc"
+    try:
+        lines = rc.read_text().splitlines(keepends=True)
+    except OSError:
+        return
+    section = ""
+    kept = []
+    changed = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped
+        if section == "[EffectsPipelines]" and stripped.startswith("bypass="):
+            if stripped != "bypass=false":
+                changed = True
+            continue
+        kept.append(line)
+    if changed:
+        try:
+            rc.write_text("".join(kept))
+        except OSError:
+            pass
+
+
+def save_selected_preset(preset):
+    path = state_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"preset": preset, "timestamp": time.time()}) + "\n")
+    except OSError:
+        pass
+
+
+def load_preset(preset):
+    exchange("load_preset:output:" + preset, reply=False)
+    for _ in range(30):
+        try:
+            if exchange("get_last_loaded_preset:output") == preset:
+                return
+        except (TimeoutError, ConnectionResetError):
+            # Rebuilding the effects pipeline can briefly occupy the UI thread.
+            pass
+        time.sleep(0.1)
+    raise RuntimeError("EasyEffects did not confirm the selected preset.")
+
+
+def restore_saved_preset(current):
+    try:
+        saved = json.loads(state_file().read_text())
+        preset = saved.get("preset", "")
+        timestamp = float(saved.get("timestamp", 0))
+    except (OSError, ValueError, TypeError):
+        return
+    if not preset or preset not in current.get("presets", ()):
+        return
+    db_dir = CONFIG / "db"
+    db_mtime = max((p.stat().st_mtime for p in db_dir.glob("*rc")), default=0) if db_dir.is_dir() else 0
+    if timestamp > db_mtime:
+        load_preset(preset)
 
 
 def start():
-    if state()["active"]:
+    if confirmed_state()["active"]:
         return
-    wait_for_tray()
+    tray_ready = wait_for_tray()
+    clear_persisted_bypass()
     log = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "easyeffects-qs.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("ab") as output:
+        if not tray_ready:
+            output.write(b"System tray unavailable after startup grace period; starting audio processing.\n")
+            output.flush()
         subprocess.Popen(["easyeffects", "--hide-window", "--service-mode"],
                          stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
     for _ in range(80):
-        if state()["active"]:
+        current = state()
+        if current["active"]:
+            restore_saved_preset(current)
+            if current.get("bypassed") or state().get("bypassed"):
+                set_bypass(False)
             return
         time.sleep(0.1)
     raise RuntimeError(f"EasyEffects did not become ready. See {log}")
 
 
 def set_bypass(bypassed):
-    if not state()["active"]:
+    if not confirmed_state()["active"]:
         if bypassed:
             return
         start()
     exchange("global_bypass:" + ("1" if bypassed else "0"), reply=False)
     for _ in range(30):
-        if state()["bypassed"] == bypassed:
+        current = state()
+        if current["known"] and current["active"] and current["bypassed"] == bypassed:
             return
         time.sleep(0.1)
     raise RuntimeError("EasyEffects did not confirm the processing state.")
 
 
+def notify_shell():
+    if not shutil.which("qs"):
+        return
+    try:
+        subprocess.run(["qs", "-c", "ii", "ipc", "call", "easyeffects", "refresh"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def main():
+    global LOCK_HELD
     action = sys.argv[1] if len(sys.argv) > 1 else "state"
     if action == "state":
         print(json.dumps(state()))
         return
     with (RUNTIME / "easyeffects-qs.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if action in ("start", "show"):
-            start()
-            if action == "show":
-                exchange("show_window", reply=False)
-        elif action in ("effects-on", "effects-off"):
-            # A manual processing toggle must not be immediately undone by automation.
-            automatic = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "astra-profiled.service"])
-            if automatic.returncode == 0:
-                subprocess.run(["systemctl", "--user", "stop", "astra-profiled.service"], check=True)
-            set_bypass(action == "effects-off")
-        elif action == "stop":
-            if state()["active"]:
-                exchange("quit_app", reply=False)
-                for _ in range(50):
-                    if not state()["active"]:
-                        return
-                    time.sleep(0.1)
-                raise RuntimeError("EasyEffects has not finished shutting down.")
-        elif action == "preset" and len(sys.argv) == 3:
-            preset = sys.argv[2]
-            if preset not in state()["presets"]:
-                raise ValueError("Choose an installed Astra preset.")
-            # A manual selection owns the profile until automatic mode is started again.
-            automatic = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "astra-profiled.service"])
-            if automatic.returncode == 0:
-                subprocess.run(["systemctl", "--user", "stop", "astra-profiled.service"], check=True)
-            start()
-            exchange("load_preset:output:" + preset, reply=False)
-            for _ in range(30):
-                try:
-                    if exchange("get_last_loaded_preset:output") == preset:
-                        return
-                except (TimeoutError, ConnectionResetError):
-                    # Rebuilding the effects pipeline can briefly occupy the UI thread.
-                    pass
-                time.sleep(0.1)
-            raise RuntimeError("EasyEffects did not confirm the selected preset.")
-        else:
-            raise ValueError("Usage: easyeffects-qs state|start|show|stop|effects-on|effects-off|preset NAME")
+        LOCK_HELD = True
+        try:
+            if action in ("start", "show"):
+                start()
+                if action == "start" and confirmed_state().get("bypassed"):
+                    set_bypass(False)
+                if action == "show":
+                    exchange("show_window", reply=False)
+            elif action in ("effects-on", "effects-off", "effects-toggle"):
+                # A manual processing toggle must not be immediately undone by automation.
+                automatic = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "astra-profiled.service"])
+                if automatic.returncode == 0:
+                    subprocess.run(["systemctl", "--user", "stop", "astra-profiled.service"], check=True)
+                # Read inside the action lock: the shell's cached status can be stale.
+                current = confirmed_state()
+                bypassed = current["active"] and not current["bypassed"] if action == "effects-toggle" else action == "effects-off"
+                set_bypass(bypassed)
+                print(json.dumps(state()))
+            elif action == "stop":
+                if state()["active"]:
+                    exchange("quit_app", reply=False)
+                    for _ in range(50):
+                        if not state()["active"]:
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise RuntimeError("EasyEffects has not finished shutting down.")
+            elif action == "preset" and len(sys.argv) == 3:
+                preset = sys.argv[2]
+                if preset not in state()["presets"]:
+                    raise ValueError("Choose an installed output preset.")
+                # A manual selection owns the profile until automatic mode is started again.
+                automatic = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "astra-profiled.service"])
+                if automatic.returncode == 0:
+                    subprocess.run(["systemctl", "--user", "stop", "astra-profiled.service"], check=True)
+                start()
+                load_preset(preset)
+                save_selected_preset(preset)
+            else:
+                raise ValueError("Usage: easyeffects-qs state|start|show|stop|effects-on|effects-off|effects-toggle|preset NAME")
+        finally:
+            LOCK_HELD = False
+    if action in ("start", "stop"):
+        notify_shell()
 
 
 if __name__ == "__main__":

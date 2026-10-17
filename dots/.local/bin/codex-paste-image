@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Paste a local clipboard image into Codex without submitting the composer."""
+import argparse
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+sys.path.insert(0, str(Path.home() / '.local/libexec'))
+from codex_desktop_env import desktop_environment
+
+def tmux(*args, **kwargs):
+    return subprocess.run(['tmux', *args], check=True, **kwargs)
+
+def is_codex(pane):
+    pid = int(subprocess.check_output(['tmux', 'display-message', '-p', '-t', pane, '#{pane_pid}'], text=True))
+    parents = {pid}
+    rows = [line.split(None, 4) for line in subprocess.check_output(
+        ['ps', '-e', '-o', 'pid=,ppid=,pgid=,tpgid=,comm='], text=True).splitlines()]
+    for _ in range(8):
+        children = {int(p) for p, parent, *_ in rows if int(parent) in parents}
+        if any(int(p) in parents | children and comm == 'codex' and group == foreground
+               for p, _, group, foreground, comm in rows):
+            return True
+        if children <= parents: break
+        parents |= children
+    # reptyr -T keeps the original process and its parent shell. Validate the
+    # pane's bridge and exact process incarnation instead of guessing by name.
+    try:
+        fields = subprocess.check_output([
+            'tmux', 'display-message', '-p', '-t', pane,
+            '#{@codex_bridge_target} #{@codex_bridge_start} #{@codex_bridge_pid} #{@codex_bridge_boot}'
+        ], text=True).split()
+        if len(fields) != 4:
+            return False
+        target, birth, bridge = map(int, fields[:3])
+        if fields[3] != Path('/proc/sys/kernel/random/boot_id').read_text().strip():
+            return False
+        proc = Path('/proc') / str(target)
+        if proc.stat().st_uid != os.getuid() or proc.joinpath('exe').resolve().name != 'codex':
+            return False
+        if int(proc.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19]) != birth:
+            return False
+        args = Path(f'/proc/{bridge}/cmdline').read_bytes().split(b'\0')
+        if args[-3:] != [b'-T', str(target).encode(), b'']:
+            return False
+        if not any(int(p) == target and comm == 'codex' and group == foreground
+                   for p, _, group, foreground, comm in rows):
+            return False
+        parent_map = {int(p): int(parent) for p, parent, *_ in rows}
+        seen = set()
+        while bridge and bridge not in seen:
+            if bridge == pid:
+                return True
+            seen.add(bridge)
+            bridge = parent_map.get(bridge, 0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return False
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--pane', default=os.environ.get('TMUX_PANE'))
+    parser.add_argument('--client-pid', type=int)
+    parser.add_argument('--client-term', default='')
+    parser.add_argument('--file', type=Path, help='attach an existing image instead of reading clipboard')
+    args = parser.parse_args()
+    if not args.pane or not re.fullmatch(r'%\d+', args.pane):
+        parser.error('run inside tmux or give --pane %ID')
+    if not is_codex(args.pane):
+        tmux('send-keys', '-t', args.pane, 'C-v'); return
+    if not args.file:
+        # SSH/Haven must keep using its own clipboard/input, never the PC's.
+        if args.client_pid:
+            try:
+                client_env = Path(f'/proc/{args.client_pid}/environ').read_bytes().split(b'\0')
+            except OSError:
+                client_env = [b'SSH_CONNECTION=unknown']
+            if any(x.startswith((b'SSH_CONNECTION=', b'SSH_CLIENT=')) for x in client_env) or args.client_term != 'xterm-kitty':
+                tmux('send-keys', '-t', args.pane, 'C-v'); return
+        elif os.environ.get('SSH_CONNECTION'):
+            tmux('send-keys', '-t', args.pane, 'C-v'); return
+        env = dict(os.environ, **desktop_environment())
+        types = subprocess.check_output(['wl-paste', '--list-types'], env=env, timeout=3, stderr=subprocess.DEVNULL).decode().splitlines()
+        mime = next((x for x in ('image/png', 'image/jpeg', 'image/webp') if x in types), None)
+        if not mime:
+            tmux('send-keys', '-t', args.pane, 'C-v'); return
+        data = subprocess.check_output(['wl-paste', '--no-newline', '--type', mime], env=env, timeout=5)
+        if not data or len(data) > 32 * 1024 * 1024:
+            raise ValueError('Clipboard image is empty or exceeds 32 MiB')
+        directory = Path.home() / '.cache/codex-clipboard'
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.chmod(0o700)
+        suffix = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp'}[mime]
+        fd, filename = tempfile.mkstemp(prefix='paste-', suffix=suffix, dir=directory)
+        with os.fdopen(fd, 'wb') as stream: stream.write(data)
+        path = Path(filename)
+    else:
+        path = args.file.resolve(strict=True)
+    name = f'codex-image-{os.getpid()}'
+    try:
+        tmux('load-buffer', '-b', name, '-', input=str(path).encode())
+        tmux('paste-buffer', '-p', '-d', '-b', name, '-t', args.pane)
+    finally:
+        subprocess.run(['tmux', 'delete-buffer', '-b', name], capture_output=True)
+
+if __name__ == '__main__':
+    try: main()
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        subprocess.run(['tmux', 'display-message', 'Image paste unavailable; copy an image and retry.'])
+        print(f'codex-paste-image: {error}', file=sys.stderr)
+        sys.exit(1)

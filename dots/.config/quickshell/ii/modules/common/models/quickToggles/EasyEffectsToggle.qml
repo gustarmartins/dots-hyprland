@@ -10,7 +10,9 @@ QuickToggleModel {
     name: Translation.tr("EasyEffects")
 
     available: EasyEffects.available
-    toggled: EasyEffects.active
+    toggled: EasyEffects.processing
+    statusText: EasyEffects.error || (EasyEffects.busy ? Translation.tr("Updating…")
+        : EasyEffects.processing ? Translation.tr("On") : Translation.tr("Off"))
     icon: "graphic_eq"
 
     Component.onCompleted: {
@@ -26,5 +28,5 @@ QuickToggleModel {
         GlobalStates.sidebarRightOpen = false
     }
 
-    tooltipText: Translation.tr("EasyEffects | Right-click to configure")
+    tooltipText: EasyEffects.error || Translation.tr("EasyEffects processing on/off | Right-click to configure")
 }

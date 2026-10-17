@@ -24,8 +24,10 @@ ShellRoot {
                 timersLive: root.timers.filter(o => o !== null).length,
                 list: Notifications.list.map(n => ({id: n.notificationId,
                     nativeId: n.notification?.id ?? -1, summary: n.summary, body: n.body,
-                    image: n.image, popup: n.popup, timer: n.timer !== null, actions: n.actions}))});
+                    image: n.image, popup: n.popup, timer: n.timer !== null, actions: Notifications.visibleActions(n)}))});
         }
+        function mailConfig(value: string): void { Mail.config = JSON.parse(value.slice(5)); }
+        function clipboardEquals(value: string): bool { return Quickshell.clipboardText === value; }
         function watch(): void {
             root.watched = Notifications.list.slice();
             root.timers = Notifications.list.map(n => n.timer).filter(t => t !== null);

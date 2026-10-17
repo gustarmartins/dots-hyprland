@@ -1,0 +1,10 @@
+[Unit]
+Description=Temporary Eden-only audio boost (double-click activation)
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/eden-audio-boost serve
+ExecStopPost=%h/.local/bin/eden-audio-boost cleanup
+KillMode=mixed
+TimeoutStopSec=8
+Restart=no

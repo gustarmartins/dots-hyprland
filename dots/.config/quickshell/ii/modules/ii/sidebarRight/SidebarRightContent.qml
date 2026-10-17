@@ -46,8 +46,8 @@ Item {
         }
     }
 
-    implicitHeight: sidebarRightBackground.implicitHeight
-    implicitWidth: sidebarRightBackground.implicitWidth
+    implicitHeight: 600
+    implicitWidth: sidebarWidth
 
     StyledRectangularShadow {
         target: sidebarRightBackground
@@ -66,66 +66,101 @@ Item {
         ColumnLayout {
             anchors.fill: parent
             anchors.margins: sidebarPadding
-            spacing: sidebarPadding
+            spacing: 10
 
             RowLayout {
                 Layout.fillWidth: true
+                spacing: 8
                 ColumnLayout {
-                    spacing: 2
+                    spacing: 3
                     StyledText {
                         text: "Control center"
-                        font.pixelSize: 26
+                        font.pixelSize: 24
                         font.weight: Font.Medium
                         color: Appearance.m3colors.m3onSurface
                     }
                     StyledText {
-                        text: Qt.formatDateTime(DateTime.clock.date, "dddd, d MMMM")
-                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        text: Qt.formatDateTime(DateTime.clock.date, "ddd, d MMM") + "  ·  Up " + DateTime.uptime
+                        font.pixelSize: 11
                         color: Appearance.m3colors.m3onSurfaceVariant
                     }
                 }
                 Item { Layout.fillWidth: true }
                 QuickToggleButton {
+                    objectName: "controlCenterEdit"
+                    toggled: root.editMode
+                    visible: Config.options.sidebar.quickToggles.style === "android"
+                    buttonIcon: root.editMode ? "check" : "edit"
+                    onClicked: {
+                        root.showingNotifications = false;
+                        root.showingWidgets = false;
+                        root.editMode = !root.editMode;
+                    }
+                    StyledToolTip { text: root.editMode ? "Finish editing" : "Arrange and resize widgets" }
+                }
+                QuickToggleButton {
+                    buttonIcon: "settings"
+                    onClicked: {
+                        GlobalStates.sidebarRightOpen = false;
+                        Quickshell.execDetached(["qs", "-p", root.settingsQmlPath]);
+                    }
+                    StyledToolTip { text: Translation.tr("Settings") }
+                }
+                QuickToggleButton {
+                    buttonIcon: "power_settings_new"
+                    onClicked: GlobalStates.sessionOpen = true
+                    StyledToolTip { text: Translation.tr("Session") }
+                }
+                QuickToggleButton {
                     buttonIcon: "close"
                     onClicked: GlobalStates.sidebarRightOpen = false
                 }
             }
-
-            SystemButtonRow {
-                Layout.fillHeight: false
+            RowLayout {
                 Layout.fillWidth: true
-                // Layout.margins: 10
-                Layout.topMargin: 5
-                Layout.bottomMargin: 0
-            }
-
-            ConfigSelectionArray {
-                currentValue: root.showingNotifications ? "inbox" : root.showingWidgets ? "agenda" : "controls"
-                options: [
-                    {displayName: "Controls", icon: "tune", value: "controls"},
-                    {displayName: "Inbox · " + Notifications.list.length, icon: "notifications", value: "inbox"},
-                    {displayName: "Agenda", icon: "calendar_month", value: "agenda"}
-                ]
-                onSelected: value => {
-                    root.showingNotifications = value === "inbox";
-                    root.showingWidgets = value === "agenda";
+                spacing: 6
+                Repeater {
+                    model: [
+                        {label: "Controls", icon: "tune", value: "controls"},
+                        {label: "Inbox · " + Notifications.list.length, icon: "notifications", value: "inbox"},
+                        {label: "Agenda", icon: "calendar_month", value: "agenda"}
+                    ]
+                    delegate: RippleButton {
+                        id: tabButton
+                        objectName: "controlTab-" + modelData.value
+                        required property var modelData
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        implicitHeight: 36
+                        buttonRadius: 12
+                        toggled: (root.showingNotifications ? "inbox" : root.showingWidgets ? "agenda" : "controls") === modelData.value
+                        colBackground: Appearance.m3colors.m3surfaceContainerHigh
+                        onClicked: {
+                            root.showingNotifications = modelData.value === "inbox";
+                            root.showingWidgets = modelData.value === "agenda";
+                        }
+                        contentItem: RowLayout {
+                            spacing: 6
+                            MaterialSymbol { text: modelData.icon; iconSize: 17; color: tabButton.toggled ? Appearance.m3colors.m3onPrimary : Appearance.m3colors.m3onSurface }
+                            StyledText { Layout.fillWidth: true; text: modelData.label; font.pixelSize: 12; color: tabButton.toggled ? Appearance.m3colors.m3onPrimary : Appearance.m3colors.m3onSurface; elide: Text.ElideRight }
+                        }
+                    }
                 }
             }
-
-            DesktopMood {
+            RowLayout {
                 Layout.fillWidth: true
-                visible: !root.showingNotifications && !root.showingWidgets
+                visible: !root.showingNotifications && !root.showingWidgets && !root.editMode
+                spacing: 10
+                DesktopMood { Layout.fillWidth: true; Layout.preferredWidth: 1 }
+                EasyEffectsPresets { Layout.fillWidth: true; Layout.preferredWidth: 1.4; visible: EasyEffects.available }
             }
 
-            EasyEffectsPresets {
-                Layout.fillWidth: true
-                visible: EasyEffects.available && !root.showingNotifications && !root.showingWidgets
-            }
+            EdenBoostWidget { Layout.fillWidth: true; visible: EdenAudioBoost.enabled && !root.showingNotifications && !root.showingWidgets && !root.editMode }
 
             Loader {
                 id: slidersLoader
                 Layout.fillWidth: true
-                visible: active && !root.showingNotifications && !root.showingWidgets
+                visible: active && !root.showingNotifications && !root.showingWidgets && !root.editMode
                 active: {
                     const configQuickSliders = Config.options.sidebar.quickSliders
                     if (!configQuickSliders.enable) return false
@@ -268,98 +303,4 @@ Item {
         }
     }
 
-    component SystemButtonRow: Item {
-        implicitHeight: Math.max(uptimeContainer.implicitHeight, systemButtonsRow.implicitHeight)
-
-        Rectangle {
-            id: uptimeContainer
-            anchors {
-                top: parent.top
-                bottom: parent.bottom
-                left: parent.left
-            }
-            color: Appearance.colors.colLayer1
-            radius: height / 2
-            implicitWidth: uptimeRow.implicitWidth + 24
-            implicitHeight: uptimeRow.implicitHeight + 8
-            
-            Row {
-                id: uptimeRow
-                anchors.centerIn: parent
-                spacing: 8
-                CustomIcon {
-                    id: distroIcon
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: 25
-                    height: 25
-                    source: SystemInfo.distroIcon
-                    colorize: true
-                    color: Appearance.colors.colOnLayer0
-                }
-                StyledText {
-                    anchors.verticalCenter: parent.verticalCenter
-                    font.pixelSize: Appearance.font.pixelSize.normal
-                    color: Appearance.colors.colOnLayer0
-                    text: Translation.tr("Up %1").arg(DateTime.uptime)
-                    textFormat: Text.MarkdownText
-                }
-            }
-        }
-
-        ButtonGroup {
-            id: systemButtonsRow
-            anchors {
-                top: parent.top
-                bottom: parent.bottom
-                right: parent.right
-            }
-            color: Appearance.colors.colLayer1
-            padding: 4
-
-            QuickToggleButton {
-                toggled: root.editMode
-                visible: Config.options.sidebar.quickToggles.style === "android"
-                buttonIcon: "edit"
-                onClicked: {
-                    root.showingNotifications = false;
-                    root.editMode = !root.editMode;
-                }
-                StyledToolTip {
-                    text: Translation.tr("Edit quick toggles") + (root.editMode ? Translation.tr("\nLMB to enable/disable\nRMB to toggle size\nScroll to swap position") : "")
-                }
-            }
-            QuickToggleButton {
-                toggled: false
-                buttonIcon: "restart_alt"
-                onClicked: {
-                    Quickshell.execDetached(["hyprctl", "reload"])
-                    Quickshell.reload(true);
-                }
-                StyledToolTip {
-                    text: Translation.tr("Reload Hyprland & Quickshell")
-                }
-            }
-            QuickToggleButton {
-                toggled: false
-                buttonIcon: "settings"
-                onClicked: {
-                    GlobalStates.sidebarRightOpen = false;
-                    Quickshell.execDetached(["qs", "-p", root.settingsQmlPath]);
-                }
-                StyledToolTip {
-                    text: Translation.tr("Settings")
-                }
-            }
-            QuickToggleButton {
-                toggled: false
-                buttonIcon: "power_settings_new"
-                onClicked: {
-                    GlobalStates.sessionOpen = true;
-                }
-                StyledToolTip {
-                    text: Translation.tr("Session")
-                }
-            }
-        }
-    }
 }

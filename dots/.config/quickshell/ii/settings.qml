@@ -14,13 +14,13 @@ import "modules/settings/SettingsCatalog.js" as Catalog
 
 ApplicationWindow {
     id: root
-    property string currentPage: "home"
+    property string currentPage: "design"
+    property string designSection: ""
     property string query: ""
     property string feedback: "Changes save when you use a control. Text lists have a Save button."
     readonly property bool searching: query.trim().length > 0
     readonly property var page: Catalog.page(currentPage)
-    readonly property bool wide: width >= 1000
-    property bool effectsVisited: false
+    readonly property bool wide: width >= 900
     property bool aboutVisited: false
     visible: true
     title: "illogical-impulse Settings"
@@ -48,10 +48,11 @@ ApplicationWindow {
 
     function navigate(id) {
         if (Config.writesPaused) return;
-        if (id === "effects") effectsVisited = true;
+        designSection = id === "fonts" ? "fonts" : id === "effects" ? "effects" : "";
         if (id === "about") aboutVisited = true;
-        currentPage = id;
+        currentPage = Catalog.canonicalPage(id);
         query = ""; searchField.text = "";
+        if (designSection) Qt.callLater(() => designPage.revealSection());
     }
     Shortcut { sequence: "Ctrl+F"; enabled: !Config.writesPaused; onActivated: { searchField.forceActiveFocus(); searchField.selectAll(); } }
     Shortcut { sequence: "Ctrl+PageDown"; enabled: !Config.writesPaused; onActivated: root.navigate(Catalog.pages[(Catalog.pages.findIndex(p => p.id === root.currentPage) + 1) % Catalog.pages.length].id) }
@@ -83,7 +84,7 @@ ApplicationWindow {
             Layout.fillHeight: true
             spacing: 18
             ColumnLayout {
-                Layout.preferredWidth: root.wide ? 206 : 56
+                Layout.preferredWidth: root.wide ? 190 : 164
                 Layout.fillHeight: true
                 spacing: 12
                 ListView {
@@ -97,7 +98,7 @@ ApplicationWindow {
                     delegate: Button {
                         required property var modelData
                         width: navigation.width
-                        height: 43
+                        height: root.wide ? 43 : 50
                         padding: 10
                         enabled: !Config.writesPaused
                         highlighted: !root.searching && root.currentPage === modelData.id
@@ -109,7 +110,7 @@ ApplicationWindow {
                         contentItem: RowLayout {
                             spacing: 10
                             MaterialSymbol { text: modelData.icon; iconSize: 22; color: Appearance.m3colors.m3onSurface }
-                            StyledText { visible: root.wide; Layout.fillWidth: true; text: modelData.title; font.pixelSize: 13; elide: Text.ElideRight }
+                            StyledText { Layout.fillWidth: true; text: modelData.title; font.pixelSize: root.wide ? 13 : 12; wrapMode: Text.WordWrap }
                         }
                     }
                 }
@@ -135,9 +136,9 @@ ApplicationWindow {
                     id: stack
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    currentIndex: !Config.ready ? 4 : root.searching ? 2 : root.currentPage === "home" ? 0 : root.currentPage === "effects" ? 1 : root.currentPage === "about" ? 3 : 2
+                    currentIndex: !Config.ready ? 4 : root.searching ? 2 : root.currentPage === "home" ? 0 : root.currentPage === "design" ? 1 : root.currentPage === "about" ? 3 : 2
                     SettingsHome { onNavigate: id => root.navigate(id) }
-                    Loader { id: effects; active: root.effectsVisited; source: "modules/settings/DesktopEffectsConfig.qml" }
+                    DesignPage { id: designPage; requestedSection: root.designSection; onEdited: path => { root.feedback = "Updated · " + (Catalog.entries.find(e => e.path === path)?.title ?? "Setting"); } }
                     CatalogPage {
                         id: catalogPage
                         pageId: root.currentPage
@@ -149,19 +150,37 @@ ApplicationWindow {
                     Loader { id: about; active: root.aboutVisited; source: "modules/settings/About.qml" }
                     BusyIndicator { running: !Config.ready }
                 }
-                StyledText {
+                RowLayout {
                     Layout.fillWidth: true
-                    text: Config.writeError ? Config.writeError : Config.writesPaused ? "Applying desktop fonts…" : root.currentPage === "effects" && !root.searching ? "Desktop effects keep their own Apply and Save controls." : root.feedback
-                    wrapMode: Text.WordWrap
-                    font.pixelSize: 11
-                    color: Appearance.m3colors.m3onSurfaceVariant
+                    spacing: 10
+                    StyledText {
+                        Layout.fillWidth: true
+                        text: Config.writeError ? Config.writeError : Config.writesPaused ? "Applying desktop fonts…" : root.currentPage === "design" && !root.searching ? designPage.effectsDirty ? "Unapplied GPU / animation edits" : designPage.effectsStatus + " · Color and shell controls save immediately." : root.feedback
+                        wrapMode: Text.WordWrap
+                        font.pixelSize: 11
+                        color: Appearance.m3colors.m3onSurfaceVariant
+                    }
+                    SettingsButton {
+                        objectName: "designReset"
+                        visible: root.currentPage === "design" && !root.searching && designPage.effectsDirty
+                        enabled: !designPage.effectsBusy && !Config.writesPaused
+                        text: "Reset edits"
+                        onClicked: designPage.resetEffects()
+                    }
+                    SettingsButton {
+                        objectName: "designApply"
+                        visible: root.currentPage === "design" && !root.searching && designPage.effectsDirty
+                        enabled: !designPage.effectsBusy && !Config.writesPaused
+                        text: "Apply custom changes"
+                        onClicked: designPage.applyEffects()
+                    }
                 }
             }
         }
     }
     IpcHandler {
         target: "settings"
-        function open(page: string): void { if (Catalog.pages.some(p => p.id === page)) root.navigate(page); }
+        function open(page: string): void { if (Catalog.pages.some(p => p.id === Catalog.canonicalPage(page))) root.navigate(page); }
         function search(text: string): void { if (!Config.writesPaused) { searchField.text = text; root.query = text; } }
         function status(): string { return JSON.stringify({page:root.currentPage,search:root.query,ready:Config.ready,loading:Config.writesPaused,pages:Catalog.pages.map(p=>p.id),settings:Catalog.entries.length}); }
     }

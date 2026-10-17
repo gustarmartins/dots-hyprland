@@ -10,7 +10,7 @@ QuickToggleButton {
     id: root
     visible: EasyEffects.available
     enabled: !EasyEffects.busy
-    toggled: EasyEffects.active && !EasyEffects.bypassed
+    toggled: EasyEffects.processing
     buttonIcon: "instant_mix"
 
     Component.onCompleted: {

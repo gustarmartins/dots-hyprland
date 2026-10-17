@@ -1,6 +1,7 @@
 pragma Singleton
 pragma ComponentBehavior: Bound
 
+import "MailActions.js" as MailActions
 import qs.modules.common
 import QtQuick
 import Quickshell
@@ -23,6 +24,7 @@ Singleton {
             "identifier": action.identifier,
             "text": action.text,
         })) ?? []
+        property var mailData: MailActions.parse(notification?.hints["x-qs-mail"])
         property bool popup: false
         property bool isTransient: notification?.hints.transient ?? false
         property string appIcon: notification?.appIcon ?? ""
@@ -109,9 +111,20 @@ Singleton {
         id: notifTimerComponent
         NotifTimer {}
     }
+    Component {
+        id: mailCodeExpiryComponent
+        Timer {
+            required property var notif
+            running: true
+            onTriggered: {
+                notif.mailData = Object.assign({}, notif.mailData, {code:""});
+                destroy();
+            }
+        }
+    }
 
     function stringifyList(list) {
-        return JSON.stringify(list.map((notif) => notifToJSON(notif)), null, 2);
+        return JSON.stringify(list.filter(notif => !notif.mailData).map((notif) => notifToJSON(notif)), null, 2);
     }
 
     function scheduleSave() {
@@ -200,12 +213,23 @@ Singleton {
 
     function addNotification(notification) {
         if (!notification) return;
+        // Thunderbird still owns its accounts, but while the bridge is healthy
+        // it supplies the complete preview. Do not show a second generic alert.
+        if (Mail.enabled && Mail.state.connected && !notification.hints["x-qs-mail"] &&
+            (notification.appName.toLowerCase() === "thunderbird" || notification.hints["desktop-entry"] === "thunderbird")) {
+            notification.dismiss();
+            return;
+        }
         const notif = notifComponent.createObject(root, {
             notificationId: notification.id + root.idOffset,
             notification: notification,
             time: Date.now(),
         });
         root.list = [...root.list, notif];
+        if (notif.mailData?.code) mailCodeExpiryComponent.createObject(notif, {
+            notif: notif,
+            interval: Math.max(1, Math.min(15 * 60000, notif.mailData.expiresAt - Date.now()))
+        });
         if (!root.popupInhibited) {
             notif.popup = true;
             if (notification.expireTimeout !== 0) {
@@ -278,8 +302,32 @@ Singleton {
         for (const notif of root.popupList.slice()) timeoutNotification(notif.notificationId);
     }
 
+    Connections {
+        target: Mail
+        function onConfigChanged() {
+            const cfg = Mail.config;
+            const ids = root.list.filter(n => n.mailData && (!cfg.enabled || !cfg.notifications || !(cfg.accounts || []).includes(n.mailData.account))).map(n => n.notificationId);
+            if (ids.length) root.discardNotifications(ids);
+        }
+    }
+
+    function visibleActions(notif) {
+        if (notif?.mailData) return MailActions.actions(notif.mailData, Mail.config, Date.now() - notif.time);
+        return notif?.actions ?? [];
+    }
+
     function attemptInvokeAction(id, notifIdentifier) {
         const notif = root.list.find(notif => notif.notificationId === id);
+        if (notif?.mailData) {
+            if (!visibleActions(notif).some(a => a.identifier === notifIdentifier)) return;
+            if (notifIdentifier === "qs-mail-code") Quickshell.clipboardText = notif.mailData.code;
+            else if (notifIdentifier === "qs-mail-open") Mail.openMessage(notif.mailData);
+            else if (notifIdentifier.startsWith("qs-mail-link-")) {
+                const link = notif.mailData.links[Number(notifIdentifier.slice(13))];
+                if (link) Qt.openUrlExternally(link.url);
+            }
+            return;
+        }
         const action = notif?.notification?.actions.find(action => action.identifier === notifIdentifier);
         if (action) action.invoke();
         root.discardNotification(id);

@@ -2,48 +2,40 @@ import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
-import Quickshell.Bluetooth
-
 import qs.modules.ii.sidebarRight.notifications
 import qs.modules.ii.sidebarRight.quickToggles.androidStyle
+import "TileGrid.js" as TileGrid
 
 AbstractQuickPanel {
     id: root
+    objectName: "controlTilePanel"
     property bool editMode: false
     Layout.fillWidth: true
     Layout.fillHeight: true
-    Layout.minimumHeight: root.baseCellHeight * 2 + root.padding * 2 + 36 + root.spacing
-
-    // Sizes
+    Layout.minimumHeight: 140
+    color: "transparent"
     property real spacing: 8
-    property real padding: 6
-    readonly property real baseCellWidth: {
-        // Subtract only the gaps between cells.
-        const availableWidth = root.width - (root.padding * 2) - (root.spacing * (root.columns - 1))
-        return availableWidth / root.columns
-    }
+    property real padding: 0
+    readonly property int columns: Math.max(1, Math.min(12, Config.options.sidebar.quickToggles.android.columns))
+    readonly property real baseCellWidth: Math.max(1, (togglesFlickable.width - spacing * (columns - 1)) / columns)
     readonly property real baseCellHeight: 72
-
-    // Toggles
-    readonly property list<string> availableToggleTypes: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "cloudflareWarp", "gameMode", "tearing", "vrr", "lsfg", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile","musicRecognition", "antiFlashbang", "memoryMode", "buildCache", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
-    // A cell is an icon target; text tiles span two cells. Keep a text tile
-    // around 180px wide instead of squeezing labels into 40px remnants.
-    readonly property int columns: Math.max(2, Math.min(Config.options.sidebar.quickToggles.android.columns,
-        Math.floor((root.width - root.padding * 2 + root.spacing) / (86 + root.spacing))))
+    readonly property list<string> availableToggleTypes: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "cloudflareWarp", "gameMode", "tearing", "vrr", "lsfg", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile", "musicRecognition", "antiFlashbang", "memoryMode", "focusMode", "buildCache", "zramAlgo", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
     readonly property list<var> toggles: Config.ready ? Config.options.sidebar.quickToggles.android.toggles : []
-    readonly property list<var> toggleRows: toggleRowsForList(toggles)
-    readonly property list<var> unusedToggles: {
-        const types = availableToggleTypes.filter(type => !toggles.some(toggle => (toggle && toggle.type === type)))
-        return types.map(type => { return { type: type, size: 1 } })
-    }
-    readonly property list<var> unusedToggleRows: toggleRowsForList(unusedToggles)
-    readonly property var latestNotification: Notifications.list.length > 0
-        ? Notifications.list[Notifications.list.length - 1]
-        : null
+    readonly property var placement: TileGrid.layout(toggles, columns, 7)
+    readonly property var unusedToggles: availableToggleTypes.filter(type => !toggles.some(tile => tile?.type === type))
+    readonly property var latestNotification: Notifications.list.length > 0 ? Notifications.list[Notifications.list.length - 1] : null
     readonly property string latestNotificationText: notificationPreview(latestNotification)
 
+    function resizeTile(index, width, height) {
+        Config.options.sidebar.quickToggles.android.toggles = TileGrid.resize(toggles, index, width, height, columns);
+    }
+    function moveTile(index, x, y) {
+        Config.options.sidebar.quickToggles.android.toggles = TileGrid.move(toggles, index,
+            x / (baseCellWidth + spacing), y / (baseCellHeight + spacing), columns);
+    }
     function plainNotificationText(value) {
         return String(value ?? "")
             .replace(/<[^>]*>/g, " ")
@@ -72,155 +64,111 @@ AbstractQuickPanel {
         return parts.length > 0 ? parts.join("  ·  ") : Translation.tr("%1 notifications").arg(Notifications.list.length);
     }
 
-    function toggleRowsForList(togglesList) {
-        var rows = [];
-        var row = [];
-        var totalSize = 0; // Total cols taken in current row
-        for (var i = 0; i < togglesList.length; i++) {
-            if (!togglesList[i]) continue;
-            if (totalSize + togglesList[i].size > columns) {
-                rows.push(row);
-                row = [];
-                totalSize = 0;
-            }
-            row.push(togglesList[i]);
-            totalSize += togglesList[i].size;
-        }
-        if (row.length > 0) {
-            rows.push(row);
-        }
-        return rows;
-    }
 
     ColumnLayout {
-        anchors {
-            fill: parent
-            margins: root.padding
+        anchors.fill: parent
+        spacing: 8
+        RowLayout {
+            visible: root.editMode
+            Layout.fillWidth: true
+            StyledText {
+                Layout.fillWidth: true
+                text: "Drag to place · corner to resize · × to remove · click for size"
+                wrapMode: Text.WordWrap
+                font.pixelSize: 12
+                color: Appearance.m3colors.m3onSurfaceVariant
+            }
+            StyledText { text: "Columns"; font.pixelSize: 12 }
+            StyledSpinBox {
+                objectName: "tileGridColumns"
+                from: 1
+                to: 12
+                value: root.columns
+                onValueModified: Config.options.sidebar.quickToggles.android.columns = value
+                Accessible.name: "Grid columns"
+            }
         }
-        spacing: root.spacing
-
         StyledFlickable {
             id: togglesFlickable
+            objectName: "controlTileScroll"
             Layout.fillWidth: true
             Layout.fillHeight: true
             contentWidth: width
-            contentHeight: contentItem.implicitHeight
+            contentHeight: tileCanvas.height + (root.editMode ? addTiles.implicitHeight + 16 : 0)
             clip: true
             flickableDirection: Flickable.VerticalFlick
             interactive: contentHeight > height
-
-            Column {
-                id: contentItem
+            Item {
+                id: tileCanvas
+                objectName: "controlTileCanvas"
                 width: togglesFlickable.width
-                spacing: 12
-
-                Column {
-                    id: usedRows
-                    width: parent.width
-                    spacing: root.spacing
-
-                    Repeater {
-                        id: usedRowsRepeater
-                        model: ScriptModel {
-                            values: Array(root.toggleRows.length)
-                        }
-                        delegate: ButtonGroup {
-                            id: toggleRow
-                            required property int index
-                            property var modelData: root.toggleRows[index]
-                            property int startingIndex: {
-                                const rows = root.toggleRows;
-                                let sum = 0;
-                                for (let i = 0; i < index; i++) {
-                                    sum += rows[i].length;
-                                }
-                                return sum;
-                            }
-                            spacing: root.spacing
-
-                            Repeater {
-                                model: ScriptModel {
-                                    values: toggleRow?.modelData ?? []
-                                    objectProp: "type"
-                                }
-                                delegate: AndroidToggleDelegateChooser {
-                                    startingIndex: toggleRow.startingIndex
-                                    editMode: root.editMode
-                                    baseCellWidth: root.baseCellWidth
-                                    baseCellHeight: root.baseCellHeight
-                                    spacing: root.spacing
-                                    onOpenAudioOutputDialog: root.openAudioOutputDialog()
-                                    onOpenAudioInputDialog: root.openAudioInputDialog()
-                                    onOpenBluetoothDialog: root.openBluetoothDialog()
-                                    onOpenNightLightDialog: root.openNightLightDialog()
-                                    onOpenWifiDialog: root.openWifiDialog()
-                                }
-                            }
-                        }
+                height: root.placement.rows * (root.baseCellHeight + root.spacing) - root.spacing
+                Repeater {
+                    model: root.editMode ? root.columns * root.placement.rows : 0
+                    delegate: Rectangle {
+                        required property int index
+                        x: (index % root.columns) * (root.baseCellWidth + root.spacing)
+                        y: Math.floor(index / root.columns) * (root.baseCellHeight + root.spacing)
+                        width: root.baseCellWidth
+                        height: root.baseCellHeight
+                        radius: 14
+                        color: "transparent"
+                        border.width: 1
+                        border.color: Appearance.m3colors.m3outlineVariant
+                        opacity: 0.4
                     }
                 }
-
-                FadeLoader {
-                    shown: root.editMode
-                    anchors {
-                        left: parent.left
-                        right: parent.right
-                        leftMargin: root.baseCellHeight / 2
-                        rightMargin: root.baseCellHeight / 2
-                    }
-                    sourceComponent: Rectangle {
-                        implicitHeight: 1
-                        color: Appearance.colors.colOutlineVariant
-                    }
-                }
-
-                FadeLoader {
-                    shown: root.editMode
-                    sourceComponent: Column {
-                        id: unusedRows
+                Repeater {
+                    model: root.placement.tiles
+                    delegate: AndroidToggleDelegateChooser {
+                        startingIndex: 0
+                        editMode: root.editMode
+                        baseCellWidth: root.baseCellWidth
+                        baseCellHeight: root.baseCellHeight
                         spacing: root.spacing
-
-                        Repeater {
-                            model: ScriptModel {
-                                values: Array(root.unusedToggleRows.length)
-                            }
-                            delegate: ButtonGroup {
-                                id: unusedToggleRow
-                                required property int index
-                                property var modelData: root.unusedToggleRows[index]
-                                spacing: root.spacing
-
-                                Repeater {
-                                    model: ScriptModel {
-                                        values: unusedToggleRow?.modelData ?? []
-                                        objectProp: "type"
-                                    }
-                                    delegate: AndroidToggleDelegateChooser {
-                                        startingIndex: -1
-                                        editMode: root.editMode
-                                        baseCellWidth: root.baseCellWidth
-                                        baseCellHeight: root.baseCellHeight
-                                        spacing: root.spacing
-                                    }
-                                }
-                            }
+                        columns: root.columns
+                        onTileResized: (index, width, height) => root.resizeTile(index, width, height)
+                        onTileMoved: (index, x, y) => root.moveTile(index, x, y)
+                        onOpenAudioOutputDialog: root.openAudioOutputDialog()
+                        onOpenAudioInputDialog: root.openAudioInputDialog()
+                        onOpenBluetoothDialog: root.openBluetoothDialog()
+                        onOpenNightLightDialog: root.openNightLightDialog()
+                        onOpenWifiDialog: root.openWifiDialog()
+                    }
+                }
+            }
+            Flow {
+                id: addTiles
+                x: 0
+                y: tileCanvas.height + 16
+                width: parent.width
+                spacing: 6
+                visible: root.editMode
+                Repeater {
+                    model: root.editMode ? root.unusedToggles : []
+                    delegate: RippleButton {
+                        required property string modelData
+                        implicitWidth: label.implicitWidth + 24
+                        implicitHeight: 34
+                        buttonRadius: 12
+                        colBackground: Appearance.m3colors.m3surfaceContainerHigh
+                        onClicked: Config.options.sidebar.quickToggles.android.toggles = Array.from(root.toggles).concat([{type: modelData, size: 2, height: 1}])
+                        contentItem: StyledText {
+                            id: label
+                            text: "+ " + modelData.replace(/([a-z])([A-Z])/g, "$1 $2")
+                            font.pixelSize: 12
                         }
                     }
                 }
             }
         }
-
         NotificationStatusButton {
-            id: notificationButton
             Layout.fillWidth: true
             buttonIcon: "notifications"
             buttonText: root.latestNotificationText
             marquee: Notifications.list.length > 0
             onClicked: root.openNotifications()
-            StyledToolTip {
-                text: Translation.tr("%1 notifications").arg(Notifications.list.length)
-                    + " · " + Translation.tr("Show notifications")
-            }
+            StyledToolTip { text: Translation.tr("%1 notifications").arg(Notifications.list.length) }
         }
     }
 }

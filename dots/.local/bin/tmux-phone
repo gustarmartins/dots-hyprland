@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# One SSH terminal; choose existing work without opening additional streams.
+exec /usr/bin/tmux new-session -A -s mobile -n work \; choose-tree -sNZ -O name

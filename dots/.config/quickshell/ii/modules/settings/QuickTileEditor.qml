@@ -10,12 +10,12 @@ ColumnLayout {
     signal edited(var value)
     property bool expanded: false
     // Matches AndroidQuickPanel.availableToggleTypes; checked by the catalog audit.
-    readonly property var available: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "cloudflareWarp", "gameMode", "tearing", "vrr", "lsfg", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile", "musicRecognition", "antiFlashbang", "memoryMode", "buildCache", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
+    readonly property var available: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "cloudflareWarp", "gameMode", "tearing", "vrr", "lsfg", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile", "musicRecognition", "antiFlashbang", "memoryMode", "focusMode", "buildCache", "zramAlgo", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
     function label(type) { return type.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, c => c.toUpperCase()); }
     function change(index, action) {
         let next = Array.from(tiles).map(t => Object.assign({}, t));
         if (action === "remove") next.splice(index, 1);
-        else if (action === "size") next[index].size = next[index].size === 2 ? 1 : 2;
+        else if (typeof action === "object") Object.assign(next[index], action);
         else { let target = index + action; if (target < 0 || target >= next.length) return; [next[index], next[target]] = [next[target], next[index]]; }
         root.edited(next);
     }
@@ -31,7 +31,9 @@ ColumnLayout {
             required property int index
             Layout.fillWidth: true
             StyledText { Layout.fillWidth: true; text: root.label(modelData.type); wrapMode: Text.WordWrap; font.pixelSize: 13 }
-            SettingsButton { text: modelData.size === 2 ? "Wide" : "Icon"; onClicked: root.change(index, "size"); Accessible.name: "Change size of " + root.label(modelData.type) }
+            StyledSpinBox { from: 1; to: Math.min(7, Config.options.sidebar.quickToggles.android.columns); value: modelData.size; onValueModified: root.change(index, {size:value}); Accessible.name: "Width of " + root.label(modelData.type) }
+            StyledText { text: "×" }
+            StyledSpinBox { from: 1; to: 7; value: modelData.height ?? 1; onValueModified: root.change(index, {height:value}); Accessible.name: "Height of " + root.label(modelData.type) }
             ToolButton { text: "↑"; enabled: index > 0; onClicked: root.change(index, -1); Accessible.name: "Move tile up" }
             ToolButton { text: "↓"; enabled: index < root.tiles.length - 1; onClicked: root.change(index, 1); Accessible.name: "Move tile down" }
             ToolButton { text: "×"; onClicked: root.change(index, "remove"); Accessible.name: "Remove " + root.label(modelData.type) }

@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""A low-rate, pinned-SSH reconnection alert. No resident polling process."""
+import argparse
+from datetime import datetime, timezone
+import fcntl
+import html
+import json
+import os
+from pathlib import Path
+import re
+import resource
+import subprocess
+import time
+import uuid
+
+CONFIG = Path.home()/'.config/pc-reconnect-watch/config.json'
+ROOT = Path.home()/'.local/state/pc-reconnect-watch'
+TIMER = 'pc-reconnect-watch.timer'
+SERVICE = 'pc-reconnect-watch.service'
+
+def read(path, default):
+    return json.loads(path.read_text()) if path.exists() else default.copy()
+
+def write(path, data):
+    path.parent.mkdir(parents=True,exist_ok=True);path.parent.chmod(0o700)
+    tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(data,indent=2)+'\n');tmp.chmod(0o600);os.replace(tmp,path)
+
+def config():
+    return dict(enabled=False,desktop=True,repeat=False,wakeCodex=False) | read(CONFIG,{})
+
+def systemctl(*args):
+    return subprocess.run(['systemctl','--user',*args],capture_output=True,text=True,timeout=15)
+
+def save_config(data):
+    write(CONFIG,data)
+
+def probe(alias):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',alias or ''):
+        return False,'invalid SSH alias'
+    try:
+        p=subprocess.run(['ssh','-T','-n','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',
+                          '-o','UpdateHostKeys=no','-o','ConnectTimeout=4','-o','ConnectionAttempts=1',
+                          '-o','ServerAliveInterval=3','-o','ServerAliveCountMax=1','--',alias,
+                          'cmd.exe /d /c echo PC_RECONNECT_READY'],capture_output=True,text=True,timeout=8)
+    except subprocess.TimeoutExpired:
+        return False,'connection timed out'
+    if p.returncode==0 and p.stdout.strip()=='PC_RECONNECT_READY':return True,'authenticated SSH available'
+    error=p.stderr.lower()
+    if 'host key verification failed' in error or 'host identification has changed' in error:return False,'SSH host key check failed'
+    if 'permission denied' in error:return False,'SSH authentication failed'
+    return False,'SSH unavailable'
+
+def notify(name, test=False):
+    title='PC reconnection alert — TEST' if test else name+' is reachable'
+    body='Notification delivery test; this is not a reconnection.' if test else 'Background SSH access is working. The connected-idle power check is first, then the separate desktop setup.'
+    p=subprocess.run(['notify-send','--app-name=PC reconnection','--icon=network-transmit-receive',
+                      '--expire-time='+('12000' if test else '0'),title,html.escape(body)],capture_output=True,text=True,timeout=8)
+    return p.returncode==0
+
+def wake(options):
+    try:
+        thread=options.get('threadId','')
+        if str(uuid.UUID(thread))!=thread:return False
+        prompt=options.get('wakeMessage','')
+        if not prompt or len(prompt.encode())>1000:return False
+        p=subprocess.run([str(Path.home()/'.local/bin/codex'),'queue','--thread',thread,'--message',prompt],
+                         capture_output=True,text=True,timeout=15)
+        return p.returncode==0
+    except (ValueError,OSError,subprocess.TimeoutExpired):return False
+
+def check():
+    ROOT.mkdir(parents=True,exist_ok=True);ROOT.chmod(0o700)
+    with (ROOT/'check.lock').open('a') as lock:
+        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:return dict(skipped='already checking')
+        options=config()
+        if not options['enabled']:return dict(skipped='disarmed')
+        prior=read(ROOT/'status.json',{})
+        start=time.monotonic();online,reason=probe(options.get('sshAlias'))
+        state=prior | dict(lastCheck=datetime.now(timezone.utc).isoformat(),online=online,reason=reason,
+                           probeSeconds=round(time.monotonic()-start,4),checks=prior.get('checks',0)+1)
+        options=config()  # Respect an off switch pressed during a network timeout.
+        if options['enabled'] and online and (not prior.get('online',False) or prior.get('wakePending',False) or prior.get('notificationPending',False)):
+            fresh=not prior.get('online',False)
+            need_notify=options['desktop'] and (fresh or prior.get('notificationPending',False))
+            need_wake=options['wakeCodex'] and (fresh or prior.get('wakePending',False))
+            notified=not need_notify or notify(options.get('displayName','Remote PC'))
+            if need_notify and notified:
+                state['lastAlert']=state['lastCheck'];state['alerts']=prior.get('alerts',0)+1
+            queued=not need_wake or wake(options)
+            state['notificationPending']=not notified;state['wakePending']=not queued
+            if need_wake and queued:state['lastWakeQueued']=state['lastCheck']
+            if notified and queued:
+                if not options['repeat']:
+                    options['enabled']=False;save_config(options)
+                    result=systemctl('disable','--now',TIMER)
+                    if result.returncode:state['controlError']='Could not stop timer; monitoring is disarmed in config'
+            else:state['reason']='SSH available; pending notification or Codex wake will retry'
+        self_cpu=resource.getrusage(resource.RUSAGE_SELF);children=resource.getrusage(resource.RUSAGE_CHILDREN)
+        state['processCPUSeconds']=round(self_cpu.ru_utime+self_cpu.ru_stime+children.ru_utime+children.ru_stime,6)
+        write(ROOT/'status.json',state)
+        return state
+
+def status():
+    options=config();state=read(ROOT/'status.json',{})
+    return state | {k:options.get(k) for k in ['enabled','desktop','repeat','wakeCodex','displayName']} | dict(
+        intervalSeconds=60,timerActive=systemctl('is-active','--quiet',TIMER).returncode==0)
+
+def control(action):
+    options=config()
+    if action=='on':
+        if not options.get('sshAlias'):raise RuntimeError('Configure an existing pinned SSH alias first')
+        # Each explicit arm requests one fresh alert, including an already-online PC.
+        state=read(ROOT/'status.json',{});state.update(online=False,notificationPending=False,wakePending=False);write(ROOT/'status.json',state)
+        options['enabled']=True;save_config(options)
+        p=systemctl('enable','--now',TIMER)
+        if p.returncode:
+            options['enabled']=False;save_config(options);raise RuntimeError('Could not arm user timer')
+    else:
+        options['enabled']=False;save_config(options)
+        first=systemctl('disable','--now',TIMER);second=systemctl('stop',SERVICE)
+        if first.returncode or second.returncode:raise RuntimeError('Could not stop owned timer/service')
+
+def main():
+    os.umask(0o077)
+    parser=argparse.ArgumentParser();parser.add_argument('action',nargs='?',default='status',choices=['on','off','status','check','test','set'])
+    parser.add_argument('key',nargs='?',choices=['desktop','repeat','wakeCodex']);parser.add_argument('value',nargs='?',choices=['on','off'])
+    args=parser.parse_args()
+    try:
+        if args.action in ['on','off']:control(args.action)
+        elif args.action=='status':print(json.dumps(status()))
+        elif args.action=='check':print(json.dumps(check()))
+        elif args.action=='test':
+            if not notify(config().get('displayName','Remote PC'),test=True):raise RuntimeError('Desktop notification failed')
+        elif args.action=='set':
+            if not args.key or not args.value:parser.error('set requires desktop/repeat and on/off')
+            options=config();options[args.key]=args.value=='on';save_config(options)
+    except Exception as e:
+        print(str(e),file=__import__('sys').stderr);raise SystemExit(1)
+
+if __name__=='__main__':main()

@@ -42,6 +42,9 @@ def main():
     assert set(fields) == classified, ('Unclassified/stale keys', set(fields) ^ classified)
     page_ids = {p['id'] for p in data['pages']}
     assert len(page_ids) == len(data['pages'])
+    assert data['pages'][0]['id'] == 'design', 'Color and design must be the first destination'
+    assert not page_ids.intersection({'effects', 'fonts'}), 'Design controls split across tabs again'
+    assert all(e['page'] == 'design' for e in entries if e['path'].startswith('appearance.')), 'Appearance controls escaped Design'
     for entry in entries:
         assert entry['page'] in page_ids
         assert 0 < len(entry['title']) < 90 and '\\n' not in entry['title'], entry['path']

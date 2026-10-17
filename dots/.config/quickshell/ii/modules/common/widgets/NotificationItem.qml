@@ -12,12 +12,12 @@ import Quickshell.Services.Notifications
 Item { // Notification item area
     id: root
     objectName: "notificationCard"
-    readonly property string formattedBody: NotificationUtils.processNotificationBody(String(notificationObject?.body ?? ""), notificationObject?.appName || notificationObject?.summary).replace(/\n/g, "<br/>")
+    readonly property string formattedBody: NotificationUtils.processNotificationBody(String(notificationObject?.mailData && !Mail.config.preview ? (notificationObject?.body ?? "").split("\n\n")[0] : notificationObject?.body ?? ""), notificationObject?.appName || notificationObject?.summary).replace(/\n/g, "<br/>")
     property var notificationObject
     property bool expanded: false
     property bool popup: false
     property bool onlyNotification: false
-    readonly property var compactActions: (notificationObject?.actions ?? []).filter(action => action.identifier !== "default" && String(action.text ?? "").trim().length > 0)
+    readonly property var compactActions: Notifications.visibleActions(notificationObject).filter(action => action.identifier !== "default" && String(action.text ?? "").trim().length > 0)
     property real fontSize: Appearance.font.pixelSize.small
     property real padding: onlyNotification ? 0 : 8
     property real summaryElideRatio: 0.85
@@ -180,6 +180,8 @@ Item { // Notification item area
                     wrapMode: Text.Wrap // Needed for proper eliding????
                     maximumLineCount: root.compactBodyLineCount
                     textFormat: Text.StyledText
+                    onLinkActivated: link => { if (/^https?:\/\//i.test(link)) Qt.openUrlExternally(link); }
+                    PointingHandLinkHover {}
                     text: {
                         return root.expanded ? "" : root.formattedBody
                     }
@@ -190,7 +192,7 @@ Item { // Notification item area
                 Layout.fillWidth: true
                 visible: root.popup && !root.expanded && root.compactActions.length > 0
                 Repeater {
-                    model: root.popup && !root.expanded ? root.compactActions : []
+                    model: root.popup && !root.expanded ? root.compactActions.slice(0, 3) : []
                     NotificationActionButton {
                         required property var modelData
                         Layout.fillWidth: true
@@ -230,7 +232,7 @@ Item { // Notification item area
                     }
 
                     onLinkActivated: (link) => {
-                        Qt.openUrlExternally(link)
+                        if (/^https?:\/\//i.test(link)) Qt.openUrlExternally(link)
                         GlobalStates.sidebarRightOpen = false
                     }
                     
@@ -298,7 +300,7 @@ Item { // Notification item area
 
                             Repeater {
                                 id: actionRepeater
-                                model: notificationObject?.actions ?? []
+                                model: Notifications.visibleActions(notificationObject)
                                 NotificationActionButton {
                                     id: notifAction
                                     required property var modelData

@@ -15,6 +15,9 @@ import time
 import urllib.parse
 import urllib.request
 from PIL import Image
+# QML watches this source tree. Never create module bytecode inside it.
+sys.dont_write_bytecode = True
+import wallpaper_library as library
 
 CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
 STATE = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'wallpaper-discovery'
@@ -34,6 +37,8 @@ MAX_BYTES = 40 * 1024 * 1024
 PROVIDER_ERRORS = {}
 PUBLISH_STATUS = False
 STARTED_AT = 0
+OPERATION = "fetch"
+PREFETCH_PROTECTED = []
 
 
 class FetchDeadline(BaseException):
@@ -41,7 +46,7 @@ class FetchDeadline(BaseException):
 
 
 def emit(message, **extra):
-    update = {'message': message, **extra}
+    update = {'message': message, 'operation': OPERATION, **extra}
     if PUBLISH_STATUS:
         atomic_json(STATE / 'status.json', dict(update, startedAt=STARTED_AT,
                     updatedAt=int(time.time()), pid=os.getpid(), busy=extra.get('busy', True)))
@@ -66,9 +71,9 @@ def atomic_json(path, value):
         Path(name).unlink(missing_ok=True)
 
 
-def fetch_json(url, cache_key=None):
+def fetch_json(url, cache_key=None, force=False):
     cache = CACHE / f'{cache_key}.json' if cache_key else None
-    if cache and cache.exists() and time.time() - cache.stat().st_mtime < 21600:
+    if not force and cache and cache.exists() and time.time() - cache.stat().st_mtime < 21600:
         return read_json(cache, {})
     host = urllib.parse.urlparse(url).hostname
     cached = read_json(cache, None) if cache else None
@@ -163,7 +168,12 @@ def candidates(theme, seen):
         params = dict(q=query, categories='100', purity='100', atleast='1920x1080', sorting='random', order='desc')
         key = 'search-' + re.sub(r'[^a-zA-Z0-9]+', '-', query)
         try:
-            pool = fetch_json('https://wallhaven.cc/api/v1/search?' + urllib.parse.urlencode(params), key).get('data', [])
+            search_url = 'https://wallhaven.cc/api/v1/search?' + urllib.parse.urlencode(params)
+            pool = fetch_json(search_url, key).get('data', [])
+            if pool and not any(acceptable(item, theme) and item.get('id') not in seen for item in pool):
+                # A read-ahead batch can exhaust a cached random search. Get a
+                # fresh pool instead of making previews wait for its six-hour TTL.
+                pool = fetch_json(search_url, key, force=True).get('data', [])
         except (OSError, ValueError):
             continue
         pool = [item for item in pool if acceptable(item, theme) and item['id'] not in seen]
@@ -195,6 +205,8 @@ def download(item, theme, target):
     if not image_url_allowed(url, item['provider']):
         raise ValueError('Unexpected image host')
     target.mkdir(parents=True, exist_ok=True)
+    storage = library.Library(target)
+    storage.metadata_path(str(item['id']))
     fd, name = tempfile.mkstemp(dir=target, prefix='.download-')
     temp = Path(name)
     try:
@@ -202,11 +214,19 @@ def download(item, theme, target):
             with urllib.request.urlopen(urllib.request.Request(url, headers=HEADERS), timeout=25) as response:
                 if not image_url_allowed(response.url, item['provider']):
                     raise ValueError('Unexpected image redirect')
+                announced = response.headers.get('Content-Length')
+                expected = int(announced) if announced and announced.isdigit() else MAX_BYTES
+                if expected > MAX_BYTES:
+                    raise ValueError('Image exceeds 40 MB')
+                if library.shutil.disk_usage(target).free < storage.limits[1] + expected:
+                    raise library.StorageFull('Downloads paused to preserve your free-space reserve.')
                 total = 0
                 while chunk := response.read(256 * 1024):
                     total += len(chunk)
                     if total > MAX_BYTES:
                         raise ValueError('Image exceeds 40 MB')
+                    if library.shutil.disk_usage(target).free < storage.limits[1] + len(chunk):
+                        raise library.StorageFull('Downloads paused to preserve your free-space reserve.')
                     output.write(chunk)
         with Image.open(temp) as image:
             width, height = image.size
@@ -215,6 +235,9 @@ def download(item, theme, target):
         if not extension or width < 1920 or height < 1080 or not 1.55 <= width / height <= 2.2:
             raise ValueError('Downloaded image is not a suitable desktop wallpaper')
         dest = target / f"{theme}-{item['id']}{extension}"
+        # Validate first, then make room for a real original. Failed downloads
+        # never evict an earlier wallpaper merely to reserve estimated space.
+        storage.enforce(incoming_bytes=max(0, total - (dest.stat().st_size if dest.is_file() else 0)) + 128 * 1024, extra_protected=[dest, *PREFETCH_PROTECTED], allocated=True)
         os.replace(temp, dest)
         return dest, width, height
     finally:
@@ -247,7 +270,10 @@ def local_wallpapers(theme, current_id):
             continue
 
 
-def finish(result, history, download_only, reused=False):
+def finish(result, history, download_only, reused=False, keep_busy=False):
+    storage = library.Library(Path(result['path']).parent)
+    result = storage.remember(dict(result, queued=True))
+    # Record the original even if applying it fails: it remains restorable.
     if not download_only:
         emit('Applying: ' + result['label'] + '…')
         # switchwall starts background theme helpers. Do not let them inherit
@@ -260,34 +286,78 @@ def finish(result, history, download_only, reused=False):
                 emit('Downloaded, but applying the wallpaper did not finish. Check your desktop before retrying.',
                      error=str(error), busy=False)
                 return 1
-        result['appliedAt'] = int(time.time())
+        result['appliedAt'] = result['lastUsedAt'] = int(time.time())
+        result['queued'] = False
         atomic_json(STATE / 'current.json', result)
-    atomic_json(STATE / 'sources' / f"{result['id']}.json", result)
+    storage.remember(result)
     atomic_json(STATE / 'history.json', (history + [result])[-150:])
     verb = 'Saved' if download_only else 'Applied'
     suffix = ' (downloaded collection)' if reused else ' (saved search results)' if PROVIDER_ERRORS else ''
-    emit(f"{verb}: {result['label']} · {result['width']} × {result['height']}{suffix}", **result, busy=False)
+    emit(f"{verb}: {result['label']} · {result['width']} × {result['height']}{suffix}", **result, busy=keep_busy)
     return 0
 
 
+def fetch_one(theme, settings, history, seen, target, current_id, download_only, storage_limited):
+    errors = []
+    for selected in theme_order(theme, settings.get('includeKonachan', False), history):
+        label = 'Konachan · optional' if selected == 'konachan' else THEMES[selected][0]
+        emit('Finding ' + label + '…')
+        try:
+            for item in (() if storage_limited else candidates(selected, seen)):
+                emit('Downloading ' + label + '…')
+                try:
+                    path, width, height = download(item, selected, target)
+                except library.StorageFull as error:
+                    storage_limited = True
+                    errors.append(str(error))
+                    emit(str(error))
+                    break
+                except OSError as error:
+                    errors.append(str(error))
+                    break
+                except ValueError as error:
+                    errors.append(str(error))
+                    continue
+                return dict(id=item['id'], theme=selected, label=label, provider=item['provider'],
+                    path=str(path), url=item['url'], source=item.get('source', ''), width=width, height=height,
+                    tags=[tag['name'] for tag in item.get('tags', [])], fetchedAt=int(time.time())), False
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            errors.append(f'{label}: {error}')
+            print(errors[-1], file=sys.stderr)
+        if not download_only:
+            for result in local_wallpapers(selected, current_id):
+                return result, True
+    if errors:
+        print('; '.join(errors), file=sys.stderr)
+    return None, False
+
+
 def main():
-    global PUBLISH_STATUS, STARTED_AT
+    global PUBLISH_STATUS, STARTED_AT, OPERATION
     PROVIDER_ERRORS.clear()
+    PREFETCH_PROTECTED.clear()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--theme', choices=['mix', *THEMES, 'konachan'])
     parser.add_argument('--download-only', action='store_true', help='Fetch and validate without changing wallpaper')
+    parser.add_argument('--prefetch', type=int, metavar='COUNT', help='Save a batch to the offline preview queue; never apply it')
     parser.add_argument('--output-dir', type=Path)
     args = parser.parse_args()
+    if args.prefetch is not None and not 1 <= args.prefetch <= 24:
+        parser.error('Prefetch count must be between 1 and 24')
     STATE.mkdir(parents=True, exist_ok=True)
     CACHE.mkdir(parents=True, exist_ok=True)
-    with (STATE / 'fetch.lock').open('w') as lock:
+    with (STATE / 'fetch.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print(json.dumps({'message': 'A wallpaper is already being fetched.', 'busy': False}), flush=True)
+            print(json.dumps({'message': 'A wallpaper operation is already running.', 'busy': False}), flush=True)
             return 2
-        PUBLISH_STATUS = not args.download_only
+        OPERATION = 'prefetch' if args.prefetch else 'fetch'
+        PUBLISH_STATUS = bool(args.prefetch) or not args.download_only
         STARTED_AT = int(time.time())
+        saved = 0
+        if args.prefetch:
+            atomic_json(STATE / 'prefetch.json', {'attemptedAt': STARTED_AT})
         def deadline(signum, frame):
             raise FetchDeadline()
         previous_handler = signal.signal(signal.SIGALRM, deadline)
@@ -299,49 +369,58 @@ def main():
             if theme not in ['mix', *THEMES, 'konachan']:
                 theme = 'mix'
             history = read_json(STATE / 'history.json', [])
-            seen = {entry['id'] for entry in history[-150:]}
-            current_id = read_json(STATE / 'current.json', {}).get('id')
             target = args.output_dir or pictures_dir() / 'Wallpapers' / 'Discovery'
-            errors = []
-            order = theme_order(theme, settings.get('includeKonachan', False), history)
-            for selected in order:
-                label = 'Konachan · optional' if selected == 'konachan' else THEMES[selected][0]
-                emit('Finding ' + label + '…')
-                try:
-                    for item in candidates(selected, seen):
-                        emit('Downloading ' + label + '…')
-                        try:
-                            path, width, height = download(item, selected, target)
-                        except OSError as error:
-                            errors.append(str(error))
-                            break  # CDN offline: try this theme's downloaded collection.
-                        except ValueError as error:
-                            errors.append(str(error))
-                            continue
-                        result = dict(id=item['id'], theme=selected, label=label, provider=item['provider'],
-                                      path=str(path), url=item['url'], source=item.get('source', ''),
-                                      width=width, height=height, tags=[tag['name'] for tag in item.get('tags', [])],
-                                      fetchedAt=int(time.time()))
-                        return finish(result, history, args.download_only)
-                except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-                    errors.append(f'{label}: {error}')
-                    print(errors[-1], file=sys.stderr)
-                # Preserve mixed-theme order during outages instead of defaulting
-                # to whichever provider happens to be online (usually Konachan).
-                if not args.download_only:
-                    for result in local_wallpapers(selected, current_id):
-                        return finish(result, history, False, reused=True)
-            detail = '; '.join([*PROVIDER_ERRORS.values(), *errors])
+            storage = library.Library(target)
+            entries = storage.entries()
+            current_id = next((entry['id'] for entry in entries if entry['current']), read_json(STATE/'current.json',{}).get('id'))
+            download_only = args.download_only or bool(args.prefetch)
+            # A ready original is available instantly, including with no API/CDN.
+            # Never consume a preview merely because someone opens Settings.
+            if not download_only:
+                queued = [entry for entry in entries if entry.get('queued') and not entry['current']
+                    and (theme == 'mix' or entry.get('theme') == theme)]
+                if queued:
+                    return finish(min(queued, key=lambda entry: entry.get('fetchedAt', 0)), history, False, reused=True)
+            storage_limited = False
+            try:
+                storage.enforce()
+            except library.StorageFull as error:
+                storage_limited = True
+                emit(str(error))
+            seen = {entry['id'] for entry in history[-150:]} | {entry['id'] for entry in storage.entries()}
+            count = args.prefetch or 1
+            while saved < count:
+                result, reused = fetch_one(theme, settings, history, seen, target, current_id, download_only, storage_limited)
+                if result is None:
+                    break
+                code = finish(result, history, download_only, reused=reused, keep_busy=bool(args.prefetch))
+                if not args.prefetch:
+                    return code
+                if code != 0:
+                    break
+                saved += 1
+                PREFETCH_PROTECTED.append(result['path'])
+                seen.add(result['id'])
+                history = read_json(STATE / 'history.json', [])
+                emit(f'Prefetched {saved} of {count} wallpapers. Your wallpaper and colors are unchanged.', savedCount=saved, requestedCount=count)
+            if args.prefetch:
+                emit(f'Saved {saved} of {count} wallpapers for preview and offline use.' +
+                    ('' if saved == count else ' No more matching downloads are available right now.'),
+                    savedCount=saved, requestedCount=count, busy=False)
+                return 0 if saved else 1
             emit('No matching wallpaper is available right now. Your current wallpaper was kept.',
-                 error=detail, busy=False)
+                 error='; '.join(PROVIDER_ERRORS.values()), busy=False)
             return 1
         except FetchDeadline:
-            emit('Wallpaper fetch timed out. Try again or choose a downloaded image.', busy=False)
-            return 1
+            emit(f'Prefetch timed out; {saved} saved wallpapers are ready to preview.' if args.prefetch
+                else 'Wallpaper fetch timed out. Try again or choose a downloaded image.', savedCount=saved, busy=False)
+            return 0 if args.prefetch and saved else 1
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, previous_handler)
             PUBLISH_STATUS = False
+            OPERATION = 'fetch'
+            PREFETCH_PROTECTED.clear()
 
 
 if __name__ == '__main__':

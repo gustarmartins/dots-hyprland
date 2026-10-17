@@ -268,6 +268,10 @@ Singleton {
                     property bool includeKonachan: false
                     property bool rotate: false
                     property int intervalMinutes: 60
+                    property int storageLimitMiB: 1024
+                    property int minFreeMiB: 2048
+                    property int prefetchCount: 6
+                    property bool prefetchAhead: false
                 }
                 property string wallpaperPath: ""
                 property string thumbnailPath: ""
@@ -586,7 +590,7 @@ Singleton {
                 property JsonObject quickToggles: JsonObject {
                     property string style: "android" // Options: classic, android
                     property JsonObject android: JsonObject {
-                        property int columns: 5
+                        property int columns: 7
                         property list<var> toggles: [
                             { "size": 2, "type": "network" },
                             { "size": 2, "type": "bluetooth"  },

@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Temporary Eden-only gain stage feeding the current EasyEffects pipeline."""
+import argparse
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+STATE = Path(os.environ.get('XDG_STATE_HOME', Path.home()/'.local/state'))/'eden-audio-boost'
+RUNTIME = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
+UNIT = 'eden-audio-boost.service'
+GRAPH_KEY = 'audioconvert.filter-graph.777'
+GAIN_KEY = 'eden_boost_gain:Mult'
+
+
+def call(argv, **kw):
+    return subprocess.run(argv, check=True, text=True, **kw)
+
+
+def read(path, default):
+    return json.loads(path.read_text()) if path.exists() else default
+
+
+def write(path, value):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(value,indent=2));tmp.chmod(0o600);tmp.replace(path)
+
+
+def config():
+    return read(STATE/'config.json', {'enabled':True, 'db':12.0})
+
+
+def inventory():
+    pw=json.loads(subprocess.check_output(['pw-dump'],text=True))
+    inputs=json.loads(subprocess.check_output(['pactl','--format=json','list','sink-inputs'],text=True))
+    sinks=json.loads(subprocess.check_output(['pactl','--format=json','list','sinks'],text=True))
+    clients={o['id']:o.get('info',{}).get('props',{}) for o in pw if o['type'].endswith(':Client')}
+    nodes={str(o.get('info',{}).get('props',{}).get('object.serial')):o.get('info',{}).get('props',{}) for o in pw if o['type'].endswith(':Node')}
+    for o in pw:
+        if o['type'].endswith(':Node'):
+            serial=str(o.get('info',{}).get('props',{}).get('object.serial'))
+            params={}
+            for item in o.get('info',{}).get('params',{}).get('Props',[]):
+                arr=item.get('params',[])
+                params.update(zip(arr[::2],arr[1::2]))
+            if serial in nodes:nodes[serial]['_params']=params
+    cookie=next(o['info']['cookie'] for o in pw if o['type'].endswith(':Core'))
+    return cookie, inputs, sinks, clients, nodes
+
+
+def identity(stream, clients, nodes):
+    props=stream['properties'];serial=str(props.get('object.serial',''))
+    node=nodes.get(serial,props)
+    client=clients.get(int(node.get('client.id',-1)),{})
+    # Native ALSA/PipeWire streams often omit process metadata on the stream itself.
+    raw=props.get('application.process.id') or client.get('pipewire.sec.pid') or client.get('application.process.id')
+    if raw is None:
+        return None
+    try:
+        pid=int(raw);p=Path('/proc')/str(pid)
+        exe=Path(os.readlink(p/'exe')).name
+        if not re.fullmatch(r'eden(?:[-_.][A-Za-z0-9_.-]+)?',exe,re.I):
+            return None
+        start=int((p/'stat').read_text().rsplit(')',1)[1].split()[19])
+        return {'pid':pid,'start':start,'serial':serial,'index':stream['index']}
+    except (OSError,ValueError):
+        return None
+
+
+def preset():
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(1);s.connect(str(RUNTIME/'EasyEffectsServer'))
+            s.sendall(b'get_last_loaded_preset:output\n');s.shutdown(socket.SHUT_WR)
+            return s.recv(8192).decode().strip()
+    except OSError:
+        return ''
+
+
+def status():
+    conf=config();receipt=read(STATE/'active.json',{})
+    running=subprocess.run(['systemctl','--user','is-active','--quiet',UNIT]).returncode==0
+    try:
+        cookie,streams,sinks,clients,nodes=inventory()
+        matches=[identity(s,clients,nodes) for s in streams]
+        count=sum(m is not None for m in matches)
+    except (OSError,ValueError,subprocess.CalledProcessError):
+        cookie=None;count=0
+    return dict(conf, active=running and receipt.get('cookie')==cookie and receipt.get('active',False),
+                streams=count,preset=preset(),message=receipt.get('message',''),pid=receipt.get('worker'))
+
+
+def graph(db, channels=2):
+    return {'nodes':[{'type':'builtin','name':'eden_boost_gain','label':'linear',
+                       'control':{'Mult':10**(db/20),'Add':0}}],
+            'n_inputs':channels,'n_outputs':channels}
+
+
+def matching(ident, inv):
+    _,streams,_,clients,nodes=inv
+    for stream in streams:
+        current=identity(stream,clients,nodes)
+        if current and all(current[k]==ident[k] for k in ('pid','start','serial')):
+            return stream,nodes[ident['serial']]
+    return None,None
+
+
+def set_graph(ident, value, cookie):
+    inv=inventory()
+    if inv[0]!=cookie:raise ValueError('Audio server changed')
+    stream,node=matching(ident,inv)
+    if stream is None:raise ValueError('Eden stream exited or changed')
+    call(['pw-cli','set-param',str(node['object.id']),'Props',
+          json.dumps({'params':[GRAPH_KEY,value]})],stdout=subprocess.DEVNULL)
+
+
+def cleanup(receipt=None):
+    receipt=receipt or read(STATE/'active.json',{})
+    if not receipt:return
+    cookie=receipt.get('cookie');expected=10**(receipt.get('db',12)/20)
+    inv=inventory()
+    if inv[0]==cookie:
+        for ident in receipt.get('original',{}).values():
+            stream,node=matching(ident,inv)
+            if stream and math.isclose(node['_params'].get(GAIN_KEY,-1),expected,rel_tol=1e-5):
+                set_graph(ident,'',cookie)
+    receipt.update(active=False,message='Boost off; temporary Eden gain removed')
+    write(STATE/'active.json',receipt)
+
+
+def serve():
+    STATE.mkdir(mode=0o700,parents=True,exist_ok=True)
+    guard=(STATE/'worker.lock').open('a');fcntl.flock(guard,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    conf=config()
+    if not conf['enabled']:return
+    cleanup()
+    cookie,streams,sinks,clients,nodes=inventory()
+    original={}
+    for stream in streams:
+        ident=identity(stream,clients,nodes)
+        if ident:original[ident['serial']]=ident
+    if not original:raise ValueError('Start Eden audio first, then double-click Boost')
+    stopped=False
+    def stop(*_):
+        nonlocal stopped
+        stopped=True
+    signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
+    receipt={'cookie':cookie,'worker':os.getpid(),'active':False,'original':original,
+             'message':'Adding temporary Eden gain','db':conf['db'],'preset_at_start':preset()}
+    write(STATE/'active.json',receipt)
+    applied=set();expected=10**(conf['db']/20)
+    try:
+        while not stopped:
+            inv=inventory();current,streams,_,clients,nodes=inv
+            if current!=cookie:raise ValueError('Audio server changed; boost ended')
+            allowed=[]
+            for stream in streams:
+                ident=identity(stream,clients,nodes)
+                known=ident and any(ident['pid']==r['pid'] and ident['start']==r['start'] for r in original.values())
+                if not known:continue
+                allowed.append(ident)
+                if ident['serial'] not in applied:
+                    original[ident['serial']]=ident
+                    receipt['original']=original;write(STATE/'active.json',receipt)
+                    node=nodes[ident['serial']]
+                    if node['_params'].get('audioconvert.filter-graph.disable'):
+                        raise ValueError('This stream disabled filter updates')
+                    set_graph(ident,json.dumps(graph(conf['db'],len(stream['volume']))),cookie)
+                    deadline=time.monotonic()+2
+                    while True:
+                        _,check=matching(ident,inventory())
+                        if check and math.isclose(check['_params'].get(GAIN_KEY,-1),expected,rel_tol=1e-5):break
+                        if time.monotonic()>deadline:raise ValueError('Stream did not accept the temporary gain graph')
+                        time.sleep(.05)
+                    applied.add(ident['serial'])
+                else:
+                    if not math.isclose(nodes[ident['serial']]['_params'].get(GAIN_KEY,-1),expected,rel_tol=1e-5):
+                        raise ValueError('Gain changed externally; stopping without replacing it')
+            if not allowed:break
+            receipt.update(active=True,message='Eden only +%g dB'%conf['db'])
+            write(STATE/'active.json',receipt)
+            time.sleep(.75)
+    finally:
+        cleanup(receipt)
+
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('action',choices=['status','enable','disable','boost','reset','serve','cleanup'])
+    p.add_argument('--confirmed',action='store_true',help='UI supplies this only on double-click; explicit CLI acknowledgement')
+    args=p.parse_args()
+    if args.action=='status':print(json.dumps(status()));return
+    if args.action=='serve':serve();return
+    if args.action=='cleanup':cleanup();return
+    if args.action in ('reset','disable'):
+        call(['systemctl','--user','stop',UNIT])
+        cleanup()
+    if args.action in ('enable','disable'):
+        d=config();d['enabled']=args.action=='enable';write(STATE/'config.json',d)
+    if args.action=='boost':
+        if not args.confirmed:raise ValueError('Double-click the widget, or use boost --confirmed (+12 dB, Eden only)')
+        if not config()['enabled']:raise ValueError('Enable Eden boost in Super+I → Audio first')
+        current=status()
+        if current['active']:print('Already boosted; gain is not stacked');return
+        if current['streams']==0:raise ValueError('Start Eden audio first, then double-click Boost')
+        print('Eden only: +12 dB before the current effects; loud peaks may engage the limiter.',flush=True)
+        call(['systemctl','--user','start',UNIT])
+        deadline=time.monotonic()+7
+        while time.monotonic()<deadline:
+            d=status()
+            if d['active']:print(json.dumps(d));return
+            if subprocess.run(['systemctl','--user','is-failed','--quiet',UNIT]).returncode==0:
+                raise ValueError('Boost failed; inspect journalctl --user -u '+UNIT)
+            time.sleep(.15)
+        raise ValueError('Boost did not become active; inspect its service log')
+    print(json.dumps(status()))
+
+
+if __name__=='__main__':
+    try:main()
+    except (OSError,ValueError,subprocess.CalledProcessError) as e:
+        print('eden-audio-boost:',e,file=sys.stderr);sys.exit(1)

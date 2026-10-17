@@ -31,6 +31,8 @@ hl.bind("SUPER + F1", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/toggle-gpu-
     { description = "User: Toggle AMD GPU power mode" })
 hl.bind("SUPER + F2", hl.dsp.exec_cmd("~/.config/hypr/do.sh"))
 
+local mail = require("custom.mail")
+
 -- Never close a stale active window left behind on a hidden special workspace.
 -- This happens when the special workspace is hidden over an empty workspace.
 hl.unbind("SUPER + Q")
@@ -53,6 +55,10 @@ hl.bind("SUPER + Q", function()
             text = "Close blocked: no focused window on the visible workspace",
             timeout = 2500,
         })
+        return
+    end
+
+    if mail.close_or_hide(window) then
         return
     end
 

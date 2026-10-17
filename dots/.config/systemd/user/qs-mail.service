@@ -1,0 +1,16 @@
+[Unit]
+Description=Thunderbird for Quickshell Mail
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/qs-mail run
+KillMode=control-group
+TimeoutStopSec=20
+Restart=always
+RestartSec=3
+RestartPreventExitStatus=75
+
+[Install]
+WantedBy=graphical-session.target

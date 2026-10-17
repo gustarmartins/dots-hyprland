@@ -1,0 +1,25 @@
+{
+  "manifest_version": 2,
+  "name": "Quickshell Mail",
+  "version": "1.0.1",
+  "description": "Local mail previews, verification codes and links for Quickshell.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "qs-mail@dots-hyprland",
+      "strict_min_version": "140.0"
+    }
+  },
+  "permissions": [
+    "accountsRead",
+    "messagesRead",
+    "nativeMessaging"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "browser_action": {
+    "default_title": "Reconnect Quickshell Mail"
+  }
+}

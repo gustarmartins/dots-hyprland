@@ -3,28 +3,23 @@
 .pragma library
 var pages = [
   {
+    "id": "design",
+    "title": "Design",
+    "icon": "palette",
+    "description": "Color, animation, GPU effects and typography — one place to shape your desktop."
+  },
+  {"id":"company", "title":"Company accounts", "icon":"manage_accounts", "description":"PC reconnection alerts, password recovery and private audit history."},
+  {
     "id": "home",
     "title": "Your desktop",
     "icon": "space_dashboard",
     "description": "A place for every part of your desktop."
   },
   {
-    "id": "effects",
-    "title": "Desktop effects",
-    "icon": "auto_awesome",
-    "description": "Saved looks, glass, borders and workspace motion. Changes here use Apply."
-  },
-  {
     "id": "wallpaper",
-    "title": "Wallpaper & colors",
-    "icon": "palette",
-    "description": "Discover images, build your palette and tune terminal colors."
-  },
-  {
-    "id": "fonts",
-    "title": "Text & fonts",
-    "icon": "text_fields",
-    "description": "Desktop-wide font profiles and individual shell text roles."
+    "title": "Wallpapers",
+    "icon": "wallpaper",
+    "description": "Discovery, rotation and offline downloads. Open the library to preview or restore images."
   },
   {
     "id": "bar",
@@ -55,6 +50,12 @@ var pages = [
     "title": "Notifications",
     "icon": "notifications",
     "description": "Popup delivery, unread counts and on-screen feedback."
+  },
+  {
+    "id": "mail",
+    "title": "Mail",
+    "icon": "mail",
+    "description": "Accounts, message previews, verification codes and links."
   },
   {
     "id": "capture",
@@ -92,6 +93,7 @@ var pages = [
     "icon": "chat",
     "description": "Assistant models, translation and image-search preferences."
   },
+  {"id":"memory", "title":"Memory locks", "icon":"memory", "description":"Keep important apps responsive. Review RAM use and choose which processes to protect from swap."},
   {
     "id": "advanced",
     "title": "Advanced",
@@ -114,31 +116,31 @@ var entries = [
     {"path": "ai.systemPrompt", "page": "services", "section": "Sidebar assistant", "title": "Assistant instructions", "kind": "longtext", "description": "Saved only when you finish editing or press Save."},
     {"path": "ai.tool", "page": "services", "section": "Sidebar assistant", "title": "Tool", "kind": "choice", "choices": [{"value": "functions", "label": "Functions"}, {"value": "search", "label": "Search"}, {"value": "none", "label": "None"}]},
     {"path": "ai.extraModels", "page": "services", "section": "Sidebar assistant", "title": "Additional assistant models", "kind": "json", "description": "Advanced model definitions as a JSON array. API keys are configured in the assistant sidebar."},
-    {"path": "appearance.extraBackgroundTint", "page": "wallpaper", "section": "Surface appearance", "title": "Extra Background Tint", "kind": "toggle"},
-    {"path": "appearance.fakeScreenRounding", "page": "wallpaper", "section": "Surface appearance", "title": "Fake Screen Rounding", "kind": "choice", "min": 0, "max": 10000, "step": 1, "scale": 1, "choices": [{"value": 0, "label": "Off"}, {"value": 1, "label": "Always"}, {"value": 2, "label": "Except fullscreen"}]},
-    {"path": "appearance.fontSizes.ui", "page": "fonts", "section": "Shell base sizes (pt)", "title": "Interface size", "kind": "number", "description": "Points. Zero keeps the original shell size; other labels scale proportionally.", "min": 0, "max": 48, "step": 0.5, "scale": 1},
-    {"path": "appearance.fontSizes.mono", "page": "fonts", "section": "Shell base sizes (pt)", "title": "Monospace size", "kind": "number", "description": "Points. Zero keeps the original shell size.", "min": 0, "max": 48, "step": 0.5, "scale": 1},
-    {"path": "appearance.fontSizes.title", "page": "fonts", "section": "Shell base sizes (pt)", "title": "Heading size", "kind": "number", "description": "Points. Zero keeps the original shell size.", "min": 0, "max": 48, "step": 0.5, "scale": 1},
-    {"path": "appearance.fonts.main", "page": "fonts", "section": "Shell font families", "title": "Interface family", "kind": "text", "description": "Shell labels and menus. Desktop-wide changes belong to the profile picker above."},
-    {"path": "appearance.fonts.numbers", "page": "fonts", "section": "Shell font families", "title": "Numbers family", "kind": "text", "description": "Clocks and numeric labels."},
-    {"path": "appearance.fonts.title", "page": "fonts", "section": "Shell font families", "title": "Heading family", "kind": "text", "description": "Section titles and shell window titles."},
-    {"path": "appearance.fonts.iconNerd", "page": "fonts", "section": "Shell font families", "title": "Nerd Font family", "kind": "text", "description": "Keep a Nerd Font here so application and distro glyphs remain available."},
-    {"path": "appearance.fonts.monospace", "page": "fonts", "section": "Shell font families", "title": "Monospace family", "kind": "text", "description": "Code and technical values inside the shell."},
-    {"path": "appearance.fonts.reading", "page": "fonts", "section": "Shell font families", "title": "Reading family", "kind": "text", "description": "Longer body text."},
-    {"path": "appearance.fonts.expressive", "page": "fonts", "section": "Shell font families", "title": "Expressive family", "kind": "text", "description": "Decorative text and large accents."},
-    {"path": "appearance.transparency.enable", "page": "wallpaper", "section": "Shell transparency", "title": "Enable shell transparency", "kind": "toggle", "description": "Desktop-effects opacity and blur remain on the Desktop effects page."},
-    {"path": "appearance.transparency.automatic", "page": "wallpaper", "section": "Shell transparency", "title": "Automatic shell transparency", "kind": "toggle", "description": "Let the shell derive transparency from the current theme."},
-    {"path": "appearance.transparency.backgroundTransparency", "page": "wallpaper", "section": "Shell transparency", "title": "Background Transparency", "kind": "number", "min": 0, "max": 100, "step": 1, "scale": 100, "suffix": "%", "when": [["appearance.transparency.enable", true], ["appearance.transparency.automatic", false]]},
-    {"path": "appearance.transparency.contentTransparency", "page": "wallpaper", "section": "Shell transparency", "title": "Content Transparency", "kind": "number", "min": 0, "max": 100, "step": 1, "scale": 100, "suffix": "%", "when": [["appearance.transparency.enable", true], ["appearance.transparency.automatic", false]]},
-    {"path": "appearance.wallpaperTheming.enableAppsAndShell", "page": "wallpaper", "section": "Apply colors to applications", "title": "Theme shell and applications", "kind": "toggle", "apply": "colors", "description": "Regenerate the shell palette and supported application colors."},
-    {"path": "appearance.wallpaperTheming.enableQtApps", "page": "wallpaper", "section": "Apply colors to applications", "title": "Theme Qt applications", "kind": "toggle", "apply": "colors", "description": "Requires application theming to be enabled above.", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true]]},
-    {"path": "appearance.wallpaperTheming.enableTerminal", "page": "wallpaper", "section": "Apply colors to applications", "title": "Theme terminals", "kind": "toggle", "apply": "colors", "description": "Regenerate the terminal palette from the current wallpaper.", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true]]},
-    {"path": "appearance.wallpaperTheming.terminalGenerationProps.harmony", "page": "wallpaper", "section": "Terminal palette", "title": "Terminal wallpaper tint", "kind": "number", "min": 0, "max": 100, "step": 1, "scale": 100, "suffix": "%", "apply": "colors", "description": "0% preserves canonical ANSI hues; higher values tint toward the wallpaper accent.", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true], ["appearance.wallpaperTheming.enableTerminal", true]]},
-    {"path": "appearance.wallpaperTheming.terminalGenerationProps.harmonizeThreshold", "page": "wallpaper", "section": "Terminal palette", "title": "Maximum terminal hue shift (°)", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1, "apply": "colors", "description": "Limits how far wallpaper tint can move each ANSI hue.", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true], ["appearance.wallpaperTheming.enableTerminal", true]]},
-    {"path": "appearance.wallpaperTheming.terminalGenerationProps.termFgBoost", "page": "wallpaper", "section": "Terminal palette", "title": "Terminal contrast", "kind": "number", "min": 0, "max": 100, "step": 1, "scale": 100, "suffix": "%", "apply": "colors", "description": "Moves ANSI tones away from the background while preserving color families.", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true], ["appearance.wallpaperTheming.enableTerminal", true]]},
-    {"path": "appearance.wallpaperTheming.terminalGenerationProps.forceDarkMode", "page": "wallpaper", "section": "Terminal palette", "title": "Force dark terminal palette", "kind": "toggle", "apply": "colors", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true], ["appearance.wallpaperTheming.enableTerminal", true]]},
-    {"path": "appearance.palette.type", "page": "wallpaper", "section": "Color palette", "title": "Type", "kind": "choice", "choices": [{"value": "auto", "label": "Auto"}, {"value": "scheme-content", "label": "Content"}, {"value": "scheme-expressive", "label": "Expressive"}, {"value": "scheme-fidelity", "label": "Fidelity"}, {"value": "scheme-fruit-salad", "label": "Fruit Salad"}, {"value": "scheme-monochrome", "label": "Monochrome"}, {"value": "scheme-neutral", "label": "Neutral"}, {"value": "scheme-rainbow", "label": "Rainbow"}, {"value": "scheme-tonal-spot", "label": "Tonal Spot"}, {"value": "scheme-vibrant", "label": "Vibrant"}], "apply": "colors"},
-    {"path": "appearance.palette.accentColor", "page": "wallpaper", "section": "Color palette", "title": "Custom accent color", "kind": "text", "apply": "colors", "description": "Leave empty to use the wallpaper. Use a color such as #a5b4fc.", "validation": "color"},
+    {"path": "appearance.extraBackgroundTint", "page": "design", "section": "Surface appearance", "title": "Extra Background Tint", "kind": "toggle"},
+    {"path": "appearance.fakeScreenRounding", "page": "design", "section": "Surface appearance", "title": "Fake Screen Rounding", "kind": "choice", "min": 0, "max": 10000, "step": 1, "scale": 1, "choices": [{"value": 0, "label": "Off"}, {"value": 1, "label": "Always"}, {"value": 2, "label": "Except fullscreen"}]},
+    {"path": "appearance.fontSizes.ui", "page": "design", "section": "Shell base sizes (pt)", "title": "Interface size", "kind": "number", "description": "Points. Zero keeps the original shell size; other labels scale proportionally.", "min": 0, "max": 48, "step": 0.5, "scale": 1},
+    {"path": "appearance.fontSizes.mono", "page": "design", "section": "Shell base sizes (pt)", "title": "Monospace size", "kind": "number", "description": "Points. Zero keeps the original shell size.", "min": 0, "max": 48, "step": 0.5, "scale": 1},
+    {"path": "appearance.fontSizes.title", "page": "design", "section": "Shell base sizes (pt)", "title": "Heading size", "kind": "number", "description": "Points. Zero keeps the original shell size.", "min": 0, "max": 48, "step": 0.5, "scale": 1},
+    {"path": "appearance.fonts.main", "page": "design", "section": "Shell font families", "title": "Interface family", "kind": "text", "description": "Shell labels and menus. Desktop-wide changes belong to the profile picker above."},
+    {"path": "appearance.fonts.numbers", "page": "design", "section": "Shell font families", "title": "Numbers family", "kind": "text", "description": "Clocks and numeric labels."},
+    {"path": "appearance.fonts.title", "page": "design", "section": "Shell font families", "title": "Heading family", "kind": "text", "description": "Section titles and shell window titles."},
+    {"path": "appearance.fonts.iconNerd", "page": "design", "section": "Shell font families", "title": "Nerd Font family", "kind": "text", "description": "Keep a Nerd Font here so application and distro glyphs remain available."},
+    {"path": "appearance.fonts.monospace", "page": "design", "section": "Shell font families", "title": "Monospace family", "kind": "text", "description": "Code and technical values inside the shell."},
+    {"path": "appearance.fonts.reading", "page": "design", "section": "Shell font families", "title": "Reading family", "kind": "text", "description": "Longer body text."},
+    {"path": "appearance.fonts.expressive", "page": "design", "section": "Shell font families", "title": "Expressive family", "kind": "text", "description": "Decorative text and large accents."},
+    {"path": "appearance.transparency.enable", "page": "design", "section": "Shell transparency", "title": "Enable shell transparency", "kind": "toggle", "description": "GPU blur and window opacity are grouped above."},
+    {"path": "appearance.transparency.automatic", "page": "design", "section": "Shell transparency", "title": "Automatic shell transparency", "kind": "toggle", "description": "Let the shell derive transparency from the current theme."},
+    {"path": "appearance.transparency.backgroundTransparency", "page": "design", "section": "Shell transparency", "title": "Background Transparency", "kind": "number", "min": 0, "max": 100, "step": 1, "scale": 100, "suffix": "%", "when": [["appearance.transparency.enable", true], ["appearance.transparency.automatic", false]]},
+    {"path": "appearance.transparency.contentTransparency", "page": "design", "section": "Shell transparency", "title": "Content Transparency", "kind": "number", "min": 0, "max": 100, "step": 1, "scale": 100, "suffix": "%", "when": [["appearance.transparency.enable", true], ["appearance.transparency.automatic", false]]},
+    {"path": "appearance.wallpaperTheming.enableAppsAndShell", "page": "design", "section": "Apply colors to applications", "title": "Theme shell and applications", "kind": "toggle", "apply": "colors", "description": "Regenerate the shell palette and supported application colors."},
+    {"path": "appearance.wallpaperTheming.enableQtApps", "page": "design", "section": "Apply colors to applications", "title": "Theme Qt applications", "kind": "toggle", "apply": "colors", "description": "Requires application theming to be enabled above.", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true]]},
+    {"path": "appearance.wallpaperTheming.enableTerminal", "page": "design", "section": "Apply colors to applications", "title": "Theme terminals", "kind": "toggle", "apply": "colors", "description": "Regenerate the terminal palette from the current wallpaper.", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true]]},
+    {"path": "appearance.wallpaperTheming.terminalGenerationProps.harmony", "page": "design", "section": "Terminal palette", "title": "Terminal wallpaper tint", "kind": "number", "min": 0, "max": 100, "step": 1, "scale": 100, "suffix": "%", "apply": "colors", "description": "0% preserves canonical ANSI hues; higher values tint toward the wallpaper accent.", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true], ["appearance.wallpaperTheming.enableTerminal", true]]},
+    {"path": "appearance.wallpaperTheming.terminalGenerationProps.harmonizeThreshold", "page": "design", "section": "Terminal palette", "title": "Maximum terminal hue shift (°)", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1, "apply": "colors", "description": "Limits how far wallpaper tint can move each ANSI hue.", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true], ["appearance.wallpaperTheming.enableTerminal", true]]},
+    {"path": "appearance.wallpaperTheming.terminalGenerationProps.termFgBoost", "page": "design", "section": "Terminal palette", "title": "Terminal contrast", "kind": "number", "min": 0, "max": 100, "step": 1, "scale": 100, "suffix": "%", "apply": "colors", "description": "Moves ANSI tones away from the background while preserving color families.", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true], ["appearance.wallpaperTheming.enableTerminal", true]]},
+    {"path": "appearance.wallpaperTheming.terminalGenerationProps.forceDarkMode", "page": "design", "section": "Terminal palette", "title": "Force dark terminal palette", "kind": "toggle", "apply": "colors", "when": [["appearance.wallpaperTheming.enableAppsAndShell", true], ["appearance.wallpaperTheming.enableTerminal", true]]},
+    {"path": "appearance.palette.type", "page": "design", "section": "Color palette", "title": "Palette style", "kind": "choice", "choices": [{"value": "auto", "label": "Auto"}, {"value": "scheme-content", "label": "Content"}, {"value": "scheme-expressive", "label": "Expressive"}, {"value": "scheme-fidelity", "label": "Fidelity"}, {"value": "scheme-fruit-salad", "label": "Fruit Salad"}, {"value": "scheme-monochrome", "label": "Monochrome"}, {"value": "scheme-neutral", "label": "Neutral"}, {"value": "scheme-rainbow", "label": "Rainbow"}, {"value": "scheme-tonal-spot", "label": "Tonal Spot"}, {"value": "scheme-vibrant", "label": "Vibrant"}], "apply": "colors", "description": ""},
+    {"path": "appearance.palette.accentColor", "page": "design", "section": "Color palette", "title": "Custom accent color", "kind": "text", "apply": "colors", "description": "Leave empty to use the wallpaper. Use a color such as #a5b4fc.", "validation": "color"},
     {"path": "audio.protection.enable", "page": "audio", "section": "Volume protection", "title": "Enable volume protection", "kind": "toggle", "description": "Limits sudden volume increases and the maximum output level."},
     {"path": "audio.protection.maxAllowedIncrease", "page": "audio", "section": "Volume protection", "title": "Max allowed increase", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1},
     {"path": "audio.protection.maxAllowed", "page": "audio", "section": "Volume protection", "title": "Volume limit", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1},
@@ -189,13 +191,17 @@ var entries = [
     {"path": "background.discovery.includeKonachan", "page": "wallpaper", "section": "Wallpaper discovery", "title": "Include Konachan anime in the mix", "kind": "toggle"},
     {"path": "background.discovery.rotate", "page": "wallpaper", "section": "Wallpaper discovery", "title": "Rotate wallpapers automatically", "kind": "toggle", "description": "Starts wallpaper downloads at the selected interval."},
     {"path": "background.discovery.intervalMinutes", "page": "wallpaper", "section": "Wallpaper discovery", "title": "Rotation interval (minutes)", "kind": "number", "description": "Automatic discovery uses at least 15 minutes between wallpapers.", "min": 15, "max": 1440, "step": 15, "scale": 1},
-    {"path": "background.hideWhenFullscreen", "page": "wallpaper", "section": "Wallpaper visibility", "title": "Hide background under fullscreen apps", "kind": "toggle", "description": "Reduces unnecessary background rendering."},
-    {"path": "background.parallax.vertical", "page": "wallpaper", "section": "Wallpaper motion", "title": "Vertical", "kind": "toggle"},
-    {"path": "background.parallax.autoVertical", "page": "wallpaper", "section": "Wallpaper motion", "title": "Auto Vertical", "kind": "toggle"},
-    {"path": "background.parallax.enableWorkspace", "page": "wallpaper", "section": "Wallpaper motion", "title": "Depends on workspace", "kind": "toggle"},
-    {"path": "background.parallax.workspaceZoom", "page": "wallpaper", "section": "Wallpaper motion", "title": "Preferred wallpaper zoom (%)", "kind": "number", "min": 0, "max": 300, "step": 1, "scale": 100, "suffix": "%"},
-    {"path": "background.parallax.enableSidebar", "page": "wallpaper", "section": "Wallpaper motion", "title": "Depends on sidebars", "kind": "toggle"},
-    {"path": "background.parallax.widgetsFactor", "page": "wallpaper", "section": "Wallpaper motion", "title": "Widgets Factor", "kind": "number", "min": 0, "max": 300, "step": 1, "scale": 100, "suffix": "%"},
+    {"path": "background.discovery.prefetchCount", "page": "wallpaper", "section": "Offline & preview queue", "title": "Prefetch batch size", "kind": "number", "description": "Download this many originals for preview without changing the wallpaper or colors.", "min": 1, "max": 24, "step": 1, "scale": 1},
+    {"path": "background.discovery.prefetchAhead", "page": "wallpaper", "section": "Offline & preview queue", "title": "Keep the offline queue filled", "kind": "toggle", "description": "While automatic rotation is enabled, refill the queue in the background when fewer than two images remain. Rotation uses these saved originals first."},
+    {"path": "background.discovery.storageLimitMiB", "page": "wallpaper", "section": "Saved wallpaper storage", "title": "Wallpaper storage limit (MiB)", "kind": "number", "description": "Oldest unkept downloads are removed when space is needed. Current and kept wallpapers are protected; new downloads pause if they fill the limit.", "min": 64, "max": 32768, "step": 64, "scale": 1},
+    {"path": "background.discovery.minFreeMiB", "page": "wallpaper", "section": "Saved wallpaper storage", "title": "Keep disk space free (MiB)", "kind": "number", "description": "Pause downloads before free disk space falls below this reserve.", "min": 0, "max": 32768, "step": 256, "scale": 1},
+    {"path": "background.hideWhenFullscreen", "page": "design", "section": "Wallpaper visibility", "title": "Hide background under fullscreen apps", "kind": "toggle", "description": "Reduces unnecessary background rendering."},
+    {"path": "background.parallax.vertical", "page": "design", "section": "Wallpaper motion", "title": "Vertical", "kind": "toggle"},
+    {"path": "background.parallax.autoVertical", "page": "design", "section": "Wallpaper motion", "title": "Auto Vertical", "kind": "toggle"},
+    {"path": "background.parallax.enableWorkspace", "page": "design", "section": "Wallpaper motion", "title": "Depends on workspace", "kind": "toggle"},
+    {"path": "background.parallax.workspaceZoom", "page": "design", "section": "Wallpaper motion", "title": "Preferred wallpaper zoom (%)", "kind": "number", "min": 0, "max": 300, "step": 1, "scale": 100, "suffix": "%"},
+    {"path": "background.parallax.enableSidebar", "page": "design", "section": "Wallpaper motion", "title": "Depends on sidebars", "kind": "toggle"},
+    {"path": "background.parallax.widgetsFactor", "page": "design", "section": "Wallpaper motion", "title": "Widgets Factor", "kind": "number", "min": 0, "max": 300, "step": 1, "scale": 100, "suffix": "%"},
     {"path": "bar.autoHide.enable", "page": "bar", "section": "Auto-hide", "title": "Hide bar automatically", "kind": "toggle", "description": "Reveal the bar from its edge or the Super key, as configured below."},
     {"path": "bar.autoHide.hoverRegionWidth", "page": "bar", "section": "Auto-hide", "title": "Hover Region Width", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
     {"path": "bar.autoHide.pushWindows", "page": "bar", "section": "Auto-hide", "title": "Push Windows", "kind": "toggle"},
@@ -353,7 +359,7 @@ var entries = [
     {"path": "sidebar.cornerOpen.clicklessCornerEnd", "page": "control", "section": "Corner gestures", "title": "Force hover open at absolute corner", "kind": "toggle"},
     {"path": "sidebar.cornerOpen.clicklessCornerVerticalOffset", "page": "control", "section": "Corner gestures", "title": "Clickless Corner Vertical Offset", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
     {"path": "sidebar.quickToggles.style", "page": "control", "section": "Quick tiles", "title": "Tile layout", "kind": "choice", "description": "Classic uses fixed controls. Custom tiles lets you choose, resize and reorder the grid below.", "choices": [{"value": "classic", "label": "Classic"}, {"value": "android", "label": "Custom tiles"}]},
-    {"path": "sidebar.quickToggles.android.columns", "page": "control", "section": "Quick tiles", "title": "Maximum grid columns", "kind": "number", "description": "A ceiling, not a fixed count: the grid reduces columns to keep tiles readable at the available width.", "min": 2, "max": 12, "step": 1, "scale": 1, "when": [["sidebar.quickToggles.style", "android"]]},
+    {"path": "sidebar.quickToggles.android.columns", "page": "control", "section": "Quick tiles", "title": "Grid columns", "kind": "number", "description": "Exact column count. The panel expands to fit; tiles can span up to 7 columns and 7 rows.", "min": 1, "max": 12, "step": 1, "scale": 1, "when": [["sidebar.quickToggles.style", "android"]]},
     {"path": "sidebar.quickToggles.android.toggles", "page": "control", "section": "Quick tiles", "title": "Tile order & size", "kind": "tiles", "description": "Changes the custom grid without running any of its actions.", "when": [["sidebar.quickToggles.style", "android"]]},
     {"path": "sidebar.quickSliders.enable", "page": "control", "section": "Quick sliders", "title": "Show quick sliders", "kind": "toggle", "description": "Brightness, output volume and microphone level above the tiles."},
     {"path": "sidebar.quickSliders.showMic", "page": "control", "section": "Quick sliders", "title": "Microphone", "kind": "toggle", "when": [["sidebar.quickSliders.enable", true]]},
@@ -409,7 +415,8 @@ var managed = {
   "background.thumbnailPath": "Generated wallpaper thumbnail"
 };
 
-function page(id) { return pages.find(function(p) { return p.id === id; }) || pages[0]; }
+function canonicalPage(id) { return ["effects", "fonts"].indexOf(id) >= 0 ? "design" : id; }
+function page(id) { id = canonicalPage(id); return pages.find(function(p) { return p.id === id; }) || pages[0]; }
 function matches(entry, query) {
     var haystack = [entry.title, entry.description || "", entry.section || "", entry.path || "", page(entry.page).title].join(" ").toLowerCase();
     return query.trim().toLowerCase().split(/\s+/).every(function(word) { return haystack.indexOf(word) >= 0; });
@@ -423,6 +430,7 @@ function sections(pageId, query) {
         group.entries.push(e);
     });
     var order = {
+        wallpaper: ["Wallpaper discovery", "Offline & preview queue", "Saved wallpaper storage", "Wallpaper picker"],
         control: ["Quick tiles", "Quick sliders", "Panel loading", "Corner gestures", "On-screen keyboard"],
         bar: ["Bar layout", "Workspace indicators", "Resource monitoring", "Resource warnings", "System tray", "Utility buttons", "Auto-hide", "Bar weather", "Bar tooltips"]
     }[pageId];
@@ -432,8 +440,14 @@ function sections(pageId, query) {
 
 var destinations = [
     {page:"cryod", title:"CryoD desktop integration", description:"memory foreground focus mode cpu priority gpu latency boost visible windows monitor workload protection session bridge master off"},
-    {page:"effects", title:"Desktop effects", description:"Saved looks, blur, glow, borders, opacity, transparency, springs, animation, workspace motion and presets"},
+    {page:"company", title:"PC reconnection alerts", description:"remote Windows PC SSH online reconnect connection monitor polling desktop notification watcher arm stop"},
+    {page:"company", title:"Company password reset alerts", description:"Imak Microsoft 365 Entra SSPR password reset recovery registration audit logs notifications master toggle"},
+    {page:"memory", title:"OOM kill notifications", description:"memory pressure kernel systemd-oomd PID killed LMKD log notifications alerts history"},
+    {page:"audio", title:"Eden volume boost widget", description:"Mario Kart MK8DX double-click +12 dB game only loudness current preset reset"},
+    {page:"memory", title:"Memory locks, RSS & process search", description:"noswap swap RAM RSS resident memory large usage sort PID process name search suggested lock unlock release group tree protection reminders locked paging"},
+    {page:"mail", title:"Mail accounts and smart actions", description:"Thunderbird email notifications 2FA OTP verification codes links add accounts master toggle"},
+    {page:"design", title:"Color mode, palette & desktop effects", description:"Matugen Monet Material light dark palette accent saved looks, blur, glow, borders, opacity, transparency, springs, animation, workspace motion and presets"},
     {page:"fonts", title:"Desktop font profiles", description:"fontctl presets, typefaces, font preview, compact 10 pt, system fonts, Kitty fonts"},
     {page:"audio", title:"EasyEffects presets", description:"Equalizer, music, audio processing, output preset and EasyEffects"},
-    {page:"wallpaper", title:"Wallpaper discovery", description:"Choose wallpaper, download, discover, light palette, dark palette"}
+    {page:"wallpaper", title:"Wallpaper discovery", description:"Choose wallpaper, download, discover, offline queue, rotation, restore, saved library"}
 ];
