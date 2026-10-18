@@ -161,6 +161,7 @@ Singleton {
         target: "cryodSession"
         function status(): string {
             return JSON.stringify({enabled:root.enabled, wanted:root.wanted,
+                groupLaunches:root.enabled && Config.options.cryod.groupLaunches,
                 bridgeRunning:bridge.running, fresh:root.fresh, receipt:root.receipt, error:root.error,
                 fallbackError:root.fallbackError});
         }

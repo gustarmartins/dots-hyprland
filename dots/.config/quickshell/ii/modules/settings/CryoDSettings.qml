@@ -69,6 +69,20 @@ ColumnLayout {
             Layout.fillWidth: true; wrapMode: Text.WordWrap
             text: FocusMode.statusText + ". Prioritizes an isolated app group while focused. Shared terminal jobs and build quotas keep their own settings."
         }
+        RowLayout {
+            Layout.fillWidth: true
+            StyledText { Layout.fillWidth: true; text: "Group new launcher apps" }
+            SettingsSwitch {
+                objectName: "cryodGroupLaunches"
+                checked: Config.options.cryod.groupLaunches
+                enabled: Config.ready && !Config.writesPaused
+                onToggled: Config.setNestedValue("cryod.groupLaunches", checked)
+            }
+        }
+        StyledText {
+            Layout.fillWidth: true; wrapMode: Text.WordWrap
+            text: "Keeps each new launcher app in its own group for Focus Mode. Already running apps and terminal launches keep their current groups. This does not enable app freezing."
+        }
     }
     RowLayout {
         Layout.fillWidth: true

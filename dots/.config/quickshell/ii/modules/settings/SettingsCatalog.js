@@ -411,6 +411,7 @@ var managed = {
   "cryod.enabled": "CryoD desktop integration",
   "cryod.protectForeground": "CryoD focused workload protection",
   "cryod.protectVisible": "CryoD visible window protection",
+  "cryod.groupLaunches": "CryoD application launch groups",
   "background.wallpaperPath": "Wallpaper chooser",
   "background.thumbnailPath": "Generated wallpaper thumbnail"
 };
@@ -439,7 +440,7 @@ function sections(pageId, query) {
 }
 
 var destinations = [
-    {page:"cryod", title:"CryoD desktop integration", description:"memory foreground focus mode cpu priority gpu latency boost visible windows monitor workload protection session bridge master off"},
+    {page:"cryod", title:"CryoD desktop integration", description:"memory foreground focus mode cpu priority gpu latency boost visible windows monitor workload protection session bridge master off app application launcher groups"},
     {page:"company", title:"PC reconnection alerts", description:"remote Windows PC SSH online reconnect connection monitor polling desktop notification watcher arm stop"},
     {page:"company", title:"Company password reset alerts", description:"Imak Microsoft 365 Entra SSPR password reset recovery registration audit logs notifications master toggle"},
     {page:"memory", title:"OOM kill notifications", description:"memory pressure kernel systemd-oomd PID killed LMKD log notifications alerts history"},

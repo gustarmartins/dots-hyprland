@@ -3,6 +3,7 @@
 .pragma library
 var paths = [
   "cryod.enabled",
+  "cryod.groupLaunches",
   "cryod.protectForeground",
   "cryod.protectVisible",
   "panelFamily",

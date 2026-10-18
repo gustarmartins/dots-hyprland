@@ -252,8 +252,9 @@ Singleton {
                 iconType: LauncherSearchResult.IconType.System,
                 verb: Translation.tr("Open"),
                 execute: () => {
-                    if (!entry.runInTerminal)
-                        entry.execute();
+                    if (!entry.runInTerminal) {
+                        if (!CryoDAppLaunch.launch(entry)) entry.execute();
+                    }
                     else {
                         // Probably needs more proper escaping, but this will do for now
                         Quickshell.execDetached(["bash", '-c', `${Config.options.apps.terminal} -e '${StringUtils.shellSingleQuoteEscape(entry.command.join(' '))}'`]);
@@ -269,8 +270,9 @@ Singleton {
                         iconName: action.icon,
                         iconType: LauncherSearchResult.IconType.System,
                         execute: () => {
-                            if (!action.runInTerminal)
-                                action.execute();
+                            if (!action.runInTerminal) {
+                                if (!CryoDAppLaunch.launch(entry, action)) action.execute();
+                            }
                             else {
                                 Quickshell.execDetached(["bash", '-c', `${Config.options.apps.terminal} -e '${StringUtils.shellSingleQuoteEscape(action.command.join(' '))}'`]);
                             }

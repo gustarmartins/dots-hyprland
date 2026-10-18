@@ -200,6 +200,7 @@ Singleton {
                 property bool enabled: false
                 property bool protectForeground: true
                 property bool protectVisible: true
+                property bool groupLaunches: true
             }
 
             property JsonObject apps: JsonObject {

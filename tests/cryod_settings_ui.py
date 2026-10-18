@@ -10,9 +10,14 @@ try:
     assert json.loads(call('test', 'locate', 'cryodFeatures')) is None
     click('cryodMaster')
     until(lambda: json.loads(call('test', 'locate', 'cryodFeatures')))
-    click('cryodFocused');click('cryodVisible')
+    click('cryodFocused')
+    until(lambda: json.loads(config.read_text()).get('cryod', {}).get('protectForeground') is False)
+    click('cryodVisible')
+    until(lambda: json.loads(config.read_text()).get('cryod', {}).get('protectVisible') is False)
+    assert json.loads(call('test', 'value', 'cryod.groupLaunches')) is True
+    click('cryodGroupLaunches')
     until(lambda: json.loads(config.read_text()).get('cryod') ==
-          dict(enabled=True, protectForeground=False, protectVisible=False))
+          dict(enabled=True, protectForeground=False, protectVisible=False, groupLaunches=False))
     screenshot('cryod-settings')
     click('cryodMaster')
     until(lambda: json.loads(call('test', 'locate', 'cryodFeatures')) is None)
