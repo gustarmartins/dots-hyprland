@@ -7,6 +7,9 @@ import qs.modules.common.widgets
 ColumnLayout {
     id: root
     spacing: 14
+    onVisibleChanged: CryoDConsent.viewActive = visible
+    Component.onCompleted: CryoDConsent.viewActive = visible
+    Component.onDestruction: CryoDConsent.viewActive = false
     StyledText { text: "CryoD desktop integration"; font.pixelSize: 22; font.weight: Font.Medium }
     RowLayout {
         Layout.fillWidth: true
@@ -82,6 +85,48 @@ ColumnLayout {
         StyledText {
             Layout.fillWidth: true; wrapMode: Text.WordWrap
             text: "Keeps each new launcher app in its own group for Focus Mode. Already running apps and terminal launches keep their current groups. This does not enable app freezing."
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            StyledText { Layout.fillWidth: true; text: "App freezing preferences"; font.weight: Font.Medium }
+            RippleButtonWithIcon {
+                objectName: "cryodRefreshApps"
+                materialIcon: "refresh"; mainText: "Refresh"
+                enabled: !CryoDConsent.busy
+                onClicked: CryoDConsent.refresh()
+            }
+        }
+        StyledText {
+            visible: CryoDConsent.available && CryoDConsent.apps.length === 0
+            Layout.fillWidth: true; wrapMode: Text.WordWrap
+            text: "Open an app from the launcher to set its freezing preference."
+        }
+        Repeater {
+            model: CryoDConsent.available ? CryoDConsent.apps : []
+            delegate: RowLayout {
+                required property var modelData
+                Layout.fillWidth: true
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    StyledText { text: CryoDConsent.appName(modelData.app_id); textFormat: Text.PlainText }
+                    StyledText {
+                        text: CryoDConsent.preference(modelData) + (modelData.pid ? "" : " · Open the app to change this preference")
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    }
+                }
+                RippleButtonWithIcon {
+                    objectName: "cryodChooseApp:" + modelData.app_id
+                    materialIcon: "tune"; mainText: "Choose"
+                    enabled: !CryoDConsent.busy && modelData.pid > 1
+                    onClicked: CryoDConsent.ask(modelData)
+                }
+            }
+        }
+        StyledText {
+            Layout.fillWidth: true; wrapMode: Text.WordWrap
+            text: CryoDConsent.error || CryoDConsent.message
+            visible: text.length > 0
+            color: CryoDConsent.error ? Appearance.m3colors.m3error : Appearance.m3colors.m3onSurface
         }
     }
     RowLayout {

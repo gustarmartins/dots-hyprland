@@ -95,6 +95,20 @@ mail_config.write_text(json.dumps(mail_initial))
 mail_helper = OUT / '.local/bin/qs-mail'
 mail_helper.write_text("#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\np=Path(os.environ['XDG_CONFIG_HOME'])/'qs-mail/config.json';d=json.loads(p.read_text())\nif sys.argv[1]=='status':\n print(json.dumps(dict(config=d,state=dict(connected=d['enabled'],status='Fixture connected'),running=d['enabled'],accounts=[dict(id='fixture',email='fixture@example.invalid',name='Fixture',type='imap')])))\nelif sys.argv[1]=='set':\n d[sys.argv[2]]=sys.argv[3]=='true';p.write_text(json.dumps(d))\nelif sys.argv[1]=='account':\n d['accounts']=[sys.argv[2]] if sys.argv[3]=='true' else [];p.write_text(json.dumps(d))\n")
 mail_helper.chmod(0o755)
+# App-preference layout never contacts the installed CryoD endpoint. The real
+# notification/native transaction flow has its separate cryod_consent fixture.
+consent_client = OUT / '.local/bin/cryod-control-client'
+consent_client.write_text('''#!/usr/bin/python3
+import json,sys
+request=json.loads(sys.stdin.readline())
+reply=dict(version=1,scope='application-consent',ok=False,reason='fixture-only-catalog')
+if request.get('command')=='catalog':
+ reply.update(ok=True,apps=[dict(app_id='com.mekki.settings-fixture.desktop',pid=999,start_ticks='1')],choices=[],next_cursor=0,saved_revision='settings-fixture',choice_current=False)
+print(json.dumps(reply))
+''')
+consent_client.chmod(0o755)
+consent_qml = OUT / 'config/quickshell/ii/services/CryoDConsent.qml'
+consent_qml.write_text(consent_qml.read_text().replace('/usr/local/libexec/cryod-desktop/cryod-control-client', str(consent_client)))
 env = os.environ.copy()
 for key in ['WAYLAND_DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE']:
     env.pop(key, None)

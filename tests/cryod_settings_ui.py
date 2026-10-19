@@ -18,6 +18,7 @@ try:
     click('cryodGroupLaunches')
     until(lambda: json.loads(config.read_text()).get('cryod') ==
           dict(enabled=True, protectForeground=False, protectVisible=False, groupLaunches=False))
+    until(lambda: json.loads(call('test', 'locate', 'cryodChooseApp:com.mekki.settings-fixture.desktop')))
     screenshot('cryod-settings')
     click('cryodMaster')
     until(lambda: json.loads(call('test', 'locate', 'cryodFeatures')) is None)
