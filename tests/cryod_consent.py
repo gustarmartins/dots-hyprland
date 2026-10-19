@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 
 repo = Path(__file__).resolve().parents[1]
 base, build = (Path(path).resolve() for path in sys.argv[1:3])
@@ -31,7 +32,10 @@ with tempfile.TemporaryDirectory(prefix='cryod-qml-consent-') as temporary:
     root = Path(temporary)
     for name in ('shell/services', 'shell/modules/common', 'data/applications', 'home', 'cache', 'runtime'):
         (root / name).mkdir(parents=True, mode=0o700)
-    config = root / 'native.conf';config.write_bytes((source / 'native.conf').read_bytes())
+    config = root / 'native.conf'
+    config.write_text((source / 'native.conf').read_text() +
+        '\nbackground_cpu_interval_ms=100\nbackground_cpu_window_ms=300\nbackground_cpu_grace_ms=0\n'
+        'background_cpu_min_samples=2\nbackground_cpu_max_gap_ms=3000\nbackground_cpu_threshold_x100=1000\nbackground_cpu_cooldown_ms=1000\n')
     account = root / 'runaway.conf';account.write_text((source / 'runaway.conf').read_text().replace('target_uid=1000', f'target_uid={os.getuid()}'))
     launcher = build / 'cryod-app-launch'
     env = dict(os.environ, XDG_DATA_HOME=str(root / 'data'), XDG_DATA_DIRS=str(root / 'no-system'),
@@ -46,7 +50,10 @@ with tempfile.TemporaryDirectory(prefix='cryod-qml-consent-') as temporary:
         '--runtime-dir', str(root / 'native-run'), '--state-dir', str(root / 'state'),
         '--guard', str(source / 'desktop_guard.py'), '--control-worker', str(build / 'application-control-fixture')],
         env=env, stdout=subprocess.DEVNULL, stderr=log)
-    app = shell = bus = None
+    app = shell = bus = busy_app = None
+    focus_stop = threading.Event()
+    focus_thread = None
+    focus_visible = [True]
     qlog = (root / 'qml.log').open('w+')
     try:
         wait((root / 'native-run/control.sock').is_socket)
@@ -68,7 +75,10 @@ import Quickshell
 import Quickshell.Io
 Singleton {
  property bool ready: true
- property JsonObject options: JsonObject { property JsonObject cryod: JsonObject { property bool enabled: true } }
+ property JsonObject options: JsonObject { property JsonObject cryod: JsonObject {
+  property bool enabled: true
+  property bool freezeSuggestions: false
+ } }
 }
 ''')
         qml = '''import QtQuick
@@ -105,6 +115,7 @@ ShellRoot {
   function master(value: bool): void { Config.options.cryod.enabled = value; }
   function refresh(): void { CryoDConsent.refresh(); }
   function client(path: string): void { CryoDConsent.executable = path; }
+  function suggestions(value: bool): void { CryoDConsent.start(); Config.options.cryod.freezeSuggestions = value; }
  }
 }
 '''.replace('CLIENT', json.dumps(str(build / 'cryod-control-client'))).replace('SOCKET', json.dumps(str(root / 'native-run/control.sock'))).replace('UID', json.dumps(str(os.getuid())))
@@ -169,12 +180,63 @@ ShellRoot {
         assert state()['apps'][0]['rule']['permissions']['freeze'] == 'deny'
         assert not json.loads((root / 'native-run/status.json').read_text())['native']['effects_enabled']
         print('PASS: the durable denial stays visible after app exit; no process effects were enabled', flush=True)
+
+        busy_script = root / 'busy.py'
+        busy_script.write_text('import os,time\nos.nice(19)\nend=time.monotonic()+60\nwhile time.monotonic()<end:\n pass\n')
+        busy_entry = root / 'data/applications/com.mekki.auto-consent.desktop'
+        busy_argv = ['/usr/bin/python3', str(busy_script)]
+        busy_entry.write_text(f'[Desktop Entry]\nType=Application\nName=Owned automatic consent app\nExec=/usr/bin/python3 {busy_script}\nPath={root}\n')
+        busy_manifest = dict(version=1, app_id=busy_entry.name, working_directory=str(root), command=busy_argv, actions={})
+        receiver, sender = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        busy_app = subprocess.Popen([str(launcher), '--manifest', json.dumps(busy_manifest), '--socket', str(root / 'native-run/control.sock'),
+            '--report-fd', str(sender.fileno()), '--', *busy_argv], env=env, cwd=root, pass_fds=(sender.fileno(),),
+            stdout=subprocess.DEVNULL, stderr=log)
+        sender.close();receiver.settimeout(5)
+        assert json.loads(receiver.recv(8192))['registered'] and receiver.recv(8192) == b''
+        receiver.close()
+        birth = int(Path(f'/proc/{busy_app.pid}/stat').read_text().rsplit(')', 1)[1].split()[19])
+        focus_errors = []
+        def publish_focus():
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as peer:
+                    peer.settimeout(4);peer.connect(str(root / 'native-run/session.sock'));sequence=0
+                    while not focus_stop.is_set():
+                        sequence += 1
+                        frame = dict(version=1, epoch=1, sequence=sequence, sent_ms=int(time.monotonic()*1000),
+                            enabled=True, session='owned-qml-suggestions', protect_foreground=True, protect_visible=True,
+                            sent_boottime_ms=int(time.clock_gettime(time.CLOCK_BOOTTIME)*1000),
+                            session_state=dict(known=True, active=True, idle=False, locked=False),
+                            windows=[dict(pid=busy_app.pid, start_ticks=birth, address=1, monitor=1, workspace=12,
+                                          focused=False, visible=focus_visible[0], fullscreen=False)])
+                        peer.sendall(json.dumps(frame).encode());reply=json.loads(peer.recv(32768))
+                        assert reply['accepted'], reply
+                        focus_stop.wait(.2)
+            except BaseException as error:focus_errors.append(repr(error))
+        focus_thread = threading.Thread(target=publish_focus);focus_thread.start()
+        call('suggestions', 'true')
+        time.sleep(1.2)
+        assert not state()['shown'] and not focus_errors, (state(), focus_errors)
+        focus_visible[0] = False
+        wait(state, lambda v:v['shown'] and len(v['actions']) == 2)
+        assert not focus_errors and busy_app.poll() is None
+        print('PASS: native sustained CPU automatically triggers a real Yes/No prompt only after the app leaves the visible secondary monitor', flush=True)
+        call('action', 'no')
+        wait(lambda:json.loads(policy.read_bytes())['rules'],
+             lambda rows:any(row['selector'].get('app_id') == busy_entry.name and row['permissions']['recommend'] == 'deny' for row in rows))
+        time.sleep(.7)
+        assert not state()['shown'] and busy_app.poll() is None
+        call('suggestions', 'false')
+        wait(state, lambda v:not v['busy'] and not v['prompting'])
+        assert not json.loads((root / 'native-run/status.json').read_text())['native']['effects_enabled']
+        print('PASS: automatic No suppresses repeat suggestions; the feature switch stops its clients without freezing the app', flush=True)
     except BaseException:
         qlog.flush();qlog.seek(0);print(qlog.read()[-16000:], file=sys.stderr)
         log.flush();log.seek(0);print(log.read()[-8000:], file=sys.stderr)
         raise
     finally:
-        for process in (shell, app, owner, bus):
+        focus_stop.set()
+        if focus_thread is not None:focus_thread.join(timeout=5)
+        for process in (shell, busy_app, app, owner, bus):
             if process is not None and process.poll() is None:process.terminate()
             if process is not None:process.wait(timeout=15)
         qlog.close();log.close()

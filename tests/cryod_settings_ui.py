@@ -17,7 +17,9 @@ try:
     assert json.loads(call('test', 'value', 'cryod.groupLaunches')) is True
     click('cryodGroupLaunches')
     until(lambda: json.loads(config.read_text()).get('cryod') ==
-          dict(enabled=True, protectForeground=False, protectVisible=False, groupLaunches=False))
+          dict(enabled=True, protectForeground=False, protectVisible=False, groupLaunches=False, freezeSuggestions=False))
+    click('cryodFreezeSuggestions')
+    until(lambda: json.loads(config.read_text())['cryod']['freezeSuggestions'] is True)
     until(lambda: json.loads(call('test', 'locate', 'cryodChooseApp:com.mekki.settings-fixture.desktop')))
     screenshot('cryod-settings')
     click('cryodMaster')

@@ -201,6 +201,7 @@ Singleton {
                 property bool protectForeground: true
                 property bool protectVisible: true
                 property bool groupLaunches: true
+                property bool freezeSuggestions: false
             }
 
             property JsonObject apps: JsonObject {

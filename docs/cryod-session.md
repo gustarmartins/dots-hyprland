@@ -75,12 +75,26 @@ popup timeout, with a separate offer-expiry bound. Missing helpers/failed reques
 have a finite cleanup path. No periodic app observer is started by this manual
 flow, and no client writes policy files, CPU quotas or cgroup freezer values.
 
+**Suggest apps to freeze** adds a separate optional automatic flow, default Off,
+under the master switch. Only the main shell owns its native subscription and
+timer. CryoD measures sustained CPU use and rejects suggestions while an app is
+focused or visible on any monitor. Both window-protection switches are required.
+Existing Allow/Deny/Always Awake choices retain priority. Native persistent offer
+history suppresses repetition across restarts; an observation or offer grants
+no effect permission. The automatic-freezer setting remains independent.
+
+Automatic requests follow the native interval and bounded catalog cursor, with
+one outstanding request/prompt at a time. Decisions and their readback take
+priority. Turning suggestions Off withdraws automatic requests/prompts while
+preserving manual preference controls and saved choices. Master Off stops both.
+`cryod.freezeSuggestions` uses the same Config writer and searchable catalog.
+
 `tests/cryod_consent.py PACKAGE APPLICATION_TESTS` exercises the actual QML,
 notify-send actions, private Quickshell notification server and native receipts.
-Six groups cover dismissal, Yes, No, Off, missing-helper recovery and a closed-app
-denial. The settings fixture renders an app row using a private catalog helper;
+Eight groups cover dismissal, Yes, No, Off, missing-helper recovery, a closed-app
+denial, automatic sustained-CPU notification after a secondary-monitor visibility
+change, and durable suppression/feature Off. The settings fixture renders an app row using a private catalog helper;
 it never connects to the owner's native socket. Existing settings persistence and
-the299-key catalog check pass. This is not automatic suggestion production,
-ordinary GUI freezer qualification, or an installed feature. Those remain with
+the300-key catalog check pass. Ordinary GUI freezer qualification and installation remain with
 the native desktop goal before versioned delivery; VM Atlas publication stays
 separate.

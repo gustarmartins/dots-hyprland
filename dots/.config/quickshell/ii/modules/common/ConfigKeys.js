@@ -4,6 +4,7 @@
 var paths = [
   "cryod.enabled",
   "cryod.groupLaunches",
+  "cryod.freezeSuggestions",
   "cryod.protectForeground",
   "cryod.protectVisible",
   "panelFamily",

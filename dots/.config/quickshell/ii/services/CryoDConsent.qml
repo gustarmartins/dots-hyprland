@@ -12,6 +12,13 @@ Singleton {
     property string peerUid: "0"
     property string notificationExecutable: "/usr/bin/notify-send"
     property bool viewActive: false
+    property bool owner: false
+    property string subscriptionId: ""
+    property int suggestionCursor: 0
+    property double suggestionInterval: 10000
+    property double suggestionDue: 0
+    property string suggestionError: ""
+    property bool notificationAutomatic: false
     property bool available: false
     property var apps: []
     property var collected: []
@@ -34,8 +41,45 @@ Singleton {
     property bool stoppingTransport: false
     property bool stoppingPrompt: false
     readonly property bool enabled: Config.ready && Config.options.cryod.enabled
-    readonly property bool busy: pending !== null || transport.running || prompt.running || stoppingTransport || stoppingPrompt
+    readonly property bool suggestionsWanted: owner && enabled && Config.options.cryod.freezeSuggestions === true
+    readonly property bool busy: pending !== null || transport.running || prompt.running || notificationOffer !== null || stoppingTransport || stoppingPrompt
     readonly property bool prompting: prompt.running
+
+    function start() { owner = true; syncSuggestions(); }
+    function scheduleSuggestions(delay) {
+        if (!suggestionsWanted) return;
+        suggestionDue = Date.now() + Math.max(0, delay);
+        armSuggestions();
+    }
+    function armSuggestions() {
+        suggestionsTimer.stop();
+        if (!suggestionsWanted || busy || suggestionDue <= 0) return;
+        suggestionsTimer.interval = Math.max(1, Math.min(2147483647, suggestionDue - Date.now()));
+        suggestionsTimer.start();
+    }
+    function syncSuggestions() {
+        if (suggestionsWanted) {
+            if (suggestionDue <= 0) scheduleSuggestions(1);
+            else armSuggestions();
+            return;
+        }
+        suggestionsTimer.stop(); subscriptionId = ""; suggestionCursor = 0; suggestionDue = 0; suggestionError = "";
+        if (pending?.context?.automatic === true) {
+            generation++; stoppingTransport = true; transport.running = false;
+        }
+        if (notificationAutomatic && notificationOffer) {
+            generation++; stoppingPrompt = true; notificationChoice = "";
+            withdrawnOffers = [...withdrawnOffers.slice(-15), notificationOffer.offer.operation_id];
+            closeNotification(notificationId);prompt.running = false;
+        }
+    }
+    function pollSuggestions() {
+        if (!suggestionsWanted || busy) return;
+        if (Date.now() < suggestionDue) { armSuggestions(); return; }
+        if (!subscriptionId) submit(query("start-suggestions"), "suggest-start", {automatic:true});
+        else submit(query("recommend", {subscription_id:subscriptionId, cursor:suggestionCursor}),
+            "suggest-poll", {automatic:true, cursor:suggestionCursor});
+    }
 
     function appName(appId) {
         return DesktopEntries.byId(appId)?.name || DesktopEntries.byId(appId.replace(/\.desktop$/, ""))?.name
@@ -67,10 +111,12 @@ Singleton {
         if (clearError) error = "";
         submit(query("catalog", {cursor:0}), "catalog", {cursor:0});
     }
-    function ask(app) {
-        if (!enabled || busy || !available || !app || !(app.pid > 1)) return;
+    function ask(app, automatic = false) {
+        if (!enabled || busy || (!automatic && !available) || !app || !(app.pid > 1)
+                || (automatic && (!suggestionsWanted || !subscriptionId))) return;
         error = ""; message = "";
-        submit(query("propose", {pid:app.pid}), "propose", {appId:app.app_id, pid:app.pid, birth:app.start_ticks});
+        const fields = automatic ? {pid:app.pid, automatic:true, subscription_id:subscriptionId} : {pid:app.pid};
+        submit(query("propose", fields), "propose", {appId:app.app_id, pid:app.pid, birth:app.start_ticks, automatic:automatic});
     }
     function saveOffer(offer, choice) {
         if (!enabled || !offer || !["allow", "deny"].includes(choice)) return;
@@ -90,6 +136,11 @@ Singleton {
         let reply = null;
         try { reply = JSON.parse(responseText); } catch (_) {}
         if (resultCode !== 0 || !reply || reply.scope !== "application-consent" || reply.ok !== true) {
+            if (request.context?.automatic === true) {
+                suggestionError = "Suggestions are waiting for CryoD.";
+                if (reply?.reason === "suggestion-session-expired") subscriptionId = "";
+                suggestionCursor = 0;scheduleSuggestions(suggestionInterval);return;
+            }
             if (request.purpose === "catalog") available = false;
             error = explain(reply);
             // A disconnected client does not prove that the durable save failed.
@@ -97,7 +148,25 @@ Singleton {
             if (request.purpose === "decide") submit(query("receipt", {operation_id:request.context.operation}), "receipt");
             return;
         }
-        if (request.purpose === "catalog") {
+        if (request.purpose === "suggest-start") {
+            if (typeof reply.subscription_id !== "string" || !/^[0-9a-f-]{36}$/.test(reply.subscription_id)) {
+                suggestionError = "Suggestions are unavailable.";scheduleSuggestions(suggestionInterval);return;
+            }
+            subscriptionId = reply.subscription_id;suggestionCursor = 0;suggestionError = "";scheduleSuggestions(1);
+        } else if (request.purpose === "suggest-poll") {
+            const interval = Number(reply.interval_ms);
+            if (!Number.isSafeInteger(interval) || interval <= 0 || !Array.isArray(reply.apps) || reply.apps.length > 1
+                    || !Number.isInteger(reply.next_cursor) || reply.next_cursor < 0 || reply.next_cursor > 64
+                    || (reply.next_cursor !== 0 && reply.next_cursor <= request.context.cursor)) {
+                suggestionError = "CryoD suggestion timing or app information is unavailable.";
+                scheduleSuggestions(suggestionInterval);return;
+            }
+            suggestionInterval = interval;suggestionError = "";suggestionCursor = reply.next_cursor;
+            scheduleSuggestions(suggestionCursor ? 1 : suggestionInterval);
+            const candidate = reply.apps.find(app => app.recommended === true && typeof app.app_id === "string"
+                && Number.isInteger(app.pid) && app.pid > 1 && typeof app.start_ticks === "string");
+            if (candidate) ask(candidate, true);
+        } else if (request.purpose === "catalog") {
             if (!Array.isArray(reply.apps) || reply.apps.length > 64 || !Number.isInteger(reply.next_cursor)
                     || reply.next_cursor < 0 || reply.next_cursor > 64) { available = false; error = "App information is unavailable."; return; }
             collected = [...collected, ...reply.apps];
@@ -131,6 +200,7 @@ Singleton {
                 return;
             }
             heldOffer = reply; notificationOffer = reply;
+            notificationAutomatic = request.context.automatic === true;
             notificationName = escaped(appName(offer.selector.app_id));
             notificationId = 0; notificationChoice = ""; notificationGeneration = generation;
             prompt.running = true;
@@ -138,11 +208,12 @@ Singleton {
             if (reply.state === "saved" && reply.choice_current === true) {
                 message = "Preference saved."; error = "";
             } else { message = ""; error = "Preferences changed. Refresh to see the current choice."; }
-            Qt.callLater(() => { if (root.enabled && !root.busy) root.refresh(false); });
+            refresh(false);
         }
     }
     function stop() {
         generation++;
+        suggestionsTimer.stop(); subscriptionId = ""; suggestionCursor = 0; suggestionDue = 0; suggestionError = "";
         stoppingTransport = transport.running || pending !== null;
         stoppingPrompt = prompt.running || notificationOffer !== null;
         notificationChoice = "";
@@ -154,7 +225,9 @@ Singleton {
         prompt.running = false; transport.running = false;
         available = false; apps = []; collected = []; choices = []; error = ""; message = "";
     }
-    onEnabledChanged: { if (!enabled) stop(); else if (viewActive) refresh(); }
+    onEnabledChanged: { if (!enabled) stop(); else { if (viewActive) refresh(); syncSuggestions(); } }
+    onSuggestionsWantedChanged: syncSuggestions()
+    onBusyChanged: armSuggestions()
     onViewActiveChanged: if (viewActive && enabled) refresh()
     Connections {
         target: Notifications
@@ -181,6 +254,7 @@ Singleton {
         onExited: (code, status) => { root.resultCode = code; completed.restart(); }
     }
     Timer { id: completed; interval: 0; onTriggered: root.finish() }
+    Timer { id: suggestionsTimer; onTriggered: root.pollSuggestions() }
     Timer {
         interval: 6000
         running: root.pending !== null
@@ -214,13 +288,18 @@ Singleton {
             const current = root.notificationGeneration === root.generation;
             root.stoppingPrompt = false;
             root.notificationId = 0; root.notificationChoice = ""; root.notificationOffer = null; root.heldOffer = null;
-            if (code === 0 && current && choice && root.enabled) Qt.callLater(() => root.saveOffer(offer, choice));
+            root.notificationAutomatic = false;
+            if (code === 0 && current && choice && root.enabled) root.saveOffer(offer, choice);
         }
     }
     Timer { interval: 300000; running: prompt.running; onTriggered: {
         root.notificationChoice = "";
         root.closeNotification(root.notificationId);
         prompt.running = false;
+    } }
+    Timer { interval: 6000; running: root.notificationOffer !== null && !prompt.running; onTriggered: {
+        root.notificationOffer = null;root.heldOffer = null;root.notificationChoice = "";root.notificationAutomatic = false;
+        root.stoppingPrompt = false;root.error = "Notifications are unavailable.";
     } }
     Process {
         id: closePrompt

@@ -412,6 +412,7 @@ var managed = {
   "cryod.protectForeground": "CryoD focused workload protection",
   "cryod.protectVisible": "CryoD visible window protection",
   "cryod.groupLaunches": "CryoD application launch groups",
+  "cryod.freezeSuggestions": "CryoD automatic app freezing suggestions",
   "background.wallpaperPath": "Wallpaper chooser",
   "background.thumbnailPath": "Generated wallpaper thumbnail"
 };

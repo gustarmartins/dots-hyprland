@@ -96,6 +96,22 @@ ColumnLayout {
                 onClicked: CryoDConsent.refresh()
             }
         }
+        RowLayout {
+            Layout.fillWidth: true
+            StyledText { Layout.fillWidth: true; text: "Suggest apps to freeze" }
+            SettingsSwitch {
+                objectName: "cryodFreezeSuggestions"
+                checked: Config.options.cryod.freezeSuggestions
+                enabled: Config.ready && !Config.writesPaused
+                onToggled: Config.setNestedValue("cryod.freezeSuggestions", checked)
+            }
+        }
+        StyledText {
+            Layout.fillWidth: true; wrapMode: Text.WordWrap
+            text: Config.options.cryod.freezeSuggestions && (!Config.options.cryod.protectForeground || !Config.options.cryod.protectVisible)
+                ? "Both window protections must be enabled for suggestions."
+                : "Asks with Yes or No when an unapproved app keeps using CPU in the background."
+        }
         StyledText {
             visible: CryoDConsent.available && CryoDConsent.apps.length === 0
             Layout.fillWidth: true; wrapMode: Text.WordWrap
