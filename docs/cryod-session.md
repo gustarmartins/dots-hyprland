@@ -68,7 +68,7 @@ once instead of repeating a decision. Stale pages/offers cannot silently select
 a different app. Saved denials remain visible after the app exits; changing a
 choice in the alpha32 flow requires a verified running instance.
 
-The alpha33 candidate adds installed apps to this list, with search and twelve
+The local alpha33 delivery adds installed apps to this list, with search and twelve
 rows per page. The existing desktop-entry model supplies names and launch
 metadata; a selected closed app is verified through `cryod-app-launch --enroll`
 before the Yes/No prompt. It uses the entry's working directory and does not
@@ -112,12 +112,20 @@ CryoD integration changes. The consent scope peaked at92.1MiB, the private
 X/D-Bus settings scope at275.2MiB, and the catalog scope at22.5MiB; all had
 zero swap and no memory-limit/OOM events.
 
-The offline candidate additionally passes closed-app Yes/No, a never-launched
+The offline implementation additionally passes closed-app Yes/No, a never-launched
 installed entry, missing enrollment helper and entry replacement while the prompt
 is open. Eleven consent groups, existing QML launch routing, the actual settings
 page and the 300-key catalog pass. The combined private UI scope peaked at
-320.4 MiB with zero swap and no memory-limit/OOM events. This is candidate
-qualification, separate from local installation and real GUI freeze acceptance.
+320.4 MiB with zero swap and no memory-limit/OOM events.
+
+The three runtime files were installed by atomic replacement after verifying
+their previous hashes. The installed native helper returned a verified offline
+offer, the main shell's consent client was idle with suggestions Off, and its
+focus bridge was fresh. The saved settings bytes match at the UI deployment's
+before/immediate/delayed boundaries. An earlier hash change between native
+preflight and UI deployment remains unattributed; the newer settings were kept.
+No owner app was enrolled or frozen by this qualification. Real GUI freeze
+acceptance and automatic effect activation remain separate.
 
 `qs -c ii ipc call cryodConsent status` provides bounded read-only lifecycle
 status. It reports whether the shell owns suggestions, has a subscription or
