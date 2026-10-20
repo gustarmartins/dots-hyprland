@@ -140,9 +140,9 @@ ColumnLayout {
         }
         StyledText {
             Layout.fillWidth: true; wrapMode: Text.WordWrap
-            text: CryoDConsent.error || CryoDConsent.message
+            text: CryoDConsent.error || CryoDConsent.suggestionError || CryoDConsent.message
             visible: text.length > 0
-            color: CryoDConsent.error ? Appearance.m3colors.m3error : Appearance.m3colors.m3onSurface
+            color: CryoDConsent.error || CryoDConsent.suggestionError ? Appearance.m3colors.m3error : Appearance.m3colors.m3onSurface
         }
     }
     RowLayout {

@@ -45,6 +45,16 @@ Singleton {
     readonly property bool busy: pending !== null || transport.running || prompt.running || notificationOffer !== null || stoppingTransport || stoppingPrompt
     readonly property bool prompting: prompt.running
 
+    IpcHandler {
+        target: "cryodConsent"
+        function status(): string {
+            return JSON.stringify({enabled:root.enabled, owner:root.owner,
+                suggestionsEnabled:root.suggestionsWanted, subscribed:root.subscriptionId.length > 0,
+                busy:root.busy, prompting:root.prompting, catalogAvailable:root.available,
+                appCount:root.apps.length, error:root.error || root.suggestionError});
+        }
+    }
+
     function start() { owner = true; syncSuggestions(); }
     function scheduleSuggestions(delay) {
         if (!suggestionsWanted) return;

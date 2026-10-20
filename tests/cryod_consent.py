@@ -135,7 +135,13 @@ ShellRoot {
                                            env=qenv, text=True, stderr=subprocess.STDOUT, timeout=5).strip()
 
         def state():return json.loads(call('status'))
+        def public_state():
+            return json.loads(subprocess.check_output(
+                ['qs', '-p', str(root / 'shell'), 'ipc', 'call', 'cryodConsent', 'status'],
+                env=qenv, text=True, stderr=subprocess.STDOUT, timeout=5))
         wait(state, lambda v:v['available'] and len(v['apps']) == 1 and not v['busy'])
+        assert public_state() == dict(enabled=True, owner=False, suggestionsEnabled=False,
+            subscribed=False, busy=False, prompting=False, catalogAvailable=True, appCount=1, error='')
         original = policy.read_bytes()
         call('ask')
         displayed = wait(state, lambda v:v['shown'] and len(v['actions']) == 2)
@@ -227,6 +233,8 @@ ShellRoot {
         assert not state()['shown'] and busy_app.poll() is None
         call('suggestions', 'false')
         wait(state, lambda v:not v['busy'] and not v['prompting'])
+        observed = public_state()
+        assert observed['owner'] and not observed['suggestionsEnabled'] and not observed['subscribed']
         assert not json.loads((root / 'native-run/status.json').read_text())['native']['effects_enabled']
         print('PASS: automatic No suppresses repeat suggestions; the feature switch stops its clients without freezing the app', flush=True)
     except BaseException:

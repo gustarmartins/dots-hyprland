@@ -51,10 +51,10 @@ The session test uses disposable processes and a private native observer. The
 settings test uses a disposable home, X display and D-Bus session. Neither test
 changes the owner's foreground window or memory policy.
 
-## App preferences and Yes/No actions — source qualification
+## App preferences and Yes/No actions — local delivery, October20
 
-The new `CryoDConsent.qml` client and Super+I app-preference rows are qualified in
-private fixtures, **not installed**. They require the matching native
+The `CryoDConsent.qml` client and Super+I app-preference rows are installed on
+the workstation with native alpha32. They require the matching native
 `application-consent` API and `cryod-control-client`, plus `notify-send` and
 `gdbus`. Existing desktop integration settings keep their current values.
 
@@ -95,6 +95,28 @@ Eight groups cover dismissal, Yes, No, Off, missing-helper recovery, a closed-ap
 denial, automatic sustained-CPU notification after a secondary-monitor visibility
 change, and durable suppression/feature Off. The settings fixture renders an app row using a private catalog helper;
 it never connects to the owner's native socket. Existing settings persistence and
-the300-key catalog check pass. Ordinary GUI freezer qualification and installation remain with
-the native desktop goal before versioned delivery; VM Atlas publication stays
-separate.
+the300-key catalog check pass. These checks were repeated against the alpha32
+package and a candidate assembled from the actual live shell plus only the six
+CryoD integration changes. The consent scope peaked at92.1MiB, the private
+X/D-Bus settings scope at275.2MiB, and the catalog scope at22.5MiB; all had
+zero swap and no memory-limit/OOM events.
+
+`qs -c ii ipc call cryodConsent status` provides bounded read-only lifecycle
+status. It reports whether the shell owns suggestions, has a subscription or
+request/notification in flight, and whether a catalog was actually read.
+Suggestion transport errors are also visible in the settings page.
+
+Post-delivery reads confirmed the main shell owned the idle client, suggestions
+remained Off, the focus bridge was fresh, and every saved configuration byte
+was unchanged. The app-policy file also remained the disabled, empty baseline.
+A five-second IPC timeout occurred during delayed validation; a newer shell
+instance was then observed and both endpoints responded on recheck. Its cause
+was not established; no manual shell/daemon restart was issued for recovery.
+
+The catalog currently requires a verified running launcher app. Choosing an
+installed app before launch, practical GUI freezer eligibility, automatic effect
+activation and sustained responsiveness remain open in the native desktop goal.
+No owner app was enrolled or frozen during delivery. VM Atlas publication stays
+separate. Workstation receipts are under
+`~/.local/state/cryod-build/alpha32-qml-20261020/`; the private desktop tracker has
+`evidence/20261020-alpha32-quickshell-consent.json`.
