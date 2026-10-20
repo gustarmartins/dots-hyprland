@@ -45,6 +45,8 @@ with tempfile.TemporaryDirectory(prefix='cryod-qml-consent-') as temporary:
     policy.chmod(0o600)
     entry = root / 'data/applications/com.mekki.qml-consent.desktop'
     entry.write_text(f'[Desktop Entry]\nType=Application\nName=Owned consent app\nExec=/usr/bin/sleep 120\nPath={root}\n')
+    unlaunched = root / 'data/applications/com.mekki.unlaunched.desktop'
+    unlaunched.write_text(f'[Desktop Entry]\nType=Application\nName=Z unlaunched app\nExec=/usr/bin/sleep 121\nPath={root}\n')
     log = (root / 'native.log').open('w+')
     owner = subprocess.Popen([str(base / 'cryod-desktop'), '--observe', '--config', str(config),
         '--runtime-dir', str(root / 'native-run'), '--state-dir', str(root / 'state'),
@@ -66,6 +68,7 @@ with tempfile.TemporaryDirectory(prefix='cryod-qml-consent-') as temporary:
         assert json.loads(receiver.recv(8192))['registered'] and receiver.recv(8192) == b''
         receiver.close()
         shutil.copy2(repo / 'dots/.config/quickshell/ii/services/CryoDConsent.qml', root / 'shell/services/CryoDConsent.qml')
+        shutil.copy2(repo / 'dots/.config/quickshell/ii/services/CryoDAppLaunch.qml', root / 'shell/services/CryoDAppLaunch.qml')
         (root / 'shell/services/Notifications.qml').write_text('''pragma Singleton
 import Quickshell
 Singleton { signal notify(wrapper: var) }
@@ -78,6 +81,7 @@ Singleton {
  property JsonObject options: JsonObject { property JsonObject cryod: JsonObject {
   property bool enabled: true
   property bool freezeSuggestions: false
+  property bool groupLaunches: true
  } }
 }
 ''')
@@ -92,6 +96,7 @@ ShellRoot {
  property Notification shown: null
  Component.onCompleted: {
   CryoDConsent.executable = CLIENT;
+  CryoDConsent.enrollmentExecutable = LAUNCHER;
   CryoDConsent.socketPath = SOCKET;
   CryoDConsent.peerUid = UID;
   CryoDConsent.viewActive = true;
@@ -110,15 +115,17 @@ ShellRoot {
    apps:CryoDConsent.apps, error:CryoDConsent.error, message:CryoDConsent.message, prompting:CryoDConsent.prompting,
    shown:root.shown !== null, actions:root.shown?.actions.map(a => ({id:a.identifier,text:a.text})) || []}); }
   function ask(): void { CryoDConsent.ask(CryoDConsent.apps.find(a => a.app_id === "com.mekki.qml-consent.desktop")); }
+  function askUnlaunched(): void { CryoDConsent.ask(CryoDConsent.apps.find(a => a.app_id === "com.mekki.unlaunched.desktop")); }
   function action(name: string): void { const action = root.shown?.actions.find(a => a.identifier === name); if (action) action.invoke(); root.shown?.dismiss(); }
   function dismiss(): void { root.shown?.dismiss(); }
   function master(value: bool): void { Config.options.cryod.enabled = value; }
   function refresh(): void { CryoDConsent.refresh(); }
   function client(path: string): void { CryoDConsent.executable = path; }
+  function enrollmentClient(path: string): void { CryoDConsent.enrollmentExecutable = path; }
   function suggestions(value: bool): void { CryoDConsent.start(); Config.options.cryod.freezeSuggestions = value; }
  }
 }
-'''.replace('CLIENT', json.dumps(str(build / 'cryod-control-client'))).replace('SOCKET', json.dumps(str(root / 'native-run/control.sock'))).replace('UID', json.dumps(str(os.getuid())))
+'''.replace('CLIENT', json.dumps(str(build / 'cryod-control-client'))).replace('LAUNCHER', json.dumps(str(launcher))).replace('SOCKET', json.dumps(str(root / 'native-run/control.sock'))).replace('UID', json.dumps(str(os.getuid())))
         (root / 'shell/shell.qml').write_text(qml)
         bus = subprocess.Popen(['dbus-daemon', '--session', '--nofork', '--print-address=1'], stdout=subprocess.PIPE, stderr=qlog, text=True)
         address = bus.stdout.readline().strip()
@@ -139,9 +146,9 @@ ShellRoot {
             return json.loads(subprocess.check_output(
                 ['qs', '-p', str(root / 'shell'), 'ipc', 'call', 'cryodConsent', 'status'],
                 env=qenv, text=True, stderr=subprocess.STDOUT, timeout=5))
-        wait(state, lambda v:v['available'] and len(v['apps']) == 1 and not v['busy'])
+        wait(state, lambda v:v['available'] and len(v['apps']) == 2 and not v['busy'])
         assert public_state() == dict(enabled=True, owner=False, suggestionsEnabled=False,
-            subscribed=False, busy=False, prompting=False, catalogAvailable=True, appCount=1, error='')
+            subscribed=False, busy=False, prompting=False, catalogAvailable=True, appCount=2, error='')
         original = policy.read_bytes()
         call('ask')
         displayed = wait(state, lambda v:v['shown'] and len(v['actions']) == 2)
@@ -186,6 +193,42 @@ ShellRoot {
         assert state()['apps'][0]['rule']['permissions']['freeze'] == 'deny'
         assert not json.loads((root / 'native-run/status.json').read_text())['native']['effects_enabled']
         print('PASS: the durable denial stays visible after app exit; no process effects were enabled', flush=True)
+
+        call('enrollmentClient', str(root / 'missing-enrollment-client'))
+        call('ask');wait(state, lambda v:not v['busy'] and bool(v['error']))
+        assert policy.read_bytes() == denied
+        call('enrollmentClient', str(launcher))
+        call('ask');wait(state, lambda v:v['shown'])
+        entry.write_bytes(entry.read_bytes() + b'\n')
+        call('action', 'yes')
+        wait(state, lambda v:not v['busy'] and bool(v['error']))
+        assert policy.read_bytes() == denied
+        print('PASS: offline QML reports a missing helper and refuses an entry changed after the notification', flush=True)
+
+        call('ask');wait(state, lambda v:v['shown'])
+        call('action', 'yes')
+        wait(state, lambda v:not v['busy'] and v['apps'][0]['rule']['permissions']['freeze'] == 'allow')
+        offline_rule = json.loads(policy.read_text())['rules'][0]
+        assert offline_rule['selector']['kind'] == 'installed-application'
+        assert app.poll() is not None and 'pid' not in state()['apps'][0]
+        call('ask');wait(state, lambda v:v['shown'])
+        call('action', 'no')
+        wait(state, lambda v:not v['busy'] and v['apps'][0]['rule']['permissions']['freeze'] == 'deny')
+        denied = policy.read_bytes()
+        assert json.loads(denied)['rules'][0]['permissions']['recommend'] == 'deny'
+        assert not json.loads((root / 'native-run/status.json').read_text())['native']['effects_enabled']
+        print('PASS: Yes and No enroll the closed installed app through native receipts without launching it or enabling effects', flush=True)
+
+        call('askUnlaunched');wait(state, lambda v:v['shown'])
+        call('action', 'no')
+        wait(state, lambda v:not v['busy'] and any(a['app_id'] == unlaunched.name
+            and a.get('rule', {}).get('permissions', {}).get('freeze') == 'deny' for a in v['apps']))
+        unseen = next(a for a in state()['apps'] if a['app_id'] == unlaunched.name)
+        assert unseen['installed'] and 'pid' not in unseen
+        assert unseen['rule']['selector']['kind'] == 'installed-application'
+        assert all(json.loads(record.read_text())['app_id'] != unlaunched.name
+                   for record in (root / 'native-run/application-launches').glob('op-*.json'))
+        print('PASS: an installed app with no prior process or saved choice is selectable and durably denied', flush=True)
 
         busy_script = root / 'busy.py'
         busy_script.write_text('import os,time\nos.nice(19)\nend=time.monotonic()+60\nwhile time.monotonic()<end:\n pass\n')

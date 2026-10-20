@@ -20,6 +20,7 @@ try:
           dict(enabled=True, protectForeground=False, protectVisible=False, groupLaunches=False, freezeSuggestions=False))
     click('cryodFreezeSuggestions')
     until(lambda: json.loads(config.read_text())['cryod']['freezeSuggestions'] is True)
+    call('test', 'text', 'cryodAppSearch', 'settings-fixture')
     until(lambda: json.loads(call('test', 'locate', 'cryodChooseApp:com.mekki.settings-fixture.desktop')))
     screenshot('cryod-settings')
     click('cryodMaster')

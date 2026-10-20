@@ -7,6 +7,16 @@ import qs.modules.common.widgets
 ColumnLayout {
     id: root
     spacing: 14
+    property string appFilter: ""
+    property int appPage: 0
+    readonly property int appPageSize: 12
+    readonly property var matchingApps: CryoDConsent.available ? CryoDConsent.apps.filter(app =>
+        (CryoDConsent.appName(app.app_id) + " " + app.app_id).toLowerCase().includes(appFilter.trim().toLowerCase())) : []
+    onAppFilterChanged: appPage = 0
+    Connections {
+        target: CryoDConsent
+        function onAppsChanged() { root.appPage = 0; }
+    }
     onVisibleChanged: CryoDConsent.viewActive = visible
     Component.onCompleted: CryoDConsent.viewActive = visible
     Component.onDestruction: CryoDConsent.viewActive = false
@@ -115,10 +125,17 @@ ColumnLayout {
         StyledText {
             visible: CryoDConsent.available && CryoDConsent.apps.length === 0
             Layout.fillWidth: true; wrapMode: Text.WordWrap
-            text: "Open an app from the launcher to set its freezing preference."
+            text: "No installed apps or saved preferences are available."
+        }
+        MaterialTextField {
+            objectName: "cryodAppSearch"
+            visible: CryoDConsent.available && CryoDConsent.apps.length > 0
+            Layout.fillWidth: true
+            placeholderText: "Search apps"
+            onTextChanged: root.appFilter = text
         }
         Repeater {
-            model: CryoDConsent.available ? CryoDConsent.apps : []
+            model: root.matchingApps.slice(root.appPage * root.appPageSize, (root.appPage + 1) * root.appPageSize)
             delegate: RowLayout {
                 required property var modelData
                 Layout.fillWidth: true
@@ -126,16 +143,39 @@ ColumnLayout {
                     Layout.fillWidth: true
                     StyledText { text: CryoDConsent.appName(modelData.app_id); textFormat: Text.PlainText }
                     StyledText {
-                        text: CryoDConsent.preference(modelData) + (modelData.pid ? "" : " · Open the app to change this preference")
+                        text: CryoDConsent.preference(modelData)
+                            + (CryoDConsent.canChoose(modelData) ? "" : " · App unavailable")
                         Layout.fillWidth: true; wrapMode: Text.WordWrap
                     }
                 }
                 RippleButtonWithIcon {
                     objectName: "cryodChooseApp:" + modelData.app_id
                     materialIcon: "tune"; mainText: "Choose"
-                    enabled: !CryoDConsent.busy && modelData.pid > 1
+                    enabled: !CryoDConsent.busy && CryoDConsent.canChoose(modelData)
                     onClicked: CryoDConsent.ask(modelData)
                 }
+            }
+        }
+        RowLayout {
+            visible: root.matchingApps.length > root.appPageSize
+            Layout.fillWidth: true
+            RippleButtonWithIcon {
+                objectName: "cryodAppPrevious"
+                materialIcon: "chevron_left"; mainText: "Previous"
+                enabled: root.appPage > 0
+                onClicked: root.appPage--
+            }
+            StyledText {
+                Layout.fillWidth: true
+                text: (root.appPage * root.appPageSize + 1) + "–"
+                    + Math.min((root.appPage + 1) * root.appPageSize, root.matchingApps.length)
+                    + " of " + root.matchingApps.length
+            }
+            RippleButtonWithIcon {
+                objectName: "cryodAppNext"
+                materialIcon: "chevron_right"; mainText: "Next"
+                enabled: (root.appPage + 1) * root.appPageSize < root.matchingApps.length
+                onClicked: root.appPage++
             }
         }
         StyledText {

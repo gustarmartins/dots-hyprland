@@ -8,6 +8,7 @@ import qs.modules.common
 Singleton {
     id: root
     property string executable: "/usr/local/libexec/cryod-desktop/cryod-control-client"
+    property string enrollmentExecutable: "/usr/local/libexec/cryod-desktop/cryod-app-launch"
     property string socketPath: "/run/cryod/control.sock"
     property string peerUid: "0"
     property string notificationExecutable: "/usr/bin/notify-send"
@@ -44,6 +45,8 @@ Singleton {
     readonly property bool suggestionsWanted: owner && enabled && Config.options.cryod.freezeSuggestions === true
     readonly property bool busy: pending !== null || transport.running || prompt.running || notificationOffer !== null || stoppingTransport || stoppingPrompt
     readonly property bool prompting: prompt.running
+    readonly property var installedEntries: enabled && viewActive ? Array.from(DesktopEntries.applications.values) : []
+    onInstalledEntriesChanged: { if (enabled && available && !busy) rebuildApps(); }
 
     IpcHandler {
         target: "cryodConsent"
@@ -95,6 +98,30 @@ Singleton {
         return DesktopEntries.byId(appId)?.name || DesktopEntries.byId(appId.replace(/\.desktop$/, ""))?.name
             || appId.replace(/\.desktop$/, "");
     }
+    function installedEntry(appId) {
+        return DesktopEntries.byId(appId) || DesktopEntries.byId(appId.replace(/\.desktop$/, ""));
+    }
+    function canChoose(app) { return !!app && (app.pid > 1 || app.installed === true); }
+    function rebuildApps() {
+        const merged = new Map();
+        // Reuse the session's existing desktop-entry model. Listing does
+        // not authorize an effect; the selected file is verified natively.
+        for (const entry of installedEntries) {
+            if (entry.runInTerminal || !entry.command.length) continue;
+            const appId = entry.id.endsWith(".desktop") ? entry.id : entry.id + ".desktop";
+            merged.set(appId, {app_id:appId, installed:true});
+        }
+        for (const rule of choices) {
+            if (["application", "installed-application"].includes(rule.selector?.kind))
+                merged.set(rule.selector.app_id, Object.assign({}, merged.get(rule.selector.app_id) || {},
+                    {app_id:rule.selector.app_id, rule:rule}));
+        }
+        for (const app of collected) {
+            if (typeof app.app_id === "string" && Number.isInteger(app.pid) && app.pid > 1 && typeof app.start_ticks === "string")
+                merged.set(app.app_id, Object.assign({}, merged.get(app.app_id) || {}, app));
+        }
+        apps = Array.from(merged.values()).sort((a, b) => appName(a.app_id).localeCompare(appName(b.app_id)));
+    }
     function escaped(text) { return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
     function preference(app) {
         const choice = app.rule?.permissions?.freeze;
@@ -122,9 +149,16 @@ Singleton {
         submit(query("catalog", {cursor:0}), "catalog", {cursor:0});
     }
     function ask(app, automatic = false) {
-        if (!enabled || busy || (!automatic && !available) || !app || !(app.pid > 1)
+        if (!enabled || busy || (!automatic && !available) || !canChoose(app)
                 || (automatic && (!suggestionsWanted || !subscriptionId))) return;
         error = ""; message = "";
+        if (!(app.pid > 1)) {
+            if (automatic) return;
+            const descriptor = CryoDAppLaunch.manifest(installedEntry(app.app_id));
+            if (!descriptor) { error = "This app is no longer available in the launcher."; return; }
+            submit(query("propose-installed"), "propose", {appId:app.app_id, installed:true, manifest:descriptor});
+            return;
+        }
         const fields = automatic ? {pid:app.pid, automatic:true, subscription_id:subscriptionId} : {pid:app.pid};
         submit(query("propose", fields), "propose", {appId:app.app_id, pid:app.pid, birth:app.start_ticks, automatic:automatic});
     }
@@ -192,20 +226,15 @@ Singleton {
                 return;
             }
             if (reply.next_cursor !== 0 || collected.length > 64) { available = false; return; }
-            const merged = new Map();
-            for (const rule of choices) {
-                if (rule.selector?.kind === "application") merged.set(rule.selector.app_id, {app_id:rule.selector.app_id, rule:rule});
-            }
-            for (const app of collected) {
-                if (typeof app.app_id === "string" && Number.isInteger(app.pid) && app.pid > 1 && typeof app.start_ticks === "string")
-                    merged.set(app.app_id, Object.assign({}, merged.get(app.app_id) || {}, app));
-            }
-            apps = Array.from(merged.values()).sort((a, b) => appName(a.app_id).localeCompare(appName(b.app_id)));
+            rebuildApps();
             available = true;
         } else if (request.purpose === "propose") {
             const offer = reply.offer;
+            const identityMatches = request.context.installed === true
+                ? offer?.version === 2 && offer.selector?.kind === "installed-application"
+                : offer?.target?.pid === request.context.pid && offer.target?.start_ticks === request.context.birth;
             if (!reply.ticket || !offer || offer.selector?.app_id !== request.context.appId
-                    || offer.target?.pid !== request.context.pid || offer.target?.start_ticks !== request.context.birth) {
+                    || !identityMatches) {
                 error = "The app changed. Refresh and try again.";
                 return;
             }
@@ -254,9 +283,14 @@ Singleton {
     }
     Process {
         id: transport
-        command: [root.executable, "--socket", root.socketPath, "--peer-uid", root.peerUid]
-        stdinEnabled: true
+        command: root.pending?.context?.installed === true
+            ? [root.enrollmentExecutable, "--enroll", "--manifest", JSON.stringify(root.pending.context.manifest),
+                "--socket", root.socketPath, "--peer-uid", root.peerUid]
+            : [root.executable, "--socket", root.socketPath, "--peer-uid", root.peerUid]
+        workingDirectory: root.pending?.context?.manifest?.working_directory || ""
+        stdinEnabled: root.pending?.context?.installed !== true
         onStarted: {
+            if (root.pending?.context?.installed === true) return;
             if (root.pending) write(JSON.stringify(root.pending.command) + "\n");
             else running = false;
         }
