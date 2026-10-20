@@ -112,6 +112,11 @@ was unchanged. The app-policy file also remained the disabled, empty baseline.
 A five-second IPC timeout occurred during delayed validation; a newer shell
 instance was then observed and both endpoints responded on recheck. Its cause
 was not established; no manual shell/daemon restart was issued for recovery.
+Subsequent kernel evidence records a root `swapoff` OOM at12:59:25 during an
+owner-confirmed manual ZRAM restart, after the private test units had exited.
+The relationship to the shell interruption is still unproven. ZRAM remained
+active and the native owner retained its PID; this workstream did not repeat
+the drain or alter the operator's command.
 
 The catalog currently requires a verified running launcher app. Choosing an
 installed app before launch, practical GUI freezer eligibility, automatic effect
