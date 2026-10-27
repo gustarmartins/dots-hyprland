@@ -8,9 +8,18 @@ STAGE=/usr/local/bin/zram-profile-stage
 LIVE=/usr/local/bin/zram-algo-live
 CONF=/etc/systemd/zram-generator.conf
 LEVELS=/run/vmatlas-tier/levels
+READ_LOCK=/run/lock/vmatlas-zram-tier.lock
 CYCLE=(zstd lz4 lz4hc)
 
-selected() {
+read_locked() (
+    # Status must share the actuator's lease before touching ZRAM sysfs. A
+    # userspace timeout cannot release a reader blocked inside the kernel.
+    { exec 9<"$READ_LOCK"; } 2>/dev/null || return 74
+    flock --shared --nonblock 9 || return 75
+    "$@"
+)
+
+selected_read() {
     awk '{
         for (i = 1; i <= NF; i++) {
             if ($i ~ /^\[/ && $i ~ /\]$/) {
@@ -21,6 +30,8 @@ selected() {
         }
     }' /sys/block/zram0/comp_algorithm 2>/dev/null
 }
+
+selected() { read_locked selected_read; }
 
 staged() {
     awk -F= '/^[[:space:]]*compression-algorithm[[:space:]]*=/ {
@@ -34,6 +45,23 @@ staged() {
 
 tiers() {
     awk -F= '/^tier[123]=/ {v[++n]=$2} END {for(i=1;i<=n;i++) printf "%s%s", (i>1?"/":""), v[i]}' "$LEVELS" 2>/dev/null
+}
+
+status_read() {
+    local live next chain backing
+    live=$(selected_read) || live=unknown
+    next=$(staged) || next=unknown
+    [ -n "$live" ] || live=unknown
+    [ -n "$next" ] || next=unknown
+    chain=$(tiers) || chain=""
+    [ -z "$chain" ] || chain=" + $chain"
+    backing=$(cat /sys/block/zram0/backing_dev 2>/dev/null || echo none)
+    [ "$backing" = none ] || chain="$chain + NVMe"
+    if [ "$live" = "$next" ]; then
+        echo "$live$chain"
+    else
+        echo "$live->$next$chain"
+    fi
 }
 
 notify_result() {
@@ -74,18 +102,13 @@ case "${1:-}" in
         staged
         ;;
     status|get_state)
-        live=$(selected)
-        next=$(staged)
-        [ -n "$live" ] || live=unknown
-        [ -n "$next" ] || next=unknown
-        chain=$(tiers)
-        [ -z "$chain" ] || chain=" + $chain"
-        backing=$(cat /sys/block/zram0/backing_dev 2>/dev/null || echo none)
-        [ "$backing" = none ] || chain="$chain + NVMe"
-        if [ "$live" = "$next" ]; then
-            echo "$live$chain"
+        if state=$(read_locked status_read); then
+            printf '%s\n' "$state"
         else
-            echo "$live->$next$chain"
+            case "$?" in
+                75) echo busy ;;
+                *) echo unknown ;;
+            esac
         fi
         ;;
     next|toggle)

@@ -11,7 +11,7 @@ QuickToggleModel {
     id: root
     name: Translation.tr("ZRAM Algo")
 
-    property string algoState: "zstd"
+    property string algoState: "unknown"
     readonly property string liveAlgo: algoState.split("->")[0].split(" + ")[0]
 
     icon: switch(liveAlgo) {
@@ -20,8 +20,8 @@ QuickToggleModel {
         case "lz4hc": return "data_saver_on"
         default:      return "help"
     }
-    statusText: algoState
-    toggled: algoState.indexOf("->") >= 0 || liveAlgo !== "zstd"
+    statusText: algoState === "busy" ? Translation.tr("Busy") : algoState === "unknown" ? Translation.tr("Unavailable") : algoState
+    toggled: ["zstd", "lz4", "lz4hc"].includes(liveAlgo) && (algoState.indexOf("->") >= 0 || liveAlgo !== "zstd")
 
     mainAction: () => {
         Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec zram-algo-mode.sh next"])

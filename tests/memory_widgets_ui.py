@@ -68,6 +68,14 @@ Timer { interval: 900; running: true; onTriggered: {
  console.log("MEMORY_INITIAL " + JSON.stringify([tile0.statusText,tile1.statusText,tile2.statusText,tile3.statusText,tile6.statusText]));
 ''' + actions + '''
 } }
+Timer { interval: 1300; running: true; onTriggered: {
+ tile2.algoState="busy";
+ Qt.callLater(() => {
+  console.log("MEMORY_ZRAM_BUSY " + JSON.stringify([tile2.statusText,tile2.toggled]));
+  tile2.algoState="unknown";
+  Qt.callLater(() => console.log("MEMORY_ZRAM_UNKNOWN " + JSON.stringify([tile2.statusText,tile2.toggled])));
+ });
+} }
 Timer { interval: 2400; running: true; onTriggered: {
  console.log("MEMORY_FINAL " + tile0.statusText); Qt.quit();
 } }
@@ -86,6 +94,8 @@ Timer { interval: 2400; running: true; onTriggered: {
         assert json.loads(initial) == ['tier1', 'Guarded · 2.0 GiB boot quota',
             'lz4 + zstd:3/zstd:9/zstd:15 + disk', 'Disk swap · off', 'GPU fixture'], output
         assert 'MEMORY_FINAL tier2' in output, output
+        assert 'MEMORY_ZRAM_BUSY ["Busy",false]' in output, output
+        assert 'MEMORY_ZRAM_UNKNOWN ["Unavailable",false]' in output, output
         calls = [line.split(' ', 1) for line in (root/'calls').read_text().splitlines()]
         assert all(origin == ('legacy' if legacy else 'system') for origin, call in calls), calls
         assert EXPECTED <= {call for origin, call in calls}, calls
