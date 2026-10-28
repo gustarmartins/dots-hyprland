@@ -19,10 +19,18 @@ Super tap detection now belongs to the compositor. The previous Lua bindings
 sent `searchToggleRelease` to Quickshell but omitted the legacy interruption
 bindings; Quickshell receives a release even after a Super shortcut. The new
 helper arms only when Super is the sole pressed key, cancels on additional keys,
-modifiers, mouse buttons or scrolling, and sends `searchToggle` only after a
-clean release. It preserves shortcuts and the workspace-number overlay, does not
+modifiers, mouse buttons or scrolling, and calls Quickshell’s `search toggle` IPC
+method only after a clean release. It preserves shortcuts and the workspace-number overlay, does not
 switch submaps, and keeps mouse observers transparent and non-consuming. The
 fallback launcher now follows the same tap decision.
+
+A global shortcut dispatched inside a release callback inherits that release
+phase. It cannot trigger an `onPressed` handler. The initial detector-only test
+missed this integration error: counting valid taps was insufficient evidence
+that the workspace view opened. The corrected regression loads the production
+bindings and actual `Overview.qml`, asserts grid visibility and mapped layer
+creation, and captures the rendered grid. Its `--baseline` mode reproduces the
+broken global dispatch and fails on the first clean tap.
 
 Named and special workspaces no longer have numeric Lua IDs. Their JSON objects
 use an address and may omit `id` too. The review found several affected paths:
@@ -53,10 +61,12 @@ a new UI for arbitrary named workspaces or replace the pinned Quickshell engine.
 
 ## Validation
 
-- Real isolated Hyprland input: both Super keys, clean taps, bound/unbound keys,
+- Real isolated Hyprland input through the actual Quickshell workspace view:
+  both Super keys, clean taps, bound/unbound keys,
   modifiers, both release orders, a previously held key, both Super keys held,
-  and recovery to the next clean tap. Mouse bindings are checked for
-  non-consuming registration; physical mouse gestures are not claimed tested.
+  recovery to the next clean tap, and Super+Tab without an extra release toggle.
+  The workspace-number hint is released and view layers close correctly. Mouse
+  bindings are checked for non-consuming registration; physical mouse gestures are not claimed tested.
 - Real two-monitor KWin/Hyprland/Quickshell integration: occupancy and focus,
   empty workspaces, groups, scratchpad open/close, live count changes, both bar
   orientations, pixel-visible labels and completed shell reload.

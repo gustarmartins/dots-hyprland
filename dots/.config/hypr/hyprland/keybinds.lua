@@ -13,8 +13,9 @@ local qsIsAlive = "qs -c $qsConfig ipc show >/dev/null"
 
 -- Send a toggle only for an uninterrupted Super tap, never every release.
 require("hyprland.super_tap").bind(function()
-    hl.dispatch(hl.dsp.global("quickshell:searchToggle"))
-    hl.dispatch(hl.dsp.exec_cmd(qsIsAlive .. " || pkill fuzzel || fuzzel"))
+    -- A global dispatcher inherits the release phase here, so it cannot
+    -- trigger Quickshell's onPressed handler. IPC invokes the toggle directly.
+    hl.dispatch(hl.dsp.exec_cmd(qsIpcCall .. " search toggle || " .. qsIsAlive .. " || pkill fuzzel || fuzzel"))
 end)
 
 hl.bind("SUPER_L", hl.dsp.global("quickshell:workspaceNumber"), { ignore_mods = true, transparent = true })
