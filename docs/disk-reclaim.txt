@@ -1,0 +1,77 @@
+disk-reclaim — workstation caches, trash and capacity warnings
+
+Commands
+  disk-reclaim                         Preview recognized disposable build files.
+  disk-reclaim preview --trash         Include explicitly discarded trash items.
+  disk-reclaim clean --trash           Preview, then ask before deleting.
+  disk-reclaim clean --trash --yes     Confirm that invocation without prompting.
+  disk-reclaim preview --disk nvme     Limit discovery to nvme, ssd or hdd.
+  disk-reclaim status --json           Machine-readable capacity and settings.
+  btrfs-stat                           Current three-disk space plus btrfs-care status.
+  disk-reclaim enable                  Enable the 30-second warning timer.
+  disk-reclaim disable                 Disarm and stop its timer and current check.
+  disk-reclaim set forecast off        Disable warnings based on recent growth.
+  disk-reclaim set ssd off             Disable this monitor's SATA SSD alerts.
+  disk-reclaim set warn_nvme_gib 48     Change an early-warning threshold.
+
+Super+I -> Disk space & cleanup exposes the master switch, individual disk alerts,
+desktop notifications, rapid-growth warnings and terminal cleanup previews.
+Turning the master switch off hides its feature controls and stops owned checks.
+The independent, previously installed btrfs-care guard remains unchanged.
+
+Discovery
+  Home-directory captured builds and Software Repositories; Downloads and the
+  Poco_F4_munch engineering workspace; projects under mounted /mnt/SSD and /mnt/HDD.
+  A Gradle project needs its wrapper and settings file. Android module caches
+  need their module build recipe. Only generated build/intermediates, kotlin,
+  kspCaches, tmp and versioned/configuration .gradle state are selected.
+  Shared/private Gradle homes: task cache and dependency transforms. Dependency
+  downloads, wrappers, properties and credentials remain available.
+  AUR ~/.cache/yay: packages matching the clean tracked recipe and source downloads
+  whose checksums match the tracked .SRCINFO. Modified or unchecked downloads stay.
+  ccache: cache shards with the standard CACHEDIR.TAG; preserve cache settings.
+  npm: recognized npm-cache/_cacache directories, with live-use checks.
+  Trash: paired freedesktop entries in ~/.local/share/Trash and mounted per-user
+  .Trash-UID or .Trash/UID folders. Trash participates only with --trash.
+
+Discovery is bounded to 120 seconds and 20,000 directories. Recognized projects
+stop traversal into source trees. If a slow disk exhausts the discovery budget,
+the preview reports that limit; rerun with --disk hdd or --disk ssd as appropriate.
+
+Preservation and receipts
+  Skip active builders, open files/inodes, held build/cache locks, changed files,
+  changed mount generations, arbitrary symlinks and other owners. Owner-defined
+  build/.gradle redirects are resolved once and checked again before removal;
+  their links stay in place and every discovered build owner stays protected.
+  Pin directory components
+  with O_NOFOLLOW and remove only previewed files by directory-relative identity.
+  Share ~/.local/state/session-disk-reclaim/mutation.lock with agent cleanups.
+  Never kill a build, unmount a disk, balance Btrfs or elevate with sudo.
+  Preserve source, tracked files, final outputs/reports, logs/traces, signing keys,
+  browser authentication, backups, snapshots, archives and Never_Delete folders.
+  Filesystem repair and Firefox recovery are separate manual operations.
+  A complete private plan and incremental receipt live under
+  ~/.local/state/disk-reclaim/receipts/<run>/. Actual free-space gain is reported
+  separately from removed allocation; compression, reflinks and concurrent writes
+  can make those numbers differ. Production cleanup is never part of installation.
+
+Warnings
+  A user timer reads capacity every 30 seconds; it does not walk files or clean.
+  Defaults: NVMe warning 32 GiB / critical 8 GiB; SATA SSD and HDD warning 12 GiB /
+  critical 4 GiB. Thresholds and feature switches are in the private
+  ~/.config/disk-reclaim/config.json. Existing btrfs-care thresholds are untouched.
+  Recent drops of at least 256 MiB over 1–10 minutes can warn about exhaustion
+  within 30 minutes, or escalate within 10 minutes. This is an estimate, not a
+  guarantee. Repeat each persistent alert at most hourly; escalation is immediate.
+  Failed notifications retry. Disabled disks and unmounted disks do not alert.
+  The shortcut displays existing Btrfs metadata/unallocated-space diagnostics
+  separately from normal file capacity. Low raw unallocated space alone does not
+  become an instruction to balance or delete data.
+
+Dependencies and validation
+  Python 3 standard library, Linux /proc, util-linux/systemd, notify-send for
+  desktop alerts; Git for tracked-file/AUR checks. Kitty or Foot opens UI previews.
+  Install the two commands under ~/.local/bin and the timer/service under
+  ~/.config/systemd/user; run systemctl --user daemon-reload before enabling.
+  Run python tests/test_disk_reclaim.py and python tests/storage_settings_ui.py.
+  Tests use disposable data, fake notifications and an offscreen QML fixture.

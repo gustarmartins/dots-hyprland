@@ -1,0 +1,11 @@
+[Unit]
+Description=Check available space on the three workstation disks
+
+[Timer]
+OnActiveSec=5s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=disk-space-watch.service
+
+[Install]
+WantedBy=timers.target

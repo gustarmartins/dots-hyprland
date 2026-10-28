@@ -1,4 +1,5 @@
 import QtQuick
+import "root:/modules/common/functions/WorkspaceIdentity.js" as WorkspaceIdentity
 import Quickshell.Hyprland
 import qs.modules.common
 import qs.services
@@ -18,7 +19,7 @@ QtObject {
     readonly property int fakeWorkspace: currentWorkspaceNotFake ? -9999 : activeWorkspace
     readonly property var specialWorkspace: HyprlandData.monitors.find(mon => mon.id === root.monitor?.id)?.specialWorkspace
     readonly property string specialWorkspaceName: specialWorkspace?.name?.replace(/^special:/, "") ?? ""
-    readonly property bool specialWorkspaceActive: !!specialWorkspace?.id && specialWorkspaceName !== ""
+    readonly property bool specialWorkspaceActive: WorkspaceIdentity.address(specialWorkspace) !== "" && specialWorkspaceName !== ""
 
     function getWorkspaceId(group, index) {
         return group * shownCount + index + 1;

@@ -5,20 +5,26 @@ set -euo pipefail
 # Hyprland or removing outputs/workspaces from the layout.
 runtime_dir=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 monitor_config="$HOME/.config/hypr/monitors.lua"
-exec 9>"$runtime_dir/refresh-displays.lock"
-flock -n 9 || { echo 'A display refresh is already running.' >&2; exit 1; }
+# Keep IPC failure bounded so the EXIT trap can restore input wake settings.
+hyprctl() { command timeout 5 hyprctl "$@"; }
 
 usage() {
     cat <<'EOF'
 Usage: refresh-displays [cycle|sleep|wake|apply|status|verify] [OUTPUT]
-  cycle   Reapply profiles, then sequentially DPMS-cycle outputs (default)
-  sleep   Put outputs to sleep before switching their power off
-  wake    Wake outputs, reload profiles, and restore the current color transform
+  cycle   Hold each awake output off for 5 seconds, then restore it (default)
+  sleep   Put displays in standby; leave power and cables connected
+  wake    Explicitly wake connected displays and restore their saved profiles
   apply   Reload profiles without blanking either display
   status  Read current mode, scale, format, VRR and color state; changes nothing
   verify  Compare connected outputs with the saved profiles; fail on mismatch
 OUTPUT optionally selects one active output for cycle/sleep/wake.
 Profiles: ~/.config/hypr/monitors.lua
+Sleep affects displays only; it does not suspend the PC. Normal keyboard/mouse
+wake resumes after the initial 5-second protected off interval. No unplugging
+or monitor power-button sequence is required. Wake cannot power an unplugged
+or physically switched-off monitor.
+Cycle is a video-signal/DPMS reset, not a hardware power cut. It preserves
+workspaces and the current color transform. Input cannot shorten its off interval.
 EOF
 }
 
@@ -31,21 +37,84 @@ eval_checked() {
 lua_dpms() {
     local action=$1 monitor=${2:-}
     if [[ -n "$monitor" ]]; then
-        eval_checked "hl.dispatch(hl.dsp.dpms({ action = \"$action\", monitor = \"$monitor\" }))"
+        # Hyprland can fall back to ALL outputs for an unresolved selector.
+        output_active "$monitor" || { printf '%s disconnected; no DPMS command sent.\n' "$monitor" >&2; return 1; }
+        # Repeat the existence check atomically with dispatch inside Hyprland,
+        # covering a disconnect between the shell read and this IPC request.
+        eval_checked "assert(hl.get_monitor(\"$monitor\"), \"Output disconnected\"); hl.dispatch(hl.dsp.dpms({ action = \"$action\", monitor = \"$monitor\" }))"
     else
         eval_checked "hl.dispatch(hl.dsp.dpms({ action = \"$action\" }))"
     fi
 }
 
+output_active() {
+    hyprctl monitors -j | jq -e --arg m "$1" 'any(.[]; .name == $m and .disabled == false)' >/dev/null
+}
+
+dpms_matches() {
+    local monitor=$1 expected=$2 path state
+    hyprctl monitors -j | jq -e --arg m "$monitor" --argjson state "$expected" \
+        'any(.[]; .name == $m and .dpmsStatus == $state and .disabled == false)' >/dev/null || return 1
+    # On this DRM desktop, also check the kernel connector state. A successful
+    # dispatch and compositor flag alone do not prove the hardware commit worked.
+    for path in /sys/class/drm/card*-"$monitor"; do
+        [[ -r "$path/dpms" && -r "$path/status" ]] || continue
+        [[ $(cat "$path/status") == connected ]] || continue
+        state=$(cat "$path/dpms") || return 1
+        if [[ "$expected" == true ]]; then [[ "$state" == On ]] || return 1
+        else [[ "$state" == Off ]] || return 1; fi
+    done
+    return 0
+}
+
 wait_dpms() {
-    local monitor=$1 expected=$2 current
+    local monitor=$1 expected=$2
     for _ in {1..30}; do
-        current=$(hyprctl monitors -j | jq -r --arg m "$monitor" '.[] | select(.name == $m) | .dpmsStatus')
-        [[ "$current" == "$expected" ]] && return 0
+        dpms_matches "$monitor" "$expected" && return 0
         sleep 0.1
     done
     printf 'Timed out waiting for %s DPMS=%s\n' "$monitor" "$expected" >&2
     return 1
+}
+
+hold_off() {
+    local monitor
+    # Check throughout the dwell, including its end. Never count an early wake
+    # as a completed reset merely because the first off sample succeeded.
+    for _ in {1..20}; do
+        sleep 0.25
+        for monitor in "$@"; do
+            dpms_matches "$monitor" false || {
+                printf '%s did not stay off; refresh interrupted (input, hotplug, or another display controller).\n' "$monitor" >&2
+                return 1
+            }
+        done
+    done
+}
+
+wake_options=(mouse_move_enables_dpms key_press_enables_dpms)
+declare -A saved_wake=()
+guard_input_wake() {
+    local option value
+    for option in "${wake_options[@]}"; do
+        value=$(hyprctl -j getoption "misc:$option" | jq -er '.bool | tostring') || return
+        [[ "$value" == true || "$value" == false ]] || return 1
+        saved_wake[$option]=$value
+    done
+    eval_checked 'hl.config({ misc = { mouse_move_enables_dpms = false, key_press_enables_dpms = false } })'
+}
+restore_input_wake() {
+    local option current failed=0
+    for option in "${!saved_wake[@]}"; do
+        current=$(hyprctl -j getoption "misc:$option" | jq -er '.bool | tostring') || { failed=1; continue; }
+        # A reload/owner change may already have restored or changed it. Only
+        # undo the false value we installed; never overwrite a newer true.
+        if [[ "$current" == false && "${saved_wake[$option]}" == true ]]; then
+            eval_checked "hl.config({ misc = { $option = true } })" || { failed=1; continue; }
+        fi
+        unset 'saved_wake[$option]'
+    done
+    return "$failed"
 }
 
 # Evaluate the actual Lua profiles with a no-op hl.monitor, not duplicated
@@ -63,13 +132,13 @@ LUA
 }
 
 verify_profiles() {
-    local profiles
+    local profiles selected=${1:-}
     profiles=$(read_profiles) || return
     hyprctl monitors -j | python3 -c '
 import json,sys
 profiles={p[0]:p[1:] for line in sys.argv[1].splitlines() if (p:=line.split("\t"))}
 failed=False
-monitors=json.load(sys.stdin)
+monitors=[m for m in json.load(sys.stdin) if not sys.argv[2] or m["name"]==sys.argv[2]]
 if not monitors:
     print("No active monitors to verify", file=sys.stderr); sys.exit(1)
 for m in monitors:
@@ -78,25 +147,51 @@ for m in monitors:
     mode,pos,scale,bits,cm,vrr,transform=profiles[m["name"]]
     size,hz=mode.split("@"); w,h=map(int,size.split("x")); x,y=map(int,pos.split("x"))
     expected={"width":w,"height":h,"x":x,"y":y,"scale":float(scale),"transform":int(transform),"colorManagementPreset":cm,"disabled":False}
-    if bits=="8": expected["currentFormat"]="XRGB8888"
+    if bits in ("8", "10"): expected["currentFormat"]={"8":"XRGB8888", "10":"XRGB2101010"}[bits]
     if vrr in ("0","1"): expected["vrr"]=vrr=="1"
     mismatch=[f"{k}={m.get(k)!r}, expected {v!r}" for k,v in expected.items() if m.get(k)!=v]
     if abs(m["refreshRate"]-float(hz))>0.1: mismatch.append("refresh rate differs from "+hz)
     print(m["name"]+": "+("; ".join(mismatch) if mismatch else "matches saved profile"))
     failed |= bool(mismatch)
 sys.exit(int(failed))
-' "$profiles"
+' "$profiles" "$selected"
 }
 
 apply_profiles() {
+    local selected=${1:-} code
     read_profiles >/dev/null
-    # require() is cached inside the compositor: explicitly invalidate it.
-    eval_checked 'package.loaded["monitors"] = nil; require("monitors")'
+    if [[ -n "$selected" ]]; then
+        # Read profiles outside the compositor: require("monitors") has side
+        # effects on BOTH outputs, even for a DP-1-only recovery.
+        code=$(lua - "$monitor_config" "$selected" <<'LUA'
+hl = { monitor = function() end }
+local profiles = dofile(arg[1])
+for _, key in ipairs({"aoc_recovery", "arzopa"}) do
+    local p = profiles[key]
+    if p.output == arg[2] then
+        io.write('hl.monitor({')
+        for k, v in pairs(p) do
+            assert(k:match('^[%a_][%w_]*$'))
+            assert(type(v) == 'string' or type(v) == 'number' or type(v) == 'boolean')
+            io.write(k .. '=' .. (type(v) == 'string' and string.format('%q', v) or tostring(v)) .. ',')
+        end
+        io.write('})')
+        return
+    end
+end
+-- Unmanaged outputs can still be power-cycled without inventing a profile.
+LUA
+        ) || return
+        [[ -z "$code" ]] || eval_checked "$code" || return
+    else
+        # require() is cached inside the compositor: explicitly invalidate it.
+        eval_checked 'package.loaded["monitors"] = nil; require("monitors")' || return
+    fi
     for _ in {1..20}; do
-        if verify_profiles >/dev/null; then return 0; fi
+        if verify_profiles "$selected" >/dev/null; then return 0; fi
         sleep 0.1
     done
-    verify_profiles
+    verify_profiles "$selected"
 }
 
 color_saved=false
@@ -138,20 +233,31 @@ case "$mode" in cycle|sleep|wake|apply|status|verify) ;; -h|--help|help) usage; 
 if [[ -n "$target" ]]; then
     [[ "$target" =~ ^[A-Za-z0-9_.:-]+$ ]] || { echo 'Invalid output name' >&2; exit 2; }
     case "$mode" in cycle|sleep|wake) ;; *) echo 'OUTPUT is only supported for cycle/sleep/wake.' >&2; exit 2 ;; esac
-    hyprctl monitors -j | jq -e --arg m "$target" 'any(.[]; .name == $m)' >/dev/null || { echo 'Output is not active.' >&2; exit 1; }
+    output_active "$target" || { echo 'Output is not active. Connect it and turn its power on first.' >&2; exit 1; }
 fi
 
-pending_wake=""
+# Read-only inspection remains available during a cycle.
+case "$mode" in status|verify) ;; *)
+    exec 9>"$runtime_dir/refresh-displays.lock"
+    flock -n 9 || { echo 'A display refresh is already running.' >&2; exit 1; }
+esac
+
+pending_wake=()
 cleanup() {
-    local status=$?
+    local status=$? monitor
     trap - EXIT
-    if [[ -n "$pending_wake" ]]; then
-        lua_dpms on "$pending_wake" || true
+    if ((${#pending_wake[@]})); then
+        for monitor in "${pending_wake[@]}"; do lua_dpms on "$monitor" || true; done
         restore_color || true
+    fi
+    if ! restore_input_wake; then
+        echo 'Could not restore input wake settings; explicitly wake displays, then reload Hyprland settings to restore input wake.' >&2
+        status=1
     fi
     exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -161,36 +267,59 @@ case "$mode" in
     apply) snapshot_color; apply_profiles; restore_color; show_status ;;
     cycle)
         snapshot_color
-        apply_profiles
+        read_profiles >/dev/null
         if [[ -n "$target" ]]; then monitors=("$target")
         else mapfile -t monitors < <(hyprctl monitors -j | jq -r '.[] | select(.dpmsStatus) | .name'); fi
         ((${#monitors[@]})) || { echo 'No awake outputs to cycle.' >&2; exit 1; }
         for monitor in "${monitors[@]}"; do
-            printf 'Cycling %s...\n' "$monitor"
-            pending_wake=$monitor
+            dpms_matches "$monitor" true || { printf '%s is not awake; use wake first.\n' "$monitor" >&2; exit 1; }
+        done
+        guard_input_wake
+        for monitor in "${monitors[@]}"; do
+            printf 'Cycling %s: holding the signal off for 5 seconds...\n' "$monitor"
+            pending_wake=("$monitor")
             lua_dpms off "$monitor"
             wait_dpms "$monitor" false
-            sleep 0.5
+            hold_off "$monitor"
             lua_dpms on "$monitor"
             wait_dpms "$monitor" true
-            pending_wake=""
+            apply_profiles "$monitor"
             sleep 0.5
+            wait_dpms "$monitor" true
+            pending_wake=()
         done
-        apply_profiles
         restore_color
+        restore_input_wake
         show_status
         ;;
     sleep)
-        lua_dpms off "$target"
+        mapfile -t monitors < <(hyprctl monitors -j | jq -r --arg m "$target" '.[] | select($m == "" or .name == $m) | .name')
+        ((${#monitors[@]})) || { echo 'No connected outputs to sleep.' >&2; exit 1; }
+        mapfile -t pending_wake < <(hyprctl monitors -j | jq -r --arg m "$target" '.[] | select(($m == "" or .name == $m) and .dpmsStatus) | .name')
+        printf 'Display standby in 1 second. Leave power/cables connected; release keys and mouse.\n'
         sleep 1
-        echo 'Outputs put to sleep.'
+        guard_input_wake
+        lua_dpms off "$target"
+        for monitor in "${monitors[@]}"; do wait_dpms "$monitor" false; done
+        hold_off "${monitors[@]}"
+        restore_input_wake
+        sleep 0.25
+        for monitor in "${monitors[@]}"; do
+            dpms_matches "$monitor" false || { echo 'Displays woke again after restoring normal input wake; sleep did not persist.' >&2; exit 1; }
+        done
+        pending_wake=()
+        echo 'Display DPMS off verified. Normal input wake settings restored; refresh-displays wake also wakes connected displays.'
         ;;
     wake)
         snapshot_color
+        mapfile -t monitors < <(hyprctl monitors -j | jq -r --arg m "$target" '.[] | select($m == "" or .name == $m) | .name')
+        ((${#monitors[@]})) || { echo 'No connected outputs to wake. Connect them and turn their power on first.' >&2; exit 1; }
         lua_dpms on "$target"
-        sleep 1
-        apply_profiles
+        for monitor in "${monitors[@]}"; do wait_dpms "$monitor" true; done
+        apply_profiles "$target"
         restore_color
+        sleep 0.5
+        for monitor in "${monitors[@]}"; do wait_dpms "$monitor" true; done
         show_status
         ;;
 esac

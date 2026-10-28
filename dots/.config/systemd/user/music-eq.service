@@ -1,0 +1,15 @@
+[Unit]
+Description=Song-aware EasyEffects presets for Spotify and Jukebox
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/music-eq run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+Nice=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target

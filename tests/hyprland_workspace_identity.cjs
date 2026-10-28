@@ -1,0 +1,31 @@
+// Production identity helpers, with both legacy and Hyprland 0.57 IPC objects.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const source = fs.readFileSync(path.join(__dirname,
+    '../dots/.config/quickshell/ii/modules/common/functions/WorkspaceIdentity.js'), 'utf8');
+const context = vm.createContext({});
+vm.runInContext(source.replace(/^\.pragma library\s*/, ''), context);
+const {address, matches, visibleOnMonitor} = context;
+assert.equal(address({address: '6', id: 6}), '6');
+assert.equal(address({id: 6}), '6');
+assert.equal(address({address: 'name:work', name: 'work'}), 'name:work');
+assert.equal(address({address: 'special:special', type: 'special', name: 'special'}), 'special:special');
+assert.equal(address({address: '', name: ''}), '');
+assert.equal(matches({}, {}), false);
+assert.equal(matches(null, null), false);
+assert.equal(matches({id: 0}, {id: 0}), false);
+assert.equal(matches({address: '6'}, {id: 6}), true);
+assert.equal(matches({address: 'name:a'}, {address: 'name:b'}), false);
+const monitor = {activeWorkspace: {address: 'name:work'}, specialWorkspace: {address: 'special:one'}};
+assert.equal(visibleOnMonitor({workspace: {address: 'name:work'}}, monitor), true);
+assert.equal(visibleOnMonitor({workspace: {address: 'name:other'}}, monitor), false);
+assert.equal(visibleOnMonitor({workspace: {address: 'special:one'}}, monitor), true);
+assert.equal(visibleOnMonitor({workspace: {address: 'special:two'}}, monitor), false);
+assert.equal(visibleOnMonitor({workspace: {}, pinned: true}, monitor), true);
+assert.equal(visibleOnMonitor({workspace: {}}, {activeWorkspace: {}, specialWorkspace: {}}), false);
+assert.equal(visibleOnMonitor({workspace: {id: 6}}, {activeWorkspace: {id: 6}, specialWorkspace: {id: 0}}), true);
+assert.equal(visibleOnMonitor({workspace: {id: -99}}, {specialWorkspace: {id: -99}}), true);
+assert.equal(visibleOnMonitor({workspace: {}}, null), false);
+console.log('20 workspace identity assertions passed');

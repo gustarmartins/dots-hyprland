@@ -44,7 +44,7 @@ for _,reason in ipairs({'moved','native_fix','resized','pid','workspace','monito
     module.reconcile()
     assert(#moves==0,reason .. ' must be preserved')
 end
-for _,reason in ipairs({'tiled','unmapped','hidden','pinned','fullscreen','client_fullscreen','special','arranged'}) do
+for _,reason in ipairs({'tiled','unmapped','hidden','pinned','fullscreen','client_fullscreen','special','named','arranged'}) do
     w,m,events,moves,timers,module=fixture()
     if reason=='tiled' then w.floating=false
     elseif reason=='unmapped' then w.mapped=false
@@ -52,7 +52,8 @@ for _,reason in ipairs({'tiled','unmapped','hidden','pinned','fullscreen','clien
     elseif reason=='pinned' then w.pinned=true
     elseif reason=='fullscreen' then w.fullscreen=2
     elseif reason=='client_fullscreen' then w.fullscreen_client=2
-    elseif reason=='special' then w.workspace={id=-98}
+    elseif reason=='special' then w.workspace={name='special',addressable_name='special:special'}
+    elseif reason=='named' then w.workspace={name='named',addressable_name='name:named'}
     elseif reason=='arranged' then m.x,m.y=1920,500 end
     events['workspace.move_to_monitor'](w.workspace,m)
     m.x,m.y=1920,500; module.reconcile()

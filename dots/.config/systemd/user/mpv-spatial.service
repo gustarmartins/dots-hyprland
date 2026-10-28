@@ -1,0 +1,17 @@
+[Unit]
+Description=Optional mpv headphone surround
+After=pipewire.service wireplumber.service
+BindsTo=pipewire.service
+
+[Service]
+Type=simple
+ExecCondition=%h/.local/bin/mpv-spatial is-enabled
+ExecStart=/usr/bin/pipewire -c %h/.config/pipewire/mpv-spatial.conf
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+LockPersonality=yes
+Slice=session.slice
+
+[Install]
+WantedBy=default.target

@@ -9,6 +9,10 @@ import Quickshell.Services.Notifications
 MaterialShape { // App icon
     id: root
     property var appIcon: ""
+    property bool appIconFailed: false
+    readonly property string resolvedAppIcon: root.appIcon ? Quickshell.iconPath(root.appIcon, true) : ""
+    readonly property bool hasAppIcon: resolvedAppIcon !== "" && !appIconFailed
+    onAppIconChanged: appIconFailed = false
     property var summary: ""
     property var urgency: NotificationUrgency.Normal
     property bool isUrgent: urgency === NotificationUrgency.Critical
@@ -33,7 +37,7 @@ MaterialShape { // App icon
     color: isUrgent ? Appearance.colors.colPrimaryContainer : Appearance.colors.colSecondaryContainer
     Loader {
         id: materialSymbolLoader
-        active: root.appIcon == "" && !root.hasImage
+        active: !root.hasAppIcon && !root.hasImage
         anchors.fill: parent
         sourceComponent: MaterialSymbol {
             text: {
@@ -51,13 +55,14 @@ MaterialShape { // App icon
     }
     Loader {
         id: appIconLoader
-        active: !root.hasImage && root.appIcon != ""
+        active: !root.hasImage && root.hasAppIcon
         anchors.centerIn: parent
         sourceComponent: IconImage {
             id: appIconImage
             implicitSize: root.appIconSize
             asynchronous: true
-            source: Quickshell.iconPath(root.appIcon, "image-missing")
+            source: root.resolvedAppIcon
+            onStatusChanged: if (status === Image.Error) root.appIconFailed = true
         }
     }
     Loader {
@@ -89,13 +94,14 @@ MaterialShape { // App icon
             }
             Loader {
                 id: notifImageAppIconLoader
-                active: root.appIcon != ""
+                active: root.hasAppIcon
                 anchors.bottom: parent.bottom
                 anchors.right: parent.right
                 sourceComponent: IconImage {
                     implicitSize: root.smallAppIconSize
                     asynchronous: true
-                    source: Quickshell.iconPath(root.appIcon, "image-missing")
+                    source: root.resolvedAppIcon
+                    onStatusChanged: if (status === Image.Error) root.appIconFailed = true
                 }
             }
         }

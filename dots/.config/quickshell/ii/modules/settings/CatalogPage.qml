@@ -29,8 +29,8 @@ ScrollView {
             Layout.fillWidth: true
             Layout.leftMargin: 20
             Layout.rightMargin: 20
-            active: !root.query.trim() && ["fonts", "wallpaper", "audio", "mail", "memory", "company", "cryod"].includes(root.pageId)
-            sourceComponent: root.pageId === "cryod" ? cryodPage : root.pageId === "company" ? companyPage : root.pageId === "memory" ? memoryPage : root.pageId === "mail" ? mailPage : root.pageId === "fonts" ? fontPage : root.pageId === "audio" ? audioPage : wallpaperPage
+            active: !root.query.trim() && ["fonts", "wallpaper", "audio", "mail", "memory", "company", "cryod", "storage"].includes(root.pageId)
+            sourceComponent: root.pageId === "storage" ? storagePage : root.pageId === "cryod" ? cryodPage : root.pageId === "company" ? companyPage : root.pageId === "memory" ? memoryPage : root.pageId === "mail" ? mailPage : root.pageId === "fonts" ? fontPage : root.pageId === "audio" ? audioPage : wallpaperPage
         }
         Repeater {
             model: root.query.trim() ? Catalog.destinations.filter(e => Catalog.matches(e, root.query)) : []
@@ -74,6 +74,7 @@ ScrollView {
         Item { Layout.preferredHeight: 24 }
     }
     Timer { id: colorTimer; interval: 500; onTriggered: { Config.flushPendingWrites(); Quickshell.execDetached([Directories.wallpaperSwitchScriptPath, "--noswitch"]); } }
+    Component { id: storagePage; StorageActions {} }
     Component { id: cryodPage; CryoDSettings {} }
     Component { id: companyPage; CompanyTools {} }
     Component { id: memoryPage; MemoryLocks {} }

@@ -36,8 +36,8 @@ Singleton {
     property int toHour: Number(to.split(":")[0])
     property int toMinute: Number(to.split(":")[1])
 
-    property int clockHour: DateTime.clock.hours
-    property int clockMinute: DateTime.clock.minutes
+    property int clockHour: DateTime.clock?.hours ?? -1
+    property int clockMinute: DateTime.clock?.minutes ?? -1
 
     property var manualActive
     property int manualActiveHour
@@ -60,6 +60,7 @@ Singleton {
     }
 
     function reEvaluate() {
+        if (clockHour < 0 || clockMinute < 0) return;
         const t = clockHour * 60 + clockMinute;
         const from = fromHour * 60 + fromMinute;
         const to = toHour * 60 + toMinute;
@@ -80,6 +81,7 @@ Singleton {
         // console.log("[Hyprsunset] Ensuring state:", root.shouldBeOn, "Automatic mode:", root.automatic);
         if (!root.automatic || root.manualActive !== undefined)
             return;
+        if (clockHour < 0 || clockMinute < 0) return;
         if (root.shouldBeOn) {
             root.enableTemperature();
         } else {

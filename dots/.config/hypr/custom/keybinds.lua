@@ -45,10 +45,10 @@ hl.bind("SUPER + Q", function()
 
     local workspace = hl.get_active_workspace(monitor)
     local special_workspace = hl.get_active_special_workspace(monitor)
-    local window_workspace_id = window.workspace.id
+    -- Named and special workspaces have nil numeric IDs in Hyprland 0.57.
+    -- Native workspace equality compares identity without equating nil IDs.
     local window_is_visible =
-        (workspace and window_workspace_id == workspace.id) or
-        (special_workspace and window_workspace_id == special_workspace.id)
+        window.workspace == workspace or window.workspace == special_workspace
 
     if not window_is_visible then
         hl.notification.create({

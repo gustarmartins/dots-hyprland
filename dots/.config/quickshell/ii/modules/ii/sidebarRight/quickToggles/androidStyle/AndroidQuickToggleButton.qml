@@ -260,7 +260,8 @@ GroupButton {
         objectName: "tileSizePopup-" + root.buttonData.type
         parent: Overlay.overlay
         anchors.centerIn: parent
-        width: Math.min(parent.width - 24, Math.max(250, root.gridColumns * 31 + 32))
+        width: Math.min(parent ? Math.max(0, parent.width - 24) : 0,
+            Math.max(250, root.gridColumns * 31 + 32))
         padding: 16
         modal: false
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside

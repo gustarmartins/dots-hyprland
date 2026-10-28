@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""Local MPRIS -> EasyEffects preset selection. No network or player controls."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+import unicodedata
+from urllib.parse import urlparse, unquote
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', HOME/'.config'))/'music-eq/config.json'
+STATE = Path(os.environ.get('XDG_STATE_HOME', HOME/'.local/state'))/'music-eq/state.json'
+RUNTIME = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
+PRESETS = Path(os.environ.get('XDG_DATA_HOME', HOME/'.local/share'))/'easyeffects/output'
+UNIT = 'music-eq.service'
+SESSION = RUNTIME/'music-eq-session.json'
+MANUAL = RUNTIME/'music-eq-manual.json'
+DEFAULT = dict(spotify=True, jukebox=True, artists=True, genres=True, tracks=[], artist_rules={}, genre_rules={}, fallback='', route='')
+
+
+def read(path, default):
+    try: return json.loads(path.read_text())
+    except FileNotFoundError: return default.copy()
+
+
+def write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2)+'\n')
+    tmp.chmod(0o600)
+    tmp.replace(path)
+
+
+def run(*args):
+    return subprocess.run(args, capture_output=True, text=True, timeout=4)
+
+
+def norm(s):
+    return ' '.join(unicodedata.normalize('NFKC', s).casefold().split())
+
+
+def file_preset(track, cfg):
+    if track.get('source') != 'jukebox': return None
+    url=urlparse(track.get('url',''))
+    if url.scheme != 'file' or url.netloc not in ('', 'localhost'): return None
+    return cfg.get('file_rules',{}).get(unquote(url.path))
+
+
+def select(track, cfg):
+    exact=file_preset(track,cfg)
+    if exact: return exact, 'local recording rule'
+    artists = {norm(a) for a in track['artists']}
+    artists.add(norm('; '.join(track['artists'])))
+    for rule in cfg['tracks']:
+        if norm(rule['artist']) in artists and norm(rule['title']) == norm(track['title']):
+            return rule['preset'], 'song rule'
+    if cfg['artists']:
+        for artist, preset in cfg['artist_rules'].items():
+            if norm(artist) in artists: return preset, 'artist fallback'
+    if cfg['genres']:
+        for genre in track['genres']:
+            for key, preset in cfg['genre_rules'].items():
+                if norm(key) == norm(genre): return preset, 'genre fallback'
+    return cfg['fallback'], 'baseline (unmapped song)'
+
+
+def exchange(command):
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(2)
+        s.connect(str(RUNTIME/'EasyEffectsServer'))
+        s.sendall((command+'\n').encode()); s.shutdown(socket.SHUT_WR)
+        chunks=[]
+        while chunk := s.recv(65536): chunks.append(chunk)
+        return b''.join(chunks).decode().strip()
+
+
+def preset_path(name):
+    if not name or not re.fullmatch(r'[^/\n\r]{1,100}', name): raise ValueError('Invalid preset name')
+    p = PRESETS/(name+'.json')
+    if not p.is_file(): raise ValueError('Missing preset: '+name)
+    return p
+
+
+def route():
+    result = run('wpctl','inspect','@DEFAULT_AUDIO_SINK@')
+    match = re.search(r'node.name = "([^"]+)"', result.stdout)
+    return match[1] if match else ''
+
+
+def controls(name):
+    """Read live exposed properties; retain raw enums for exact restoration."""
+    out={}
+    data=json.loads(preset_path(name).read_text())['output']
+    for plugin, settings in data.items():
+        if not isinstance(settings,dict): continue
+        base='output:'+plugin.replace('#',':')+':'
+        for key,value in settings.items():
+            camel=lambda k: re.sub(r'-([a-z])',lambda m:m[1].upper(),k)
+            props={}
+            if isinstance(value,dict):
+                # This EasyEffects socket exposes EQ L/R, but not M/S channels.
+                if plugin.startswith('equalizer#') and key in ('left','right'):
+                    for band,values in value.items():
+                        for prop in values:
+                            c=camel(prop); props[key+':'+band+c[0].upper()+c[1:]]=None
+            else: props[camel(key)]=None
+            for prop in props:
+                command=base+prop
+                actual=exchange('get_property:'+command)
+                if not actual or actual.startswith('error'): raise RuntimeError('Unreadable live property: '+command)
+                out[command]=actual
+    return out
+
+
+def apply(name, gain):
+    data=json.loads(preset_path(name).read_text())['output']
+    if 'limiter#0' not in data:
+        raise RuntimeError('Preset must contain limiter#0')
+    float(gain)  # Reject missing/error IPC replies before changing anything.
+    exchange('load_preset:output:'+name)
+    for _ in range(10):
+        if exchange('get_last_loaded_preset:output') == name: break
+        time.sleep(.05)
+    else: raise RuntimeError('Preset load was not confirmed')
+    # Bank presets end with limiter#0. Keep the listener output trim, not input drive.
+    if 'limiter#0' not in json.loads(preset_path(name).read_text())['output']:
+        raise RuntimeError('Preset must contain limiter#0')
+    exchange('set_property:output:limiter:0:outputGain:'+gain)
+    if exchange('get_property:output:limiter:0:outputGain') != gain:
+        raise RuntimeError('Output gain readback failed')
+    expected=json.loads(preset_path(name).read_text())['output'].get('equalizer#0',{}).get('input-gain')
+    if expected is not None and abs(float(exchange('get_property:output:equalizer:0:inputGain'))-expected)>1e-5:
+        raise RuntimeError('Equalizer readback failed')
+
+
+def track_key(track, previous=None):
+    # Player instance names and display tags can change during reconnection.
+    identity = track.get('url') or track.get('track_id')
+    if identity and identity != '/org/mpris/MediaPlayer2/TrackList/NoTrack':
+        return [track['source'], identity]
+    if previous and len(previous)==2 and previous[0]==track['source']:
+        return None  # Do not turn a temporarily missing URI into a new song.
+    if track['title'] and track['artists']:
+        return [track['source'], sorted(norm(a) for a in track['artists']), norm(track['title'])]
+    return None
+
+
+class Watcher:
+    def __init__(self):
+        import gi
+        gi.require_version('Playerctl','2.0')
+        from gi.repository import Playerctl, GLib, GLibUnix, Gio
+        self.P,self.G,self.bus=Playerctl,GLib,Gio.bus_get_sync(Gio.BusType.SESSION,None)
+        self.manager=Playerctl.PlayerManager()
+        self.manager.connect('name-appeared',lambda m,n:self.add(n))
+        self.manager.connect('player-vanished',lambda *a:self.schedule())
+        self.pending=0; self.key=None; self.last=None; self.before=None; self.held=False
+        self.observed=None; self.manual_id=None
+        self.load_session()
+        self.loop=GLib.MainLoop()
+        for name in self.manager.props.player_names: self.add(name)
+        GLib.timeout_add_seconds(15,self.tick)
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM,self.stop)
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT,self.stop)
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self.wake)
+        self.schedule()
+
+    def wake(self):
+        self.schedule()
+        return True
+
+    def load_session(self):
+        saved=read(SESSION,{})
+        if saved.get('schema') == 1:
+            for attr in ('key','last','before','held','observed','manual_id'):
+                if attr in saved: setattr(self,attr,saved[attr])
+
+    def save_session(self):
+        write(SESSION,dict(schema=1,**{attr:getattr(self,attr,None)
+              for attr in ('key','last','before','held','observed','manual_id')}))
+
+    def add(self,name):
+        p=self.P.Player.new_from_name(name)
+        for event in ('metadata','playback-status'): p.connect(event,lambda *a:self.schedule())
+        self.manager.manage_player(p)
+        self.schedule()
+
+    def schedule(self):
+        if self.pending: self.G.source_remove(self.pending)
+        self.pending=self.G.timeout_add(400,self.event_tick)
+
+    def source(self,p):
+        name=p.props.player_instance
+        if name == 'spotify' or name.startswith('spotify.'): return 'spotify'
+        if not name.startswith(('mpv','jukebox')): return None
+        try:
+            pid=self.bus.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus',
+                'GetConnectionUnixProcessID',self.G.Variant('(s)',('org.mpris.MediaPlayer2.'+name,)),None,0,1000,None).unpack()[0]
+            args=Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+            if any(a.startswith(b'--input-ipc-server=') and b'jukebox' in a for a in args): return 'jukebox'
+        except Exception: pass
+        return None
+
+    def tracks(self,cfg):
+        result=[]
+        for p in self.manager.props.players:
+            source=self.source(p)
+            if not source or not cfg[source]: continue
+            m=p.props.metadata.unpack()
+            artists=m.get('xesam:artist',[])
+            if isinstance(artists,str): artists=[artists]
+            artists=[part.strip() for a in artists for part in a.split(';') if part.strip()]
+            genres=m.get('xesam:genre',[])
+            if isinstance(genres,str): genres=[genres]
+            result.append(dict(source=source,player=p.props.player_instance,artists=artists,
+                title=m.get('xesam:title',''), genres=genres, url=m.get('xesam:url',''),
+                playing=p.props.playback_status == self.P.PlaybackStatus.PLAYING,
+                track_id=m.get('mpris:trackid','')))
+        return result
+
+    def status(self,message,**extra):
+        self.save_session()
+        write(STATE,dict(message=message,manual_override=self.held,
+                        updated=time.time(),pid=os.getpid(),**extra))
+
+    def observe_manual(self):
+        current=exchange('get_last_loaded_preset:output')
+        if not current: raise RuntimeError('No live preset readback')
+        receipt=read(MANUAL,{})
+        explicit=False
+        if receipt.get('id') and receipt['id'] != self.manual_id:
+            self.manual_id=receipt['id']
+            explicit=receipt.get('key') == self.key and receipt.get('preset') == current
+        self.manual_event=bool(self.key and ((self.observed is not None and current != self.observed) or explicit))
+        if self.manual_event:
+            self.held=True; self.last=None; self.before=None
+        self.observed=current
+        return current
+
+    def restore(self):
+        if self.before and self.last and not self.held:
+            if exchange('get_last_loaded_preset:output') == self.last:
+                gain=exchange('get_property:output:limiter:0:outputGain')
+                apply(self.before['preset'],gain)
+                for prop,value in self.before['controls'].items():
+                    if prop != 'output:limiter:0:outputGain': exchange('set_property:'+prop+':'+value)
+        self.before=None; self.last=None
+        self.observed=exchange('get_last_loaded_preset:output')
+
+    def stop(self):
+        try:
+            with (RUNTIME/'easyeffects-qs.lock').open('w') as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX)
+                self.observe_manual()
+                self.restore()
+                self.status('Stopped; song override retained' if self.held else 'Stopped; prior preset restored when still owned')
+        except Exception as e: self.status('Restore needs attention: '+str(e))
+        self.loop.quit(); return False
+
+    def event_tick(self):
+        self.pending=0
+        self.tick()
+        return False
+
+    def tick(self):
+        try:
+            with (RUNTIME/'easyeffects-qs.lock').open('w') as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.update()
+        except BlockingIOError: pass  # The manual picker currently owns the action lock.
+        except Exception as e: self.status('Waiting: '+str(e))
+        return True
+
+    def update(self):
+        cfg=read(CONFIG,DEFAULT)
+        if run('systemctl','--user','is-active','astra-profiled.service').returncode == 0:
+            self.status('Paused: astra-profiled owns preset selection'); return
+        current=self.observe_manual()  # Before idle/restore: pause must not swallow a click.
+        tracks=self.tracks(cfg)
+        playing=[t for t in tracks if t['playing']]
+        if len(playing)!=1:
+            # A paused player can establish the song even before first playback.
+            if not playing and len(tracks)==1:
+                paused_key=track_key(tracks[0],self.key)
+                if paused_key is not None and paused_key != self.key:
+                    self.key=paused_key
+                    self.held=self.manual_event
+                    self.last=None
+            # A known paused song retains its sound, including live manual edits.
+            paused_same=(not playing and len(tracks)==1 and track_key(tracks[0],self.key) == self.key)
+            if not paused_same: self.restore()
+            self.status('Manual preset held through pause/interruption' if self.held else
+                        ('Waiting for playback' if not playing else 'Paused: multiple players are playing'))
+            return
+        t=playing[0]
+        key=track_key(t,self.key)
+        if key is None or ((not t['title'] or not t['artists']) and not file_preset(t,cfg)):
+            self.status('Waiting for metadata; song override retained'); return
+        changed=key != self.key
+        if changed:
+            self.key=key; self.held=False
+        if self.held:
+            self.status('Manual preset held until next song',track=t,preset=current); return
+        if cfg['route'] and route()!=cfg['route']:
+            self.restore(); self.status('Paused: different audio output'); return
+        if exchange('get_global_bypass') == '1':
+            self.status('Paused: EasyEffects bypassed'); return
+        if not changed and self.last == current:
+            self.status('Automatic preset active',track=t,preset=current); return
+        name,reason=select(t,cfg)
+        if not name: self.status('Unmapped song; keeping current preset',track=t); return
+        target=json.loads(preset_path(name).read_text())['output']
+        if 'limiter#0' not in target: raise RuntimeError('Preset requires limiter#0')
+        if current!=name:
+            if self.before is None:
+                self.before=dict(preset=current,controls=controls(current))
+                write(STATE.parent/'before.json',self.before)
+            gain=exchange('get_property:output:limiter:0:outputGain')
+            self.last=name
+            try:
+                apply(name,gain)
+            except Exception:
+                self.restore()
+                raise
+        self.key=key
+        self.last=name
+        self.observed=name
+        self.status('Applied '+name+' — '+reason,track=t,preset=name,reason=reason)
+
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('action',choices=['status','enable','disable','run','set','explain'])
+    p.add_argument('values',nargs='*'); a=p.parse_args()
+    cfg=read(CONFIG,DEFAULT)
+    if a.action=='status':
+        state=read(STATE,{})
+        print(json.dumps(dict(**state,enabled=run('systemctl','--user','is-enabled',UNIT).returncode==0,
+            running=run('systemctl','--user','is-active',UNIT).returncode==0,config=cfg),ensure_ascii=False)); return
+    if a.action=='set':
+        key,value=a.values
+        if key not in ('spotify','jukebox','artists','genres'): raise ValueError('Unknown switch')
+        if value not in ('true','false'): raise ValueError('Expected true/false')
+        cfg[key]=value=='true'; write(CONFIG,cfg)
+        if run('systemctl','--user','is-active',UNIT).returncode==0:
+            r=run('systemctl','--user','restart',UNIT)
+            if r.returncode: raise RuntimeError(r.stderr)
+        return
+    if a.action in ('enable','disable'):
+        if a.action=='enable':
+            if not CONFIG.exists(): raise RuntimeError('Configure song rules and baseline first: '+str(CONFIG))
+            preset_path(cfg['fallback'])
+        r=run('systemctl','--user',a.action,'--now',UNIT)
+        if r.returncode: raise RuntimeError(r.stderr)
+        return
+    if a.action=='explain':
+        artist,title=a.values
+        print(json.dumps(select(dict(artists=[artist],title=title,genres=[]),cfg))); return
+    lock=(RUNTIME/'music-eq.lock').open('w')
+    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    watcher=Watcher(); watcher.loop.run()
+
+if __name__=='__main__':
+    try: main()
+    except Exception as e: print(str(e),file=sys.stderr); sys.exit(1)

@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+import "root:/modules/common/functions/WorkspaceIdentity.js" as WorkspaceIdentity
 import qs
 import qs.services
 import qs.modules.common
@@ -11,7 +12,7 @@ import Quickshell.Hyprland
 LockScreen {
     id: root
 
-    // Monitor name -> workspace id to restore on unlock (set when locking)
+    // Monitor name -> addressable workspace selector to restore on unlock.
     property var savedWorkspaces: ({})
 
     Timer {
@@ -24,11 +25,11 @@ LockScreen {
                 var monName = Quickshell.screens[j].name
                 var wsId = root.savedWorkspaces[monName]
                 if (wsId !== undefined) {
-                    batch += `hyprctl dispatch 'hl.dsp.focus({monitor="${monName}"})'; hyprctl dispatch 'hl.dsp.focus({workspace=${wsId}})';`
+                    batch += `hl.dispatch(hl.dsp.focus({monitor=${JSON.stringify(monName)}})); hl.dispatch(hl.dsp.focus({workspace=${JSON.stringify(wsId)}}));`
                 }
             }
             if (batch.length > 0) {
-                Quickshell.execDetached(["bash", "-c", batch])
+                Quickshell.execDetached(["hyprctl", "eval", batch])
             }
         }
     }
@@ -44,19 +45,19 @@ LockScreen {
             if (GlobalStates.screenLocked) {
                 // Lock: save workspace per monitor and move all to temp workspace in one batch
                 var next = {}
-                var batch = "keyword animation workspaces,1,7,menu_decel,slidevert; "
+                var batch = ""
                 for (var i = 0; i < Quickshell.screens.length; ++i) {
                     var mon = Quickshell.screens[i].name
                     var mData = HyprlandData.monitors.find(m => m.name === mon)
                     if (mData?.activeWorkspace == undefined) {
                         return;
                     }
-                    var ws = (mData?.activeWorkspace?.id ?? 1)
+                    var ws = WorkspaceIdentity.address(mData.activeWorkspace) || "1"
                     next[mon] = ws
-                    batch += `hyprctl dispatch 'hl.dsp.focus({monitor="${mon}"})'; hyprctl dispatch 'hl.dsp.focus({workspace=${2147483647 - ws}})';`
+                    batch += `hl.dispatch(hl.dsp.focus({monitor=${JSON.stringify(mon)}})); hl.dispatch(hl.dsp.focus({workspace=${2147483647 - i}}));`
                 }
                 root.savedWorkspaces = next
-                Quickshell.execDetached(["bash", "-c", batch])
+                Quickshell.execDetached(["hyprctl", "eval", batch])
             } else {
                 restoreTimer.start()
             }

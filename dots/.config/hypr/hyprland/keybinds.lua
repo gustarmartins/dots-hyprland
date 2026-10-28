@@ -11,10 +11,11 @@ local qsIpcCall = "qs -c $qsConfig ipc call"
 -- `ipc show` is the side-effect-free liveness probe for the selected config.
 local qsIsAlive = "qs -c $qsConfig ipc show >/dev/null"
 
-hl.bind("SUPER + SUPER_L", hl.dsp.global("quickshell:searchToggleRelease"), { description = "Shell: Toggle search" })
-hl.bind("SUPER + SUPER_R", hl.dsp.global("quickshell:searchToggleRelease"))
-hl.bind("SUPER + SUPER_L", hl.dsp.exec_cmd(qsIsAlive .. " || pkill fuzzel || fuzzel"))
-hl.bind("SUPER + SUPER_R", hl.dsp.exec_cmd(qsIsAlive .. " || pkill fuzzel || fuzzel"))
+-- Send a toggle only for an uninterrupted Super tap, never every release.
+require("hyprland.super_tap").bind(function()
+    hl.dispatch(hl.dsp.global("quickshell:searchToggle"))
+    hl.dispatch(hl.dsp.exec_cmd(qsIsAlive .. " || pkill fuzzel || fuzzel"))
+end)
 
 hl.bind("SUPER_L", hl.dsp.global("quickshell:workspaceNumber"), { ignore_mods = true, transparent = true })
 hl.bind("SUPER_R", hl.dsp.global("quickshell:workspaceNumber"), { ignore_mods = true, transparent = true })

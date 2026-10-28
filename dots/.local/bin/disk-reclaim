@@ -1,0 +1,833 @@
+#!/usr/bin/env python3
+"""Preview or remove recognized build caches; monitor capacity without scanning files."""
+import argparse
+from contextlib import ExitStack, contextmanager
+import fcntl
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import time
+from urllib.parse import urlparse, unquote
+import uuid
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', HOME / '.config')) / 'disk-reclaim/config.json'
+STATE = Path(os.environ.get('XDG_STATE_HOME', HOME / '.local/state')) / 'disk-reclaim'
+MUTATION_LOCK = STATE.parent / 'session-disk-reclaim/mutation.lock'
+TIMER = 'disk-space-watch.timer'
+SERVICE = 'disk-space-watch.service'
+GIB = 1024 ** 3
+DISKS = {'nvme': '/', 'ssd': '/mnt/SSD', 'hdd': '/mnt/HDD'}
+DEFAULT = dict(enabled=False, nvme=True, ssd=True, hdd=True, desktop=True, forecast=True,
+               warn_nvme_gib=32, critical_nvme_gib=8, warn_ssd_gib=12, critical_ssd_gib=4,
+               warn_hdd_gib=12, critical_hdd_gib=4, repeat_minutes=60)
+PROTECTED = {'.mozilla', '.thunderbird', '.ssh', '.gnupg', '.codex', '.agents', '.claude',
+             '.git', '.steam', 'keyrings', 'never_delete', 'node_modules', '.venv', 'venv',
+             'firefox', 'chromium', 'google-chrome', 'google-chrome-unstable', 'microsoft-edge',
+             'bravesoftware', 'librewolf'}
+PRESERVE_FILES = {'cookies.sqlite', 'logins.json', 'key4.db', 'cert9.db', 'client.realm',
+                  'game.ini', 'gradle.properties', 'ccache.conf', 'cachedir.tag', 'sessionstore.jsonlz4',
+                  'places.sqlite', 'login data', 'cookies', 'local state'}
+PRESERVE_SUFFIXES = ('.jks', '.keystore', '.pem', '.p12', '.pfx', '.hprof', '.trace',
+                     '.perfetto-trace', '.dmp', '.log')
+VERSION = re.compile(r'\d+\.\d+(?:\.\d+)?')
+
+
+def run(*args, timeout=8):
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+
+
+def read_json(path, fallback):
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return fallback.copy()
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    stage = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        with stage.open('x') as f:
+            os.chmod(stage, 0o600)
+            json.dump(value, f, indent=2)
+            f.write('\n'); f.flush(); os.fsync(f.fileno())
+        os.replace(stage, path)
+    finally:
+        stage.unlink(missing_ok=True)
+
+
+@contextmanager
+def locked(path):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def config():
+    return validate_config(DEFAULT | read_json(CONFIG, {}))
+
+
+def validate_config(cfg):
+    for key, default in DEFAULT.items():
+        if type(cfg[key]) is not type(default):
+            raise ValueError('Invalid setting: ' + key)
+    for disk in DISKS:
+        if not 0 < cfg[f'critical_{disk}_gib'] < cfg[f'warn_{disk}_gib'] <= 10240:
+            raise ValueError('Critical threshold must be below warning threshold: ' + disk)
+    if not 1 <= cfg['repeat_minutes'] <= 10080:
+        raise ValueError('Repeat interval must be 1..10080 minutes')
+    return cfg
+
+
+def protected(path):
+    return any(p.casefold() in PROTECTED or 'backup' in p.casefold() or 'snapshot' in p.casefold() or 'archive' in p.casefold()
+               or p.casefold().startswith('firefox-recovery')
+               for p in Path(path).parts)
+
+
+def preserved_file(name):
+    name = name.casefold()
+    return name in PRESERVE_FILES or name.endswith(PRESERVE_SUFFIXES) or 'cookies.sqlite' in name
+
+
+def identity(s):
+    return [s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_mode, s.st_blocks * 512]
+
+
+def digest(path):
+    with path.open('rb') as f:
+        return hashlib.file_digest(f, 'sha256').hexdigest()
+
+
+def below(path, root):
+    return path == root or path.startswith(root.rstrip('/') + '/')
+
+
+def mount_table():
+    def unescape(s):
+        return re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), s)
+    result = []
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        first, last = line.split(' - ', 1); a, b = first.split(), last.split()
+        result.append(dict(path=unescape(a[4]), token=a[0] + ':' + a[2] + ':' + b[1],
+                           fstype=b[0], source=unescape(b[1]), readonly='ro' in a[5].split(','),
+                           super_readonly='ro' in b[2].split(',')))
+    return sorted(result, key=lambda m: len(m['path']), reverse=True)
+
+
+def filesystem(path, mounts=None):
+    mounts = mount_table() if mounts is None else mounts
+    for disk, target in DISKS.items():
+        if target != '/' and below(str(path), target) and not any(m['path'] == target for m in mounts):
+            raise ValueError('Disk is not mounted: ' + target)
+    for m in mounts:
+        if below(str(path), m['path']):
+            if m['readonly'] or m['fstype'] in ('tmpfs', 'ramfs', 'overlay', 'autofs'):
+                raise ValueError('Read-only or non-disk cache: ' + str(path))
+            return m
+    raise ValueError('Unknown filesystem: ' + str(path))
+
+
+def disk_status():
+    mounts = mount_table(); result = []
+    for name, target in DISKS.items():
+        mounted = any(m['path'] == target for m in mounts)
+        row = dict(name=name, path=target, mounted=mounted)
+        if mounted:
+            m = next(m for m in mounts if m['path'] == target)
+            s = os.statvfs(target)
+            row.update(free=s.f_bavail * s.f_frsize, total=s.f_blocks * s.f_frsize,
+                       token=m['source'] + ':' + m['fstype'] + ':' + str(os.stat(target).st_dev),
+                       fstype=m['fstype'], readonly=m['super_readonly'])
+        result.append(row)
+    return result
+
+
+def active_references():
+    paths, inodes, builders, gradle_homes = set(), set(), set(), set()
+    names = {'java', 'gradle', 'make', 'ninja', 'cmake', 'cargo', 'rustc', 'cc1', 'cc1plus',
+             'clang', 'clang++', 'ccache', 'kotlinc', 'node', 'npm', 'pnpm', 'yay', 'makepkg'}
+    for proc in Path('/proc').glob('[0-9]*'):
+        if int(proc.name) == os.getpid():
+            continue
+        try:
+            if proc.stat().st_uid != os.getuid():
+                continue
+            comm = (proc / 'comm').read_text().strip()
+            argv = (proc / 'cmdline').read_bytes().decode(errors='replace').split('\0')[:4]
+            build_script = any(Path(a).name in ('gradlew', 'gradle', 'makepkg', 'build-with-budget.sh') for a in argv if a)
+            if comm in names or build_script:
+                builders.add(str((proc / 'cwd').resolve()))
+                if comm in ('java', 'gradle', 'kotlinc'):
+                    values = (proc / 'environ').read_bytes().split(b'\0')
+                    gh = next((v.split(b'=', 1)[1].decode() for v in values if v.startswith(b'GRADLE_USER_HOME=')),
+                              str(HOME / '.gradle'))
+                    gradle_homes.add(str(Path(gh).resolve()))
+            for fd in (proc / 'fd').iterdir():
+                try:
+                    q = os.readlink(fd)
+                    if q.startswith('/'):
+                        paths.add(q.removesuffix(' (deleted)'))
+                    s = fd.stat()
+                    if stat.S_ISREG(s.st_mode):
+                        inodes.add((s.st_dev, s.st_ino))
+                except OSError:
+                    pass
+        except (OSError, UnicodeError):
+            continue
+    return paths, inodes, builders, gradle_homes
+
+
+def busy(candidate, refs):
+    paths, inodes, builders, gradle_homes = refs
+    root, project, scope = candidate['path'], candidate.get('project'), candidate.get('scope')
+    projects = set(candidate.get('projects', [])) | ({project} if project else set())
+    if any(below(p, root) for p in paths):
+        return 'open file'
+    if any(below(p, owner) for p in builders for owner in projects):
+        return 'active build in project'
+    if scope and (scope in gradle_homes or any(below(p, scope) for p in paths | builders)):
+        return 'cache is in use'
+    if candidate['kind'] == 'ccache' and any('ccache' in p for p in paths):
+        return 'compiler cache is in use'
+    if any((f['id'][0], f['id'][1]) in inodes for f in candidate.get('files', [])):
+        return 'file inode is open'
+    return None
+
+
+def open_directory(path):
+    """Pin every directory component; never traverse a substituted symlink."""
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in Path(path).parts[1:]:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd); fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd); raise
+
+
+def relative_directory(fd, relative):
+    dup = os.dup(fd)
+    try:
+        for part in Path(relative).parts:
+            if part in ('', '.'):
+                continue
+            if part == '..':
+                raise ValueError('Invalid relative path')
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dup)
+            os.close(dup); dup = nxt
+        return dup
+    except BaseException:
+        os.close(dup); raise
+
+
+class Discovery:
+    def __init__(self, disk='all', include_trash=False):
+        self.disk, self.include_trash = disk, include_trash
+        self.roots, self.skipped, self.visited = {}, [], {}
+        self.mounts = mount_table()
+        self.deadline = time.monotonic() + 120
+
+    def add(self, path, kind, recipe, project=None, scope=None, metadata=None):
+        path = Path(path)
+        try:
+            if path.is_symlink() or not path.exists() or protected(path):
+                return
+            declared = path
+            redirects = [p for p in path.parents if p.is_symlink()]
+            if redirects:
+                if not project or any(p.name not in ('build', '.gradle') or p.lstat().st_uid != os.getuid() for p in redirects):
+                    raise ValueError('Unrecognized symlink redirect')
+                path = path.resolve(strict=True)
+                if protected(path):
+                    return
+            fs = filesystem(path, self.mounts)
+            disk = next((d for d, target in DISKS.items() if target != '/' and below(str(path), target)), 'nvme')
+            if self.disk not in ('all', disk):
+                return
+            previous = self.roots.get(str(path), {})
+            owners = set(previous.get('projects', [])) | ({str(project)} if project else set())
+            declarations = set(previous.get('declared_paths', [])) | {str(declared)}
+            mappings = previous.get('redirects', []) + [dict(path=str(p), id=identity(p.lstat())) for p in redirects]
+            self.roots[str(path)] = dict(path=str(path), kind=kind, recipe=recipe, project=str(project) if project else None,
+                scope=str(scope) if scope else None, metadata=str(metadata) if metadata else None,
+                filesystem=fs['token'], disk=disk, declared_path=str(declared),
+                redirects=mappings, projects=sorted(owners), declared_paths=sorted(declarations))
+        except (OSError, ValueError) as e:
+            self.skipped.append(dict(path=str(path), reason=str(e)))
+
+    def gradle_home(self, path):
+        path = Path(path)
+        try:
+            if path.is_symlink():
+                path = path.resolve(strict=True)
+            if protected(path):
+                return
+            self.add(path / 'caches/build-cache-1', 'gradle', 'Next Gradle build recreates the task cache', scope=path)
+            for version in (path / 'caches').glob('*'):
+                if VERSION.fullmatch(version.name):
+                    self.add(version / 'transforms', 'gradle', 'Next Gradle build regenerates dependency transforms', scope=path)
+        except OSError:
+            pass
+
+    def project(self, project):
+        recipe = ('bash tools/build-with-budget.sh :app:assembleRelease' if (project / 'tools/build-with-budget.sh').is_file()
+                  else 'build-quota run -- ./gradlew assemble')
+        self.gradle_home(project / '.gradle')
+        for p in (project / '.gradle').glob('*'):
+            if p.name == 'configuration-cache' or VERSION.fullmatch(p.name):
+                self.add(p, 'gradle-project', recipe, project)
+        modules = [project]
+        for p in project.iterdir():
+            if p.is_dir() and not p.is_symlink() and any((p / n).is_file() for n in ('build.gradle.kts', 'build.gradle')):
+                modules.append(p)
+        for module in modules:
+            for n in ('intermediates', 'kotlin', 'kspCaches', 'tmp'):
+                self.add(module / 'build' / n, 'android', recipe, project)
+
+    def walk_projects(self, start, max_depth):
+        start = Path(start)
+        if not start.is_dir() or start.is_symlink() or protected(start):
+            return
+        queue = [(start, 0)]
+        while queue:
+            if time.monotonic() > self.deadline or len(self.visited) >= 20000:
+                self.skipped.append(dict(path=str(start), reason='Discovery limit reached; rerun with --disk to narrow the scan'))
+                return
+            path, depth = queue.pop()
+            try:
+                s = path.stat(); key = (s.st_dev, s.st_ino)
+                remaining = max_depth - depth
+                if self.visited.get(key, -1) >= remaining:
+                    continue
+                self.visited[key] = remaining
+                if any(below(str(path), target) and not any(m['path'] == target for m in self.mounts)
+                       for target in ('/mnt/SSD', '/mnt/HDD')):
+                    continue
+                if (path / 'gradlew').is_file() and any((path / n).is_file() for n in ('settings.gradle', 'settings.gradle.kts')):
+                    self.project(path); continue
+                if path.name in ('gradle-claude', 'npm-cache', 'ccache') or (path / 'caches/modules-2').is_dir():
+                    self.gradle_home(path)
+                if path.name == 'npm-cache' and (path / '_cacache').is_dir():
+                    self.add(path / '_cacache', 'npm', 'npm repopulates its content-addressed download cache', scope=path)
+                if depth >= max_depth:
+                    continue
+                with os.scandir(path) as entries:
+                    children = [Path(e.path) for e in entries if e.is_dir(follow_symlinks=False)]
+                for child in children:
+                    if child.name.startswith(('.', 'Source-', 'out-')) or protected(child) or child.name in {
+                            'build', 'out', 'outputs', 'reports', 'src', 'res', 'assets', 'third_party',
+                            'Games', 'Music', 'Videos', 'Torrent', 'toolchains', 'Source', 'Source-mm-diag',
+                            'sources', 'smali', 'decompiled', 'cache'}:
+                        continue
+                    queue.append((child, depth + 1))
+            except OSError as e:
+                self.skipped.append(dict(path=str(path), reason=str(e)))
+
+    def ccache(self, root):
+        for cache in (root, root / '.kernel'):
+            for letter in '0123456789abcdef':
+                p = cache / letter; tag = p / 'CACHEDIR.TAG'
+                if tag.is_file() and not tag.is_symlink() and 'Signature: 8a477f597d28d172789f06886806bc55' in tag.read_text():
+                    self.add(p, 'ccache', 'Original compiler invocation repopulates ccache', scope=cache)
+
+    def aur(self):
+        for p in (HOME / '.cache/yay').glob('*'):
+            recipe, info = p / 'PKGBUILD', p / '.SRCINFO'
+            if not recipe.is_file() or recipe.is_symlink() or not info.is_file() or info.is_symlink():
+                continue
+            status = run('git', '-C', str(p), 'status', '--porcelain', '--untracked-files=no')
+            if status.returncode or status.stdout.strip():
+                continue
+            tracked = set(run('git', '-C', str(p), 'ls-files').stdout.splitlines())
+            fields = [line.strip().split(' = ', 1) for line in info.read_text().splitlines() if ' = ' in line]
+            names = {v for k, v in fields if k == 'pkgname'}
+            version = next((v for k, v in fields if k == 'pkgver'), '')
+            release = next((v for k, v in fields if k == 'pkgrel'), '')
+            downloads = set()
+            verified = {}
+            for k in {k for k, v in fields if k == 'source' or k.startswith('source_')}:
+                group = [v for key, v in fields if key == k]
+                suffix = k[len('source'):]
+                for index, v in enumerate(group):
+                    if not ('https://' in v or 'http://' in v):
+                        continue
+                    name = v.split('::', 1)[0] if '::' in v else Path(urlparse(v).path).name
+                    f = p / name
+                    if not name or '/' in name or '$' in name or not f.is_file() or f.is_symlink() or name in tracked:
+                        continue
+                    for algorithm in ('sha512', 'sha256', 'sha1', 'md5'):
+                        checksums = [value for key, value in fields if key == algorithm + 'sums' + suffix]
+                        if index >= len(checksums) or not re.fullmatch(r'[0-9a-fA-F]+', checksums[index]):
+                            continue
+                        before = identity(f.stat())
+                        with f.open('rb') as stream:
+                            actual = hashlib.file_digest(stream, algorithm).hexdigest()
+                        if actual.casefold() == checksums[index].casefold() and identity(f.stat()) == before:
+                            downloads.add(name); verified[name] = before
+                        break
+            for f in p.iterdir():
+                package = any(f.name.startswith(name + '-' + version + '-' + release + '-') and f.name.endswith('.pkg.tar.zst') for name in names)
+                if f.name not in tracked and f.is_file() and not f.is_symlink() and (package or f.name in downloads):
+                    self.add(f, 'aur', 'build-quota run -- makepkg -s; clean PKGBUILD and .SRCINFO retained', p)
+                    if str(f) in self.roots and f.name in verified:
+                        self.roots[str(f)]['download_identity'] = verified[f.name]
+
+    def trash(self):
+        places = [HOME / '.local/share/Trash']
+        for disk in ('ssd', 'hdd'):
+            target = Path(DISKS[disk])
+            if any(m['path'] == str(target) for m in self.mounts):
+                places += [target / ('.Trash-' + str(os.getuid())), target / '.Trash' / str(os.getuid())]
+        for root in places:
+            for info in (root / 'info').glob('*.trashinfo'):
+                if info.is_symlink() or not info.is_file():
+                    continue
+                data = info.read_text(errors='replace')
+                if not data.startswith('[Trash Info]\n') or '\nPath=' not in data or '\nDeletionDate=' not in data:
+                    continue
+                original = next(line[5:] for line in data.splitlines() if line.startswith('Path='))
+                if protected(unquote(original)):
+                    continue
+                name = info.name[:-10]
+                if name not in ('', '.', '..'):
+                    self.add(root / 'files' / name, 'trash', 'Explicit --trash; paired freedesktop trash metadata', metadata=info)
+
+    def candidates(self):
+        poco = HOME / 'Documents/Poco_F4_munch'
+        starts = [(HOME, 3), (HOME / 'Software Repositories', 5), (HOME / 'Downloads', 7),
+                  (poco / 'module_rebuild/worktrees', 4)]
+        starts += [(p, 2) for p in poco.glob('*/project')]
+        starts += [(p, 2) for p in HOME.glob('*/release-ui/src/android')]
+        if self.disk != 'nvme':
+            starts += [(Path(DISKS[d]), 5) for d in ('ssd', 'hdd') if self.disk in ('all', d)]
+        for p, depth in starts:
+            self.walk_projects(p, depth)
+        self.gradle_home(HOME / '.gradle')
+        self.gradle_home(HOME / '.devcache/gradle')
+        if self.disk in ('all', 'nvme'):
+            self.ccache(HOME / '.cache/ccache')
+            self.ccache(HOME / 'Documents/Poco_F4_munch/Kernels/E404/ccache')
+            self.aur()
+        for disk in ('ssd', 'hdd'):
+            if self.disk in ('all', disk):
+                target = Path(DISKS[disk])
+                if any(m['path'] == str(target) for m in self.mounts):
+                    for p in target.glob('*gradle*'):
+                        self.gradle_home(p)
+        if self.include_trash:
+            self.trash()
+        return list(self.roots.values())
+
+
+def ensure_untracked(candidate):
+    project = candidate.get('project')
+    projects = set(candidate.get('projects', [])) | ({project} if project else set())
+    roots = {candidate['path'], candidate.get('declared_path', candidate['path'])} | set(candidate.get('declared_paths', []))
+    for owner in projects:
+        if not (Path(owner) / '.git').exists():
+            continue
+        tracked = run('git', '-C', owner, 'ls-files', '-z')
+        if tracked.returncode:
+            raise ValueError('Could not verify tracked files')
+        if any(below(str(Path(owner) / name), root) for name in tracked.stdout.split('\0') if name for root in roots):
+            raise ValueError('Contains tracked source or artifacts')
+
+
+def enumerate_candidate(candidate):
+    p = Path(candidate['path']); root_id = identity(p.lstat()); files, directories = [], []
+    if candidate.get('download_identity', root_id) != root_id:
+        raise ValueError('Downloaded source changed during preview')
+    if stat.S_ISLNK(root_id[4]) or p.lstat().st_uid != os.getuid():
+        raise ValueError('Symlink or another owner')
+    if p.is_dir():
+        fd = open_directory(p)
+        try:
+            for directory, ds, names, dfd in os.fwalk('.', follow_symlinks=False, dir_fd=fd):
+                directories.append(directory)
+                for n in list(ds):
+                    s = os.stat(n, dir_fd=dfd, follow_symlinks=False)
+                    if s.st_dev != root_id[0] or stat.S_ISLNK(s.st_mode) or protected(n):
+                        ds.remove(n)
+                for n in names:
+                    s = os.stat(n, dir_fd=dfd, follow_symlinks=False)
+                    if s.st_uid != os.getuid():
+                        raise ValueError('Contains another owner\'s files')
+                    if preserved_file(n) or n.endswith('.lock') or n == 'lock' or not stat.S_ISREG(s.st_mode):
+                        continue
+                    files.append(dict(relative=str(Path(directory) / n), id=identity(s)))
+        finally:
+            os.close(fd)
+    elif p.is_file() and not preserved_file(p.name):
+        files.append(dict(relative=p.name, id=root_id))
+    candidate.update(root_id=root_id, files=files, directories=directories,
+                     allocated=sum(f['id'][-1] for f in files))
+    if candidate.get('project'):
+        project = Path(candidate['project'])
+        recipe = next((project / n for n in ('build.gradle.kts', 'build.gradle', 'PKGBUILD') if (project / n).is_file()), project / 'gradlew')
+        candidate['source'] = str(recipe); candidate['source_sha256'] = digest(recipe)
+        ensure_untracked(candidate)
+    if candidate.get('metadata'):
+        meta = Path(candidate['metadata'])
+        candidate['metadata_id'] = identity(meta.lstat()); candidate['metadata_sha256'] = digest(meta)
+    return candidate
+
+
+def plan_cleanup(disk, trash):
+    discovery = Discovery(disk, trash); candidates = discovery.candidates()
+    plan, skipped, refs = [], discovery.skipped, active_references()
+    for candidate in candidates:
+        try:
+            if reason := busy(candidate, refs):
+                raise ValueError(reason)
+            enumerate_candidate(candidate)
+            if reason := busy(candidate, refs):
+                raise ValueError(reason)
+            if candidate['files']:
+                plan.append(candidate)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+            skipped.append(dict(path=candidate['path'], reason=str(e)))
+    return plan, skipped
+
+
+@contextmanager
+def candidate_locks(candidate):
+    with ExitStack() as stack:
+        project = candidate.get('project')
+        paths = []
+        projects = set(candidate.get('projects', [])) | ({project} if project else set())
+        for owner in projects:
+            p = Path(owner)
+            output = p / '.gradle/cryomgr-build-output.lock'
+            if output.is_file():
+                paths.append(output)
+            for pat in ('.gradle/*/*/*.lock', '.gradle/buildOutputCleanup/*.lock', '.gradle/configuration-cache/*.lock'):
+                paths.extend(p.glob(pat))
+        if candidate.get('scope'):
+            scope = Path(candidate['scope'])
+            paths.extend(scope.glob('caches/*/*.lock'))
+            paths.extend(scope.glob('caches/*/*/*.lock'))
+        root = Path(candidate['path'])
+        if root.is_dir():
+            for d, ds, fs in os.walk(root, followlinks=False):
+                ds[:] = [n for n in ds if not (Path(d) / n).is_symlink()]
+                paths.extend(Path(d) / n for n in fs if n.endswith('.lock') or n == 'lock')
+        for p in set(paths):
+            fd = os.open(p, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+            stack.callback(os.close, fd)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def remove_candidate(candidate, progress=None):
+    progress = progress if progress is not None else dict(files=0, allocated=0)
+    p = Path(candidate['path'])
+    for redirect in candidate.get('redirects', []):
+        if identity(Path(redirect['path']).lstat()) != redirect['id']:
+            raise ValueError('Build directory redirect changed since preview')
+    if candidate.get('redirects') and Path(candidate['declared_path']).resolve(strict=True) != p:
+        raise ValueError('Build directory redirect changed since preview')
+    if filesystem(p)['token'] != candidate['filesystem'] or identity(p.lstat()) != candidate['root_id']:
+        raise ValueError('Filesystem or candidate changed since preview')
+    if candidate.get('source') and digest(Path(candidate['source'])) != candidate['source_sha256']:
+        raise ValueError('Build recipe changed since preview')
+    ensure_untracked(candidate)
+    if candidate.get('metadata'):
+        meta = Path(candidate['metadata'])
+        if identity(meta.lstat()) != candidate['metadata_id'] or digest(meta) != candidate['metadata_sha256']:
+            raise ValueError('Trash metadata changed since preview')
+    if reason := busy(candidate, active_references()):
+        raise ValueError(reason)
+    is_dir = stat.S_ISDIR(candidate['root_id'][4])
+    fd = open_directory(p if is_dir else p.parent)
+    try:
+        for f in candidate['files']:
+            parent = relative_directory(fd, Path(f['relative']).parent)
+            try:
+                s = os.stat(Path(f['relative']).name, dir_fd=parent, follow_symlinks=False)
+                if identity(s) != f['id']:
+                    raise ValueError('File changed since preview: ' + f['relative'])
+            finally:
+                os.close(parent)
+        for f in candidate['files']:
+            parent = relative_directory(fd, Path(f['relative']).parent)
+            try:
+                name = Path(f['relative']).name
+                if identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != f['id']:
+                    raise ValueError('File changed during cleanup: ' + f['relative'])
+                os.unlink(name, dir_fd=parent)
+                progress['files'] += 1; progress['allocated'] += f['id'][-1]
+            finally:
+                os.close(parent)
+        for directory in sorted(candidate['directories'], key=lambda d: len(Path(d).parts), reverse=True):
+            if directory == '.':
+                continue
+            parent = relative_directory(fd, Path(directory).parent)
+            try:
+                try:
+                    os.rmdir(Path(directory).name, dir_fd=parent)
+                except OSError:
+                    pass
+            finally:
+                os.close(parent)
+    finally:
+        os.close(fd)
+    if is_dir:
+        try:
+            p.rmdir()
+        except OSError:
+            pass
+    if candidate.get('metadata') and not p.exists():
+        meta = Path(candidate['metadata'])
+        if identity(meta.lstat()) == candidate['metadata_id'] and digest(meta) == candidate['metadata_sha256']:
+            parent = open_directory(meta.parent)
+            try:
+                if identity(os.stat(meta.name, dir_fd=parent, follow_symlinks=False)) == candidate['metadata_id']:
+                    os.unlink(meta.name, dir_fd=parent)
+            finally:
+                os.close(parent)
+    return len(candidate['files']), candidate['allocated']
+
+
+def execute_cleanup(plan, skipped):
+    run_id = time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8]
+    run_dir = STATE / 'receipts' / run_id
+    run_dir.mkdir(parents=True, mode=0o700)
+    manifest = run_dir / 'plan.json.gz'
+    with gzip.open(manifest, 'wt') as f:
+        json.dump(plan, f, separators=(',', ':'))
+    manifest.chmod(0o600)
+    with manifest.open('rb') as f:
+        os.fsync(f.fileno())
+    report = dict(version=1, started=time.time(), plan=str(manifest), before=disk_status(),
+                  removed=[], skipped=list(skipped), files_removed=0, allocated_removed=0, status='running')
+    receipt = run_dir / 'receipt.json'; write_json(receipt, report)
+    try:
+        with locked(STATE / 'cleanup.lock'):
+            for candidate in plan:
+                progress = dict(files=0, allocated=0)
+                try:
+                    with candidate_locks(candidate), locked(MUTATION_LOCK):
+                        remove_candidate(candidate, progress)
+                except (OSError, ValueError) as e:
+                    report['skipped'].append(dict(path=candidate['path'], reason=str(e)))
+                finally:
+                    report['files_removed'] += progress['files']; report['allocated_removed'] += progress['allocated']
+                    if progress['files']:
+                        report['removed'].append(dict(path=candidate['path'], **progress))
+                    write_json(receipt, report)
+        report['status'] = 'completed'
+    except BaseException:
+        report['status'] = 'interrupted'
+        raise
+    finally:
+        report['after'] = disk_status(); report['completed'] = time.time()
+        write_json(receipt, report)
+    return report, receipt
+
+
+def capacity_level(row, cfg, history, now):
+    if not row['mounted']:
+        return dict(level='offline', eta_minutes=None)
+    free = row['free']; name = row['name']; level = 'ok'; eta = None
+    if free <= cfg[f'critical_{name}_gib'] * GIB or row.get('readonly'):
+        level = 'critical'
+    elif free <= cfg[f'warn_{name}_gib'] * GIB:
+        level = 'warning'
+    samples = [s for s in history if s.get('token') == row['token'] and 60 <= now - s['time'] <= 600]
+    if cfg['forecast'] and samples:
+        old = samples[0]; drop = old['free'] - free
+        if drop >= 256 * 1024 ** 2:
+            eta = free * (now - old['time']) / drop / 60
+            if eta <= 10:
+                level = 'critical'
+            elif eta <= 30 and level == 'ok':
+                level = 'warning'
+    return dict(level=level, eta_minutes=round(eta, 1) if eta is not None else None)
+
+
+def notify(title, body, critical=False):
+    result = run('notify-send', '--app-name=Disk space', '--icon=drive-harddisk',
+                 '--urgency=' + ('critical' if critical else 'normal'), '--expire-time=15000', title, body)
+    return result.returncode == 0
+
+
+def check_capacity(send=False):
+    if send:
+        with locked(STATE / 'alerts.lock'):
+            return _check_capacity(True)
+    return _check_capacity(False)
+
+
+def _check_capacity(send=False):
+    cfg = config(); rows = disk_status(); previous = read_json(STATE / 'alerts.json', {})
+    now = time.time(); updated = dict(previous)
+    for row in rows:
+        name = row['name']; prior = previous.get(name, {}); history = prior.get('history', [])
+        evaluation = capacity_level(row, cfg, history, now); row.update(evaluation)
+        if not row['mounted']:
+            updated.pop(name, None); continue
+        if not cfg[name]:
+            updated.pop(name, None); continue
+        severity = {'ok':0, 'warning':1, 'critical':2}; level = row['level']
+        same_mount = prior.get('token') == row['token']
+        last_alert = prior.get('last_alert', 0) if same_mount else 0
+        last_level = prior.get('alert_level', 'ok') if same_mount else 'ok'
+        due = level != 'ok' and (not last_alert or severity[level] > severity[last_level]
+                                or now - last_alert >= cfg['repeat_minutes'] * 60)
+        if send and cfg['enabled'] and cfg['desktop'] and due:
+            # Re-read the master switch just before delivery.
+            current = config()
+            if current['enabled'] and current['desktop'] and current[name]:
+                body = f"{name.upper()}: {row['free'] / GIB:.1f} GiB available. Run disk-reclaim clean --trash to review cleanup."
+                if row['eta_minutes'] is not None:
+                    body += f" Recent growth could fill it in {row['eta_minutes']:.0f} minutes."
+                try:
+                    if notify('Disk space ' + level, body, level == 'critical'):
+                        last_alert, last_level = now, level
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        if level == 'ok' and row['free'] >= (cfg[f'warn_{name}_gib'] + 1) * GIB:
+            last_alert, last_level = 0, 'ok'
+        history = [s for s in history if s.get('token') == row['token'] and now - s['time'] <= 600]
+        history.append(dict(time=now, free=row['free'], token=row['token']))
+        updated[name] = dict(history=history[-24:], token=row['token'], last_alert=last_alert, alert_level=last_level)
+    if send and cfg['enabled']:
+        STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if config()['enabled']:
+            write_json(STATE / 'alerts.json', updated)
+            write_json(STATE / 'status.json', dict(checked=now, disks=rows))
+    return rows
+
+
+def status():
+    cfg = config()
+    saved = read_json(STATE / 'status.json', {})
+    care = Path('/var/lib/btrfs-care/status')
+    return dict(config=cfg, enabled=cfg['enabled'], timer_active=run('systemctl', '--user', 'is-active', '--quiet', TIMER).returncode == 0,
+                disks=check_capacity(), last_check=saved.get('checked'), btrfs_care=care.read_text() if care.is_file() else '')
+
+
+def control(enabled):
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cfg = config(); cfg['enabled'] = enabled; write_json(CONFIG, cfg)
+    if enabled:
+        result = run('systemctl', '--user', 'enable', '--now', TIMER)
+        if result.returncode:
+            cfg['enabled'] = False; write_json(CONFIG, cfg)
+            raise RuntimeError(result.stderr.strip() or 'Could not enable disk space timer')
+    else:
+        first = run('systemctl', '--user', 'disable', '--now', TIMER)
+        second = run('systemctl', '--user', 'stop', SERVICE)
+        if first.returncode or second.returncode:
+            raise RuntimeError('Monitoring is disarmed; could not stop owned timer/service')
+
+
+def human(size):
+    return f'{size / GIB:.2f} GiB' if size >= GIB else f'{size / 1024 ** 2:.1f} MiB'
+
+
+def print_plan(plan, skipped):
+    print('Recognized caches' + (' and explicitly selected trash' if any(c['kind'] == 'trash' for c in plan) else '') + ':')
+    for c in sorted(plan, key=lambda c: c['allocated'], reverse=True):
+        print(f"  {human(c['allocated']):>12}  {c['path']}")
+    print(f"\n{len(plan)} locations; {sum(len(c['files']) for c in plan)} files; {human(sum(c['allocated'] for c in plan))} allocated.")
+    print('Actual free-space gain can differ because of compression, shared files and concurrent writes.')
+    if skipped:
+        print(f'{len(skipped)} busy, protected or unavailable locations skipped; use --json for details.')
+
+
+def open_terminal(action):
+    helper = str(Path(__file__).resolve())
+    command = [helper, action] + (['--trash'] if action == 'clean' else [])
+    shell = ['bash', '-c', '"$@"; rc=$?; printf "\nPress Enter to close..."; read -r; exit "$rc"', 'disk-reclaim', *command]
+    if shutil.which('kitty'):
+        subprocess.Popen(['kitty', '--title', 'Disk cleanup', *shell], start_new_session=True)
+    elif shutil.which('foot'):
+        subprocess.Popen(['foot', '--title=Disk cleanup', *shell], start_new_session=True)
+    else:
+        raise RuntimeError('Run disk-reclaim ' + action + ' in a terminal')
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', nargs='?', default='preview', choices=['preview', 'clean', 'status', 'check', 'enable', 'disable', 'set', 'open'])
+    parser.add_argument('key', nargs='?'); parser.add_argument('value', nargs='?')
+    parser.add_argument('--disk', choices=['all', *DISKS], default='all')
+    parser.add_argument('--trash', action='store_true', help='also empty recognized user trash; auth/recovery data stays protected')
+    parser.add_argument('--yes', '-y', action='store_true', help='confirm the current cleanup preview without prompting')
+    parser.add_argument('--json', action='store_true'); parser.add_argument('--notify', action='store_true')
+    args = parser.parse_args()
+    try:
+        if args.action in ('preview', 'clean'):
+            if os.geteuid() == 0:
+                raise ValueError('Run as your desktop user, without sudo')
+            plan, skipped = plan_cleanup(args.disk, args.trash)
+            if args.json:
+                print(json.dumps(dict(candidates=plan, skipped=skipped)))
+            else:
+                print_plan(plan, skipped)
+            if args.action == 'clean' and plan:
+                if not args.yes and (not sys.stdin.isatty() or input('Remove these disposable files? [y/N] ').strip().casefold() not in ('y', 'yes')):
+                    print('Nothing removed.'); return
+                report, receipt = execute_cleanup(plan, skipped)
+                print(f"Removed {report['files_removed']} files ({human(report['allocated_removed'])} allocated). Receipt: {receipt}")
+                for row in report['after']:
+                    print(row['name'].upper() + ': ' + (human(row['free']) + ' available' if row['mounted'] else 'not mounted'))
+        elif args.action == 'status':
+            s = status()
+            if args.json:
+                print(json.dumps(s))
+            else:
+                for row in s['disks']:
+                    print(row['name'].upper() + ': ' + (human(row['free']) + ' available — ' + row['level'] if row['mounted'] else 'not mounted'))
+                print('Space alerts: ' + ('on' if s['enabled'] and s['timer_active'] else 'off'))
+                if s['btrfs_care']:
+                    print('\n' + s['btrfs_care'].rstrip())
+                print('\nPreview: disk-reclaim\nReview caches and trash: disk-reclaim clean --trash')
+        elif args.action == 'check':
+            print(json.dumps(check_capacity(args.notify)))
+        elif args.action in ('enable', 'disable'):
+            control(args.action == 'enable')
+        elif args.action == 'set':
+            if args.key not in DEFAULT or args.key == 'enabled' or args.value is None:
+                raise ValueError('Use set KEY VALUE; enabled uses enable/disable')
+            cfg = config()
+            if type(DEFAULT[args.key]) is bool:
+                if args.value not in ('on', 'off', 'true', 'false'):
+                    raise ValueError('Expected on/off')
+                cfg[args.key] = args.value in ('on', 'true')
+            else:
+                cfg[args.key] = int(args.value)
+            validate_config(cfg)
+            write_json(CONFIG, cfg)
+        elif args.action == 'open':
+            if args.key not in ('preview', 'clean'):
+                raise ValueError('Use open preview/clean')
+            open_terminal(args.key)
+    except KeyboardInterrupt:
+        print('\nInterrupted. Partial cleanup receipts are under ' + str(STATE / 'receipts'), file=sys.stderr)
+        return 130
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
+        print('disk-reclaim: ' + str(e), file=sys.stderr); return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

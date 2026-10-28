@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Explicit mpv-only binaural surround control. Never changes EQ, gain or playback."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'mpv/spatial.json'
+RUNTIME = Path(os.environ.get('XDG_RUNTIME_DIR', '/run/user/' + str(os.getuid()))) / 'mpv-spatial'
+UNIT = 'mpv-spatial.service'
+TARGET = 'effect_input.spatial-surround'
+DEVICE = 'pipewire/' + TARGET
+
+def run(args, check=True):
+    return subprocess.run(args, text=True, capture_output=True, check=check, timeout=12)
+
+def config():
+    try:
+        value = json.loads(CONFIG.read_text())
+        if type(value.get('enabled')) is not bool or type(value.get('automatic')) is not bool:
+            raise ValueError('Invalid spatial audio settings')
+        return value
+    except FileNotFoundError:
+        return {'enabled': False, 'automatic': True}
+
+def save(value):
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.spatial-', dir=CONFIG.parent)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(value, f, indent=2);f.write('\n');f.flush();os.fsync(f.fileno())
+        os.replace(name, CONFIG)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+
+def runtime():
+    RUNTIME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = RUNTIME.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError('Spatial audio runtime directory is not private')
+    return RUNTIME
+
+def mpv_identity(pid):
+    root = Path('/proc') / str(pid)
+    try:
+        if root.stat().st_uid != os.getuid() or Path(os.readlink(root / 'exe')).name != 'mpv':
+            return None
+        data = (root / 'stat').read_text()
+        return data[data.rfind(')') + 2:].split()[19]
+    except (OSError, IndexError):
+        return None
+
+class Client:
+    def __init__(self, path, pid):
+        self.path, self.pid, self.birth = str(path), pid, mpv_identity(pid)
+        if self.birth is None: raise RuntimeError('Player identity changed')
+        info = Path(path).lstat()
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+            raise RuntimeError('Not an owner mpv socket')
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.settimeout(1.5)
+        self.sock.connect(self.path)
+        peer, uid, _ = struct.unpack('3i', self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if peer != pid or uid != os.getuid():
+            self.sock.close();raise RuntimeError('Player socket identity mismatch')
+        self.buffer, self.sequence = b'', 0
+
+    def close(self): self.sock.close()
+
+    def command(self, *args):
+        if mpv_identity(self.pid) != self.birth: raise RuntimeError('Player lifetime changed')
+        self.sequence += 1
+        self.sock.sendall((json.dumps({'command': list(args), 'request_id': self.sequence}) + '\n').encode())
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if b'\n' not in self.buffer:
+                chunk = self.sock.recv(65536)
+                if not chunk: raise RuntimeError('Player disconnected')
+                self.buffer += chunk
+            while b'\n' in self.buffer:
+                line, self.buffer = self.buffer.split(b'\n', 1)
+                reply = json.loads(line)
+                if reply.get('request_id') == self.sequence:
+                    if reply.get('error') != 'success': raise RuntimeError(reply.get('error', 'Player command failed'))
+                    return reply.get('data')
+        raise TimeoutError('Player reply timed out')
+
+    def get(self, key, default=None):
+        try: return self.command('get_property', key)
+        except RuntimeError: return default
+
+def clients():
+    candidates = set()
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdigit(): continue
+        pid = int(proc.name)
+        if mpv_identity(pid) is None: continue
+        try:
+            args = (proc / 'cmdline').read_bytes().decode().split('\0')
+            for index, arg in enumerate(args):
+                if arg.startswith('--input-ipc-server='):
+                    candidates.add((arg.split('=', 1)[1], pid))
+                elif arg == '--input-ipc-server' and index + 1 < len(args):
+                    candidates.add((args[index + 1], pid))
+            own = RUNTIME / (str(pid) + '.sock')
+            if own.exists(): candidates.add((str(own), pid))
+        except (OSError, UnicodeError): pass
+    found = []
+    for path, pid in sorted(candidates):
+        try: found.append(Client(path, pid))
+        except (OSError, RuntimeError, ValueError): pass
+    return found
+
+def sink_names():
+    return {row['name'] for row in json.loads(run(['pactl', '-f', 'json', 'list', 'sinks']).stdout)}
+
+def default_sink():
+    return run(['pactl', 'get-default-sink']).stdout.strip()
+
+def active():
+    return run(['systemctl', '--user', 'is-active', UNIT], check=False).returncode == 0
+
+def refresh_players(reason='refresh'):
+    errors = []
+    for client in clients():
+        try:
+            client.command('script-message-to', 'mpv_spatial', 'refresh', reason)
+        except (OSError, RuntimeError) as e: errors.append(f'mpv {client.pid}: {e}')
+        finally: client.close()
+    return errors
+
+def restore_players():
+    errors = []
+    for client in clients():
+        try:
+            client.command('script-message-to', 'mpv_spatial', 'refresh', 'disabled')
+            deadline = time.monotonic() + 2
+            while client.get('audio-device') == DEVICE and time.monotonic() < deadline:
+                time.sleep(.04)
+            if client.get('audio-device') == DEVICE:
+                owned = client.get('user-data/mpv-spatial', {}) or {}
+                previous = owned.get('previous_device', 'auto')
+                if previous == DEVICE: previous = 'auto'
+                client.command('set_property', 'audio-device', previous)
+                if owned.get('previous_channels') and client.get('options/audio-channels') == '7.1,5.1,stereo':
+                    client.command('set_property', 'audio-channels', owned['previous_channels'])
+            if client.get('audio-device') == DEVICE: raise RuntimeError('Spatial route did not release')
+        except (OSError, RuntimeError) as e: errors.append(f'mpv {client.pid}: {e}')
+        finally: client.close()
+    return errors
+
+def clear_sink_users(settings):
+    """Only streams actually using our disappearing sink need a fallback."""
+    sinks = json.loads(run(['pactl', '-f', 'json', 'list', 'sinks']).stdout)
+    spatial = next((s for s in sinks if s['name'] == TARGET), None)
+    if spatial is None: return
+    names = {s['name'] for s in sinks if s['name'] != TARGET}
+    fallback = settings.get('previous_default_sink')
+    if fallback not in names:
+        fallback = default_sink()
+    if fallback not in names:
+        fallback = 'easyeffects_sink' if 'easyeffects_sink' in names else next(iter(sorted(names)), None)
+    if fallback is None: raise RuntimeError('No normal audio output is available')
+    if default_sink() == TARGET: run(['pactl', 'set-default-sink', fallback])
+    inputs = json.loads(run(['pactl', '-f', 'json', 'list', 'sink-inputs']).stdout)
+    for stream in inputs:
+        if stream['sink'] == spatial['index']:
+            run(['pactl', 'move-sink-input', str(stream['index']), fallback])
+
+def set_enabled(value):
+    previous = config();updated = dict(previous, enabled=value)
+    if value:
+        if TARGET not in sink_names(): updated['previous_default_sink'] = default_sink()
+        save(updated)
+        try:
+            run(['systemctl', '--user', 'enable', '--now', UNIT])
+            deadline = time.monotonic() + 3
+            while TARGET not in sink_names() and time.monotonic() < deadline: time.sleep(.1)
+            if TARGET not in sink_names(): raise RuntimeError('Spatial audio output did not become ready')
+            # A manually targeted virtual sink must never become the desktop default.
+            if default_sink() == TARGET:
+                run(['pactl', 'set-default-sink', updated['previous_default_sink']])
+            refresh_players('enabled')
+        except Exception:
+            save(previous)
+            if not previous['enabled']:
+                restore_players();clear_sink_users(updated)
+                run(['systemctl', '--user', 'disable', '--now', UNIT], check=False)
+            raise
+    else:
+        save(updated)
+        errors = restore_players()
+        clear_sink_users(updated)
+        run(['systemctl', '--user', 'disable', '--now', UNIT])
+        if errors: raise RuntimeError('; '.join(errors))
+
+def status():
+    settings = config();running = active();available = TARGET in sink_names()
+    players = []
+    for client in clients():
+        try:
+            state = client.get('user-data/mpv-spatial', {}) or {}
+            players.append({'pid': client.pid, 'spatial': client.get('audio-device') == DEVICE, 'state': state})
+        finally: client.close()
+    message = 'Off — normal stereo output'
+    if settings['enabled']:
+        if not running or not available:
+            message = 'Enabled, but the spatial output is unavailable'
+        elif any(player['spatial'] for player in players):
+            message = 'Spatial processing active in mpv'
+        else:
+            message = 'Ready — waiting for a multichannel mpv track' if settings['automatic'] else 'Ready — press F8 in mpv'
+    return {'enabled': settings['enabled'], 'automatic': settings['automatic'], 'running': running, 'available': available, 'message': message, 'players': players}
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['status', 'enable', 'disable', 'toggle', 'automatic', 'runtime', 'is-enabled'])
+    parser.add_argument('value', nargs='?', choices=['true', 'false'])
+    args = parser.parse_args()
+    if args.command == 'runtime': print(runtime());return
+    if args.command == 'is-enabled': raise SystemExit(0 if config()['enabled'] else 1)
+    if args.command == 'status': print(json.dumps(status()));return
+    with (runtime() / 'control.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.command == 'automatic':
+            if args.value is None: parser.error('automatic requires true or false')
+            save(dict(config(), automatic=args.value == 'true'));refresh_players('automatic')
+        else: set_enabled(not config()['enabled'] if args.command == 'toggle' else args.command == 'enable')
+    print(json.dumps(status()))
+
+if __name__ == '__main__':
+    try: main()
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        print(str(error), file=sys.stderr);raise SystemExit(1)

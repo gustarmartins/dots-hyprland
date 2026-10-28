@@ -57,14 +57,21 @@ Singleton {
     }
     FileView {
         id: hardwareFile
-        path: "/run/focus-mode/hardware-" + (root.state.uid ?? "") + ".json"
+        path: root.state.uid == null ? "" : "/run/focus-mode/hardware-" + root.state.uid + ".json"
+        // This opt-in marker normally does not exist while hardware tuning is off.
+        printErrors: false
         watchChanges: true
+        onPathChanged: root.hardwareEnabled = false
         onFileChanged: reload()
         onLoaded: {
             try { root.hardwareEnabled = JSON.parse(text()).schema === 1; }
             catch (_) { root.hardwareEnabled = false; }
         }
-        onLoadFailed: root.hardwareEnabled = false
+        onLoadFailed: error => {
+            root.hardwareEnabled = false;
+            if (error !== FileViewError.FileNotFound)
+                console.warn("Focus Mode hardware state:", FileViewError.toString(error));
+        }
     }
     Timer { interval: 2000; running: root.enabled; repeat: true; onTriggered: root.now = Date.now() }
 }

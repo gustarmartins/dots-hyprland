@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+import "root:/modules/common/functions/WorkspaceIdentity.js" as WorkspaceIdentity
 import qs.modules.common
 import qs.modules.common.utils
 import qs.modules.common.functions
@@ -84,17 +85,15 @@ PanelWindow {
         ? frozenImage.sourceSize.width / root.screen.width : (hyprlandMonitor?.scale > 0 ? hyprlandMonitor.scale : 1)
     readonly property real monitorOffsetX: hyprlandMonitor?.x ?? root.screen.x
     readonly property real monitorOffsetY: hyprlandMonitor?.y ?? root.screen.y
-    property int activeWorkspaceId: hyprlandMonitor?.activeWorkspace?.id ?? 0
     property string screenshotPath: `${root.screenshotDir}/region-${root.sessionId}-${screen.name}.png`
     readonly property bool draggedAway: mouseArea.moved
     readonly property bool dragging: mouseArea.dragging
     readonly property var points: mouseArea.points
     property var mouseButton: null
     property var imageRegions: []
-    readonly property int specialWorkspaceId: HyprlandData.monitors.find(m => m.name === root.screen.name)?.specialWorkspace?.id ?? 0
+    readonly property var monitorSnapshot: HyprlandData.monitors.find(m => m.name === root.screen.name)
     readonly property list<var> windowRegions: root.windows.filter(w =>
-        w.mapped !== false && !w.hidden && (w.workspace.id === root.activeWorkspaceId || w.pinned ||
-        (root.specialWorkspaceId !== 0 && w.workspace.id === root.specialWorkspaceId))
+        w.mapped !== false && !w.hidden && WorkspaceIdentity.visibleOnMonitor(w, root.monitorSnapshot)
     ).map(window => ({
         at: [window.at[0] - root.monitorOffsetX, window.at[1] - root.monitorOffsetY],
         size: window.size, class: window.class, title: window.title

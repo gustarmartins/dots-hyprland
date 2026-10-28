@@ -32,7 +32,7 @@ for _,kind in ipairs({'pinned','hidden','already-special','no-monitor'}) do
     calls = {}; w=window()
     if kind=='pinned' then w.pinned=true
     elseif kind=='hidden' then w.workspace.visible=false
-    elseif kind=='already-special' then w.workspace.name='special:special'
+    elseif kind=='already-special' then w.workspace.name='special'; w.workspace.addressable_name='special:special'
     else w.monitor=nil end
     module.send(w); assert(#calls == 0, kind)
 end

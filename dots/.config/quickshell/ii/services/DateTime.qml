@@ -13,26 +13,36 @@ Singleton {
     property var clock: SystemClock {
         id: clock
         precision: {
-            if (Config.options.time.secondPrecision || GlobalStates.screenLocked)
+            if (Config.options?.time?.secondPrecision || GlobalStates.screenLocked)
                 return SystemClock.Seconds;
             return SystemClock.Minutes;
         }
     }
-    property string time: Qt.locale().toString(clock.date, Config.options?.time.format ?? "hh:mm")
-    property string shortDate: Qt.locale().toString(clock.date, Config.options?.time.shortDateFormat ?? "dd/MM")
-    property string date: Qt.locale().toString(clock.date, Config.options?.time.dateWithYearFormat ?? "dd/MM/yyyy")
-    property string longDate: Qt.locale().toString(clock.date, Config.options?.time.dateFormat ?? "dddd, dd/MM")
-    property string collapsedCalendarFormat: Qt.locale().toString(clock.date, "dddd, MMMM dd")
+    // The clock can briefly be unavailable while a reload replaces the singleton.
+    function formatted(format) {
+        return clock?.date ? (Qt.locale().toString(clock.date, format) ?? "") : "";
+    }
+    property string time: formatted(Config.options?.time?.format ?? "hh:mm")
+    property string shortDate: formatted(Config.options?.time?.shortDateFormat ?? "dd/MM")
+    property string date: formatted(Config.options?.time?.dateWithYearFormat ?? "dd/MM/yyyy")
+    property string longDate: formatted(Config.options?.time?.dateFormat ?? "dddd, dd/MM")
+    property string collapsedCalendarFormat: formatted("dddd, MMMM dd")
     property string uptime: "0h, 0m"
 
     Timer {
-        interval: 10
+        interval: Config.options?.resources?.updateInterval ?? 3000
         running: true
         repeat: true
-        onTriggered: {
-            fileUptime.reload();
-            const textUptime = fileUptime.text();
+        onTriggered: fileUptime.reload()
+    }
+
+    FileView {
+        id: fileUptime
+        path: "/proc/uptime"
+        onLoaded: {
+            const textUptime = text();
             const uptimeSeconds = Number(textUptime.split(" ")[0] ?? 0);
+            if (!Number.isFinite(uptimeSeconds) || uptimeSeconds < 0) return;
 
             // Convert seconds to days, hours, and minutes
             const days = Math.floor(uptimeSeconds / 86400);
@@ -48,13 +58,6 @@ Singleton {
             if (minutes > 0 || !formatted)
                 formatted += `${formatted ? ", " : ""}${minutes}m`;
             uptime = formatted;
-            interval = Config.options?.resources?.updateInterval ?? 3000;
         }
-    }
-
-    FileView {
-        id: fileUptime
-
-        path: "/proc/uptime"
     }
 }

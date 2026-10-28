@@ -33,6 +33,24 @@ class StartupTests(unittest.TestCase):
     def advance(self, seconds):
         self.elapsed += seconds
 
+    def test_manual_receipt_records_song_and_targets_current_unit(self):
+        import json
+        runtime=self.ns['RUNTIME']
+        (runtime/'music-eq-session.json').write_text(json.dumps({'key':['spotify','spotify:track:A']}))
+        command=Mock(return_value=types.SimpleNamespace(returncode=0))
+        with patch.dict(self.ns, subprocess=types.SimpleNamespace(run=command)):
+            self.api['notify_music_eq_manual']('manual')
+        receipt=json.loads((runtime/'music-eq-manual.json').read_text())
+        self.assertEqual(receipt['key'],['spotify','spotify:track:A'])
+        self.assertEqual(receipt['preset'],'manual')
+        self.assertIn('--signal=SIGUSR1',command.call_args.args[0])
+        self.assertEqual(command.call_args.args[0][-1],'music-eq.service')
+    def test_manual_receipt_without_watcher_is_optional(self):
+        command=Mock()
+        with patch.dict(self.ns, subprocess=types.SimpleNamespace(run=command)):
+            self.api['notify_music_eq_manual']('manual')
+        command.assert_not_called()
+
     def test_late_tray_is_allowed_time_to_register(self):
         def query(*args, **kwargs):
             return types.SimpleNamespace(returncode=0, stdout='b true' if self.elapsed >= 3 else 'b false')

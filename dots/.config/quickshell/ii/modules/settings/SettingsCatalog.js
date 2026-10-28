@@ -8,6 +8,7 @@ var pages = [
     "icon": "palette",
     "description": "Color, animation, GPU effects and typography — one place to shape your desktop."
   },
+  {"id":"storage", "title":"Disk space & cleanup", "icon":"hard_drive", "description":"Available space, early warnings, build caches and trash."},
   {"id":"company", "title":"Company accounts", "icon":"manage_accounts", "description":"PC reconnection alerts, password recovery and private audit history."},
   {
     "id": "home",
@@ -441,6 +442,7 @@ function sections(pageId, query) {
 }
 
 var destinations = [
+    {page:"storage", title:"Disk space alerts & build cleanup", description:"storage disk disks NVMe SSD SATA HDD Btrfs btrfs-stat capacity free space full warning forecast Gradle compiler caches trash cleanup preview master off"},
     {page:"cryod", title:"CryoD desktop integration", description:"memory foreground focus mode cpu priority gpu latency boost visible windows monitor workload protection session bridge master off app application launcher groups freeze freezer allow deny preference consent"},
     {page:"company", title:"PC reconnection alerts", description:"remote Windows PC SSH online reconnect connection monitor polling desktop notification watcher arm stop"},
     {page:"company", title:"Company password reset alerts", description:"Imak Microsoft 365 Entra SSPR password reset recovery registration audit logs notifications master toggle"},
@@ -450,6 +452,8 @@ var destinations = [
     {page:"mail", title:"Mail accounts and smart actions", description:"Thunderbird email notifications 2FA OTP verification codes links add accounts master toggle"},
     {page:"design", title:"Color mode, palette & desktop effects", description:"Matugen Monet Material light dark palette accent saved looks, blur, glow, borders, opacity, transparency, springs, animation, workspace motion and presets"},
     {page:"fonts", title:"Desktop font profiles", description:"fontctl presets, typefaces, font preview, compact 10 pt, system fonts, Kitty fonts"},
+    {page:"audio", title:"Automatic music EQ", description:"James Control Spotify Jukebox song artist genre automatic EasyEffects presets music EQ on off"},
+    {page:"audio", title:"Spatial audio for mpv", description:"Dolby Atmos binaural surround headphones multichannel m4a mpv F8 spatial switch on off"},
     {page:"audio", title:"EasyEffects presets", description:"Equalizer, music, audio processing, output preset and EasyEffects"},
     {page:"wallpaper", title:"Wallpaper discovery", description:"Choose wallpaper, download, discover, offline queue, rotation, restore, saved library"}
 ];

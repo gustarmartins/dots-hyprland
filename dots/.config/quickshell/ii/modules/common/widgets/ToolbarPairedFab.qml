@@ -20,6 +20,7 @@ Item {
         anchors.fill: parent
         sourceComponent: StyledRectangularShadow {
             target: fabWidget
+            anchors.fill: parent
             radius: fabWidget.buttonRadius
         }
     }

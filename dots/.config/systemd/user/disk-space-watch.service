@@ -1,0 +1,16 @@
+[Unit]
+Description=Warn about disk capacity and rapid space consumption
+ConditionPathExists=%h/.config/disk-reclaim/config.json
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/disk-reclaim check --notify
+TimeoutStartSec=20
+UMask=0077
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/disk-reclaim
+RestrictAddressFamilies=AF_UNIX

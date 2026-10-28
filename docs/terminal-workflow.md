@@ -142,6 +142,17 @@ can still take time independently. `--fast` restores the previous sampling rates
 `--low-data` documents the default explicitly. The scripts do not detect whether
 the remote phone is on LTE or Wi-Fi.
 
+Host `vminfo` now displays interval process CPU by default, sampled at each
+dashboard refresh (five seconds, or 0.5 seconds with `--fast`). Press `t` to
+switch between `CPU LIVE` and `CPU AVERAGE`, including in the frozen process
+manager. `--cpu-average` starts with the lifetime average; `--cpu-live` explicitly
+selects the default. In either mode, 100% represents one logical CPU, so a
+multithreaded process can exceed 100%. A new process shows `…` until two samples
+of the same PID/start-time identity are available. Resuming resets the baseline
+so paused time does not dilute the next live reading. `--static` takes a short
+interval sample in live mode. Existing dashboard processes need to be reopened
+to load the updated script.
+
 The tmux status interval is 60 seconds. This only changes the status bar; it is
 not an output cap for running programs. Existing history buffers are local data
 and are not continuously transmitted just because they are large.

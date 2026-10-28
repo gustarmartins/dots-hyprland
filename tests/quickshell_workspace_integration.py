@@ -108,7 +108,7 @@ ShellRoot {
     count:p.widget.testModel.shownCount, occupied:p.widget.testModel.occupied,
     biggest:p.widget.testModel.biggestWindow.map(w=>w?.class ?? ""),
     fake:p.widget.testModel.fakeWorkspace, special:p.widget.testModel.specialWorkspaceActive,
-    specialName:p.widget.testModel.specialWorkspaceName, group:p.widget.testModel.group,
+    specialName:p.widget.testModel.specialWorkspaceName, specialObject:p.widget.testModel.specialWorkspace, group:p.widget.testModel.group,
     ids:p.widget.testModel.occupied.map((_,i)=>p.widget.testModel.getWorkspaceIdAt(i)),
     width:p.widget.width,height:p.widget.height,padding:p.widget.widgetPadding,
     index:p.widget.workspaceIndexInGroup,hover:p.widget.hoverIndex,vertical:p.widget.vertical}))}); }
@@ -124,7 +124,7 @@ ShellRoot {
     env.update(WAYLAND_DISPLAY='test-parent', QT_QPA_PLATFORM='wayland')
     config = OUT / 'hyprland.lua'
     config.write_text('hl.monitor({output="",mode="1280x720@60",position="auto",scale=1})\n'
-                      'hl.config({animations={enabled=false},misc={disable_hyprland_logo=true,disable_splash_rendering=true},input={follow_mouse=0}})\n')
+                      'hl.config({debug={disable_logs=false},animations={enabled=false},misc={disable_hyprland_logo=true,disable_splash_rendering=true},input={follow_mouse=0}})\n')
     launch(['Hyprland', '--config', str(config)], 'hyprland')
     socket = until(lambda: next((RUNTIME / 'hypr').glob('*/.socket.sock'), None))
     env['HYPRLAND_INSTANCE_SIGNATURE'] = socket.parent.name
@@ -157,7 +157,12 @@ ShellRoot {
     call('selectHovered', str(second))
     until(lambda: any(p['active'] == 6 for p in state()['panels']))
     call('special', str(second))
-    until(lambda: any(p['special'] and p['specialName'] == 'special' for p in state()['panels']))
+    try:
+        until(lambda: any(p['special'] and p['specialName'] == 'special' for p in state()['panels']))
+    except AssertionError:
+        (OUT / 'special-state.json').write_text(json.dumps(state(), indent=2))
+        (OUT / 'special-monitors.json').write_text(ctl('-j', 'monitors'))
+        raise
     call('special', str(second))
     until(lambda: all(not p['special'] for p in state()['panels']))
     call('configure', '3', 'false')

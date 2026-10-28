@@ -10,7 +10,7 @@ local module = {}
 local function eligible(w)
     return w and w.mapped and w.floating and not w.hidden and not w.pinned
         and w.fullscreen == 0 and w.fullscreen_client == 0
-        and w.workspace and w.workspace.id > 0 and w.monitor
+        and w.workspace and type(w.workspace.id) == "number" and w.workspace.id > 0 and w.monitor
 end
 
 function module.reconcile()

@@ -5,7 +5,7 @@ function M.send(window)
     if not window or not window.workspace or not window.monitor or window.pinned then
         return
     end
-    if window.workspace.name == "special:special" then
+    if (window.workspace.addressable_name or window.workspace.name) == "special:special" then
         return
     end
     -- Reject a stale focused window on an invisible workspace.

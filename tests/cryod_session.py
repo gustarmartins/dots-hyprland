@@ -15,11 +15,12 @@ source = repo.parent/'cryoManager/native/desktop'
 with tempfile.TemporaryDirectory(prefix='cryod-qml-session-') as directory:
     root = Path(directory)
     shell = root/'shell'
-    for name in ('services', 'modules/common'):
+    for name in ('services', 'modules/common/functions'):
         (shell/name).mkdir(parents=True)
     for name in ('runtime', 'cache', 'home'):
         (root/name).mkdir(mode=0o700)
     shutil.copy2(repo/'dots/.config/quickshell/ii/services/CryoDSession.qml', shell/'services/CryoDSession.qml')
+    shutil.copy2(repo/'dots/.config/quickshell/ii/modules/common/functions/WorkspaceIdentity.js', shell/'modules/common/functions/WorkspaceIdentity.js')
     (shell/'modules/common/Config.qml').write_text('''pragma Singleton
 import Quickshell
 import Quickshell.Io

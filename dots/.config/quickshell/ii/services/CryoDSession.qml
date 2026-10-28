@@ -1,5 +1,6 @@
 pragma Singleton
 pragma ComponentBehavior: Bound
+import "root:/modules/common/functions/WorkspaceIdentity.js" as WorkspaceIdentity
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -56,7 +57,7 @@ Singleton {
                 monitor: win.monitor, workspace: workspace,
                 focused: active.length > 0 && normalize(active) === normalize(win.address),
                 visible: win.mapped !== false && win.hidden !== true &&
-                    (win.pinned === true || monitor?.activeWorkspace?.id === workspace || monitor?.specialWorkspace?.id === workspace),
+                    WorkspaceIdentity.visibleOnMonitor(win, monitor),
                 fullscreen: (win.fullscreen ?? 0) > 0 || (win.fullscreenClient ?? 0) > 0};
         });
         return {enabled:true, session:Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE"),

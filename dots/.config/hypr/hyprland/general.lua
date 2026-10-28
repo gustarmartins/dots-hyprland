@@ -87,7 +87,7 @@ hl.config({
             enabled = true,
             range = 50,
             offset = {0, 4},
-            render_power = 10,
+            render_power = 4,
             color = "rgba(00000027)"
 
         },

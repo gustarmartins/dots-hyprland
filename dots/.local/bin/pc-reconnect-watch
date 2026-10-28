@@ -53,7 +53,7 @@ def probe(alias):
 def notify(name, test=False):
     title='PC reconnection alert — TEST' if test else name+' is reachable'
     body='Notification delivery test; this is not a reconnection.' if test else 'Background SSH access is working. The connected-idle power check is first, then the separate desktop setup.'
-    p=subprocess.run(['notify-send','--app-name=PC reconnection','--icon=network-transmit-receive',
+    p=subprocess.run(['notify-send','--app-name=PC reconnection','--icon=network-wired',
                       '--expire-time='+('12000' if test else '0'),title,html.escape(body)],capture_output=True,text=True,timeout=8)
     return p.returncode==0
 

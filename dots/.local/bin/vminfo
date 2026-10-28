@@ -7,6 +7,7 @@ continuously updating TUI that adapts to terminal size.
 Keys:
   m      Freeze the process snapshot and enter/leave manager mode
   1-4    Switch process view (RSS / CPU / Swap / Total)
+  t      Toggle live / lifetime-average process CPU
   +/-    Show more / fewer processes
   v      Cycle All / User / System processes
   f      Force-swap (evict) selected PIDs/names into swap
@@ -917,6 +918,45 @@ def _display_comm(pid, comm):
     return 'ff:content'
 
 
+class ProcessCpuSampler:
+    """Interval CPU, keyed by PID and birth time; 100% is one logical CPU."""
+
+    def __init__(self):
+        self.previous = {}
+
+    def reset(self):
+        self.previous.clear()
+
+    def sample(self, processes):
+        current = {}
+        for proc in processes:
+            proc['pcpu_live'] = None
+            ticks, sampled_at = proc.get('cpu_ticks'), proc.get('cpu_sample_time')
+            if proc.get('start') is None or ticks is None or sampled_at is None:
+                continue
+            identity = (str(proc['pid']), proc['start'])
+            previous = self.previous.get(identity)
+            if previous is not None:
+                old_ticks, old_time = previous
+                if sampled_at > old_time and ticks >= old_ticks:
+                    proc['pcpu_live'] = (ticks - old_ticks) / _CLK_TCK / (sampled_at - old_time) * 100
+            current[identity] = (ticks, sampled_at)
+        self.previous = current
+
+
+_process_cpu_sampler = ProcessCpuSampler()
+_cpu_mode = 'live'
+
+
+def apply_cpu_mode(processes):
+    for proc in processes:
+        proc['pcpu'] = proc.get('pcpu_live' if _cpu_mode == 'live' else 'pcpu_average')
+
+
+def format_process_cpu(value):
+    return '…' if value is None else f'{value:.1f}%'
+
+
 def get_enriched_processes(limit=10):
     """Collect rich per-process data by reading ps numeric fields and /proc.
 
@@ -1000,6 +1040,8 @@ def get_enriched_processes(limit=10):
 
         # Cumulative CPU time (utime + stime from /proc/pid/stat)
         cputime_s = 0.0
+        cpu_ticks = None
+        cpu_sample_time = None
         start = None
         try:
             stat_raw = _read_proc_field(pid, 'stat')
@@ -1014,7 +1056,9 @@ def get_enriched_processes(limit=10):
                 # After splitting past comm: index 11=utime, 12=stime
                 utime = int(after_comm[11])
                 stime = int(after_comm[12])
-                cputime_s = (utime + stime) / _CLK_TCK
+                cpu_ticks = utime + stime
+                cpu_sample_time = time.monotonic()
+                cputime_s = cpu_ticks / _CLK_TCK
         except Exception:
             pass
 
@@ -1030,6 +1074,9 @@ def get_enriched_processes(limit=10):
             'rss_file': rss_file,
             'rss_shmem': rss_shmem,
             'pcpu': pcpu,
+            'pcpu_average': pcpu,
+            'cpu_ticks': cpu_ticks,
+            'cpu_sample_time': cpu_sample_time,
             'pmem': pmem,
             'state': state,
             'nice': nice,
@@ -1044,6 +1091,8 @@ def get_enriched_processes(limit=10):
             'owned': uid == os.getuid(),
         })
 
+    _process_cpu_sampler.sample(processes)
+    apply_cpu_mode(processes)
     return processes
 
 
@@ -1113,6 +1162,8 @@ VIEW_MODES = [
 def footer_rows(width, count, filter_label='Filter', android=False, lite=False):
     controls = [('q', 'quit', DIM), ('1-2' if lite else '1-4', 'view', DIM),
                 ('v', filter_label, DIM), ('+/-', count, DIM)]
+    if not android:
+        controls += [('t', 'CPU ' + _cpu_mode, BCYAN)]
     if not lite:
         controls += [('f', 'swap', BMAGENTA), ('u', 'unswap', BGREEN),
                      ('k', 'sig', BRED), ('r', 'recomp', BMAGENTA), ('w', 'wb', BCYAN)]
@@ -1144,6 +1195,7 @@ def manager_footer_rows(manager, width, count, filter_label):
         ('a', 'all matches', DIM), ('b', 'visible', BYELLOW),
         ('c', 'clear', DIM), ('/', 'search', DIM),
         ('i', 'inspect', BCYAN), ('1-4', 'view', DIM), ('v', filter_label, DIM),
+        ('t', 'CPU ' + _cpu_mode, BCYAN),
         ('+/-', count, DIM), ('f', 'swap', BMAGENTA), ('u', 'unswap', BGREEN),
         ('x', 'signal', BRED), ('m/Esc', 'exit', DIM),
     ], width)
@@ -1519,7 +1571,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
             tabs.append(f"{BOLD}{vm['color']}[{vm['key']}] {vm['label']}{RESET}")
         else:
             tabs.append(f"{DIM}[{vm['key']}]{RESET}")
-    emit(f" {' '.join(tabs)}")
+    emit(f" {' '.join(tabs)}  {DIM}CPU {_cpu_mode.upper()}{RESET}")
     emit(f" {CYAN}{'─' * max(1, tw - 2)}{RESET}")
 
     sort_key = view['sort']
@@ -1555,7 +1607,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
         sort_label = 'TOTAL' if sort_key == 'total_mem' else sort_key.upper()
         emit(f"{header_prefix}{DIM}{'PID':<8}{'CMD':<{command_width}}{sort_label:>10}{RESET}")
         for index, p in enumerate(display_procs):
-            if sort_key == 'pcpu': val = f"{p['pcpu']:.1f}%"
+            if sort_key == 'pcpu': val = format_process_cpu(p['pcpu'])
             elif sort_key == 'swap': val = to_human(p['swap'])
             elif sort_key == 'total_mem': val = to_human(p['total_mem'])
             else: val = to_human(p['rss'])
@@ -1567,16 +1619,19 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
         # before optional CPU/thread columns in a cramped pane.
         fixed_width = 7 + 8 + 8 + 4 + 4 + 7  # PID, RSS, SWAP, ST, OOM, AGE
         command_width = max(8, tw - prefix_width - fixed_width - 1)
+        secondary_label = 'CPU%' if sort_key == 'pcpu' else 'SWAP'
         emit(f"{header_prefix}{DIM}{'PID':<7}{'COMMAND':<{command_width}}"
-             f"{'RSS':>8}{'SWAP':>8}{'ST':>4}{'OOM':>4}{'UP':>7}{RESET}")
+             f"{'RSS':>8}{secondary_label:>8}{'ST':>4}{'OOM':>4}{'UP':>7}{RESET}")
         for index, p in enumerate(display_procs):
             oom = p['oom_score']
             oom_c = BRED if oom > 800 else (BYELLOW if oom > 400 else GRAY)
             swap_c = BMAGENTA if p['swap'] > 0 else DIM
+            secondary = format_process_cpu(p['pcpu']) if sort_key == 'pcpu' else to_human(p['swap'])
+            secondary_color = BWHITE if sort_key == 'pcpu' else swap_c
             emit(f"{row_prefix(p, index)}{CYAN}{p['pid']:<7}{RESET}"
                  f"{command_cell(p['comm'], command_width)}"
                  f"{BWHITE}{to_human(p['rss']):>8}{RESET}"
-                 f"{swap_c}{to_human(p['swap']):>8}{RESET}"
+                 f"{secondary_color}{secondary:>8}{RESET}"
                  f" {fmt_state(p['state'])}"
                  f"{oom_c}{oom:>4}{RESET}"
                  f"{DIM}{fmt_duration(p['elapsed']):>7}{RESET}")
@@ -1596,7 +1651,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                  f"{command_cell(p['comm'], command_width)}"
                  f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
                  f"{swap_c}{to_human(p['swap']):>10}{RESET}"
-                 f"{BWHITE}{p['pcpu']:>6.1f}{RESET}%"
+                 f"{BWHITE}{format_process_cpu(p['pcpu']):>7}{RESET}"
                  f" {fmt_state(p['state'])}"
                  f" {oom_c}{oom:>4}{RESET}"
                  f"{DIM}{fmt_duration(p['elapsed']):>8}{RESET}")
@@ -1621,7 +1676,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                  f"{command_cell(p['comm'], command_width)}"
                  f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
                  f"{swap_c}{to_human(p['swap']):>10}{RESET}"
-                 f"{BWHITE}{p['pcpu']:>6.1f}{RESET}%"
+                 f"{BWHITE}{format_process_cpu(p['pcpu']):>7}{RESET}"
                  f"{DIM}{p['pmem']:>6.1f}{RESET}%"
                  f"{DIM}{p['threads']:>5}{RESET}"
                  f" {fmt_state(p['state'])}"
@@ -1878,7 +1933,7 @@ class RawTerminal:
 
 def sort_processes(processes, view_idx):
     key = VIEW_MODES[view_idx]['sort']
-    return sorted(processes, key=lambda p: p.get(key, 0), reverse=True)
+    return sorted(processes, key=lambda p: p.get(key) if p.get(key) is not None else -1, reverse=True)
 
 
 def ordered_processes(processes, view_idx, proc_filter=0, query=''):
@@ -2410,12 +2465,16 @@ class ProcessManager:
 def print_usage():
     print('''vminfo - Desktop memory and process dashboard
 
-Usage: vminfo [--static] [--low-data | --fast]
+Usage: vminfo [--static] [--low-data | --fast] [--cpu-live | --cpu-average]
 Default: 5-second samples, changed rows only; --fast: 0.5-second samples.
+Process CPU defaults to live interval usage; 100% = one logical CPU.
+--cpu-average shows the lifetime average. An unsampled process displays ….
+--static takes a short interval sample in live mode.
 
 Dashboard:
   m             Freeze the process snapshot and enter manager mode
   1-4           Sort by RSS / CPU / Swap / RSS + Swap
+  t             Toggle live / lifetime-average process CPU (also in manager)
   v             Cycle All / User / System processes
   +/-           Show more / fewer process rows
   f / u / k     Choose processes to force-swap / unswap / signal
@@ -2452,19 +2511,28 @@ and unswap helpers retain their warnings, pressure checks, and readback.''')
 # ── Main ──────────────────────────────────────────────────────────────
 
 def main():
+    global _cpu_mode
     if sys.argv[1:2] == ['--_signal']:
         raise SystemExit(run_guarded_signal_cli(sys.argv[1:]))
     low_data = '--fast' not in sys.argv
     if '--help' in sys.argv or '-h' in sys.argv:
         print_usage()
         return
+    if '--cpu-live' in sys.argv and '--cpu-average' in sys.argv:
+        raise SystemExit('Choose only one of --cpu-live or --cpu-average.')
+    _cpu_mode = 'average' if '--cpu-average' in sys.argv else 'live'
     # Static / non-interactive mode
     if not sys.stdout.isatty() or '--static' in sys.argv or '-s' in sys.argv:
         mem = get_meminfo()
         psi = get_psi()
         zr = get_zram_stats()
         procs = get_enriched_processes(10)
-        cpu_pct = 0.0
+        cpu_pct = None
+        if _cpu_mode == 'live':
+            prev_cpu = get_cpu_times()
+            time.sleep(0.25)
+            procs = get_enriched_processes(10)
+            cpu_pct = calc_cpu_pct(prev_cpu, get_cpu_times())
         temps = get_temps()
         la = get_loadavg()
         up = get_uptime()
@@ -2512,7 +2580,7 @@ def main():
 
     tick_count = 0
     sample_interval = 5.0 if low_data else 0.5
-    next_sample_at = 0.0
+    next_sample_at = time.monotonic() + min(0.5, sample_interval)
     renderer = DashboardRenderer()
 
     with RawTerminal() as term:
@@ -2524,6 +2592,12 @@ def main():
                     if ch in ('q', 'Q'):
                         quit_requested = True
                         break
+                    if ch in ('t', 'T'):
+                        _cpu_mode = 'average' if _cpu_mode == 'live' else 'live'
+                        apply_cpu_mode(processes)
+                        if manager.active:
+                            apply_cpu_mode(manager.processes)
+                        continue
                     if manager.active:
                         if ch in ('+', '=', '-', '_'):
                             auto_proc_limit = False
@@ -2532,6 +2606,9 @@ def main():
                         processes = manager.processes
                         if not manager.active:
                             paused = manager.was_paused
+                            if not paused:
+                                _process_cpu_sampler.reset()
+                                tick_count = 0
                             next_sample_at = 0.0
                         continue
                     if ch in ('m', 'M'):
@@ -2568,6 +2645,10 @@ def main():
                         run_zram_action('writeback', term)
                     elif ch == ' ':
                         paused = not paused
+                        if not paused:
+                            _process_cpu_sampler.reset()
+                            tick_count = 0
+                            next_sample_at = 0.0
 
                 if quit_requested:
                     break
@@ -2592,8 +2673,8 @@ def main():
                     if tick_count % 10 == 0:
                         temps = get_temps()
 
-                    # Processes (slightly less often to reduce load)
-                    if tick_count % 2 == 0 or resized[0]:
+                    # Live process CPU uses the same cadence as the dashboard.
+                    if _cpu_mode == 'live' or tick_count % 2 == 0 or resized[0]:
                         processes = get_enriched_processes(50)
 
                     avail = mem.get('MemAvailable', 0)

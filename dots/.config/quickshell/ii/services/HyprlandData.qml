@@ -1,6 +1,7 @@
 pragma Singleton
 pragma ComponentBehavior: Bound
 
+import "root:/modules/common/functions/WorkspaceIdentity.js" as WorkspaceIdentity
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -39,7 +40,9 @@ Singleton {
         .filter(mon => mon && mon.lastIpcObject.name && mon.lastIpcObject.width > 0)
         .map(mon => Object.assign({}, mon.lastIpcObject, {
             focused: mon.focused,
-            activeWorkspace: {id: mon.activeWorkspace?.id ?? -1, name: mon.activeWorkspace?.name ?? ""},
+            activeWorkspace: Object.assign({}, mon.lastIpcObject.activeWorkspace, {
+                id: mon.activeWorkspace?.id ?? -1, name: mon.activeWorkspace?.name ?? "",
+            }),
         }));
     property var layers: ({})
     property double lastEventAt: 0
@@ -57,7 +60,7 @@ Singleton {
     }
     readonly property bool monitorsReady: monitors.length > 0 && monitors.length === Hyprland.monitors.values.length
     readonly property bool workspacesReady: Hyprland.workspaces.values.length > 0
-        && Hyprland.workspaces.values.every(ws => ws && ws.lastIpcObject.id !== undefined)
+        && Hyprland.workspaces.values.every(ws => ws && WorkspaceIdentity.address(ws.lastIpcObject) !== "")
 
     // Convenient stuff
 
