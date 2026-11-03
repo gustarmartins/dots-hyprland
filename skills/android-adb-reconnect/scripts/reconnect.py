@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Explicit, bounded ADB reconnect; one attempt by default, no device shell."""
-import argparse,fcntl,hashlib,json,math,os,re,subprocess,tempfile,time
+import argparse,fcntl,hashlib,json,math,os,re,subprocess,sys,tempfile,time
 from pathlib import Path
 
 def command(adb,args,deadline):
@@ -50,6 +50,15 @@ def main():
     if not a.now:p.error('on-demand policy requires --now; no connection attempted')
     if not 1<=a.attempts<=15 or not math.isfinite(a.interval) or not math.isfinite(a.deadline) or a.interval<0 or a.deadline<=0:p.error('invalid retry limits')
     if any(not re.fullmatch(r'[A-Za-z0-9_.-]+:[0-9]{1,5}',e) for e in endpoints):p.error('use explicit hostname or IPv4:port endpoints')
+    if not os.environ.get('ANDROID_ADB_SCOPE_SOCKET'):
+        seconds=6+a.attempts*(2+3*len(endpoints))*a.deadline+(a.attempts-1)*a.interval
+        if seconds>3600:p.error('retry operation exceeds the one-hour maximum')
+        tool=os.environ.get('ANDROID_ADB_DEMAND_TOOL',str(Path.home()/'.local/bin/android-adb-on-demand'))
+        argv=[tool,'run','--now','--no-connect','--max-seconds',str(seconds)]
+        for endpoint in endpoints:argv+=['--endpoint',endpoint]
+        return subprocess.call([*argv,'--',sys.executable,str(Path(__file__).resolve()),*sys.argv[1:]])
+    if os.environ.get('ADB_SERVER_SOCKET')!=os.environ['ANDROID_ADB_SCOPE_SOCKET']:
+        p.error('private ADB scope routing changed; refusing shared-server recovery')
     root=Path(os.environ.get('XDG_RUNTIME_DIR',tempfile.gettempdir()))/f'adb-reconnect-{os.getuid()}'
     root.mkdir(mode=0o700,exist_ok=True)
     key=hashlib.sha256('\n'.join(endpoints).encode()).hexdigest()[:20]

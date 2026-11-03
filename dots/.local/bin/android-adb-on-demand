@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Saved Android endpoints and explicit one-shot connections; no discovery loop."""
+"""Android diagnostics only for the current bounded operation; no idle connections."""
 import argparse
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 
 DEVICES = {
@@ -53,22 +53,34 @@ def aliases():
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    body = []
+    if "--" in argv:
+        split = argv.index("--")
+        argv, body = argv[:split], argv[split + 1:]
     if argv and argv[0] in {"ls", "scan", "c", "w"}:
         argv[0] = {"ls": "list", "scan": "list", "c": "connect", "w": "watch"}[argv[0]]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", nargs="?", default="status", choices=("status", "list", "connect", "watch"))
+    parser.add_argument("command", nargs="?", default="status", choices=("status", "list", "connect", "run", "watch"))
     parser.add_argument("--now", action="store_true", help="Perform this explicit connection request now, once")
     parser.add_argument("--endpoint", action="append", default=[])
     parser.add_argument("--device", action="append", default=[])
     parser.add_argument("--all", action="store_true", help="Explicitly select all saved endpoints")
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument("--max-seconds", type=float, default=60.0, help="Hard limit for this operation, at most 3600 seconds")
+    parser.add_argument("--no-connect", action="store_true", help="Let the explicit operation establish its selected connection")
     args = parser.parse_args(argv)
     if args.command == "watch":
         parser.error("Unattended ADB watching is disabled. Use connect --now for a current request.")
-    if not 0 < args.timeout <= 30:
+    if not math.isfinite(args.timeout) or not 0 < args.timeout <= 30:
         parser.error("timeout must be greater than zero and at most 30 seconds")
     if any(not valid_endpoint(value) for value in args.endpoint):
         parser.error("Use an explicit hostname:port, IPv4:port or [IPv6]:port endpoint")
+    if not math.isfinite(args.max_seconds) or not 0 < args.max_seconds <= 3600:
+        parser.error("max-seconds must be finite, greater than zero and at most 3600")
+    if args.command == "run" and not body:
+        parser.error("run requires -- COMMAND [ARGS...]")
+    if args.command != "run" and (body or args.no_connect):
+        parser.error("A command or --no-connect requires run")
     records = saved_endpoints()
     if args.command in ("status", "list"):
         print(json.dumps({"policy": "on-demand", "network_requests": 0, "saved_endpoints": records}, indent=2))
@@ -86,24 +98,16 @@ def main(argv=None):
     selected = list(dict.fromkeys(selected))
     if not selected:
         parser.error("Select a saved --device, --endpoint, or --all; automatic network scans are disabled")
-    adb = os.environ.get("ANDROID_ADB_BINARY", "adb")
-    failed = False
-    for endpoint in selected:
-        try:
-            result = subprocess.run([adb, "connect", endpoint], capture_output=True, text=True, timeout=args.timeout,
-                                    env={**os.environ, "ADB_MDNS_AUTO_CONNECT": "0"})
-            message = result.stdout.strip()
-            accepted = result.returncode == 0 and message in (f"connected to {endpoint}", f"already connected to {endpoint}")
-            print(json.dumps({"endpoint": endpoint, "transport_connected": accepted, "returncode": result.returncode,
-                              "message": message, "stderr": result.stderr.strip(), "device_identity_verified": False}))
-            failed |= not accepted
-        except subprocess.TimeoutExpired:
-            print(json.dumps({"endpoint": endpoint, "transport_connected": False, "timeout": True}))
-            failed = True
-        except OSError as error:
-            print(str(error), file=sys.stderr)
-            return 1
-    return 1 if failed else 0
+    library = Path(__file__).resolve().parent.parent / "lib/android-on-demand"
+    sys.path.insert(0, str(library))
+    try:
+        from adb_scope import execute
+        seconds = args.max_seconds if args.command == "run" else min(args.max_seconds, 6 + args.timeout * len(selected))
+        return execute(selected, seconds, args.timeout, body, not args.no_connect)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
 
 
 if __name__ == "__main__":
