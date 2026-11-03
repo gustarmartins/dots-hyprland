@@ -1,0 +1,4 @@
+interface:
+  display_name: "Android on demand"
+  short_description: "Explicit Android diagnostics without idle polling"
+  default_prompt: "Use $android-on-demand to inspect the selected Android device only for the current task."

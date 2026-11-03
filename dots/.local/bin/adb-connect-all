@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# A deliberate one-shot command. No detached workers or shared-server restart.
+set -euo pipefail
+args=(connect --now --all)
+while (($#)); do
+    case "$1" in
+        -a|--async) echo 'Background ADB batches are disabled; run the command in the foreground.' >&2; exit 2 ;;
+        -n|--no-kill|--now) shift ;;
+        -t|--timeout) (($# >= 2)) || exit 2; args+=(--timeout "$2"); shift 2 ;;
+        -h|--help) echo 'Usage: adb-connect-all [--timeout SECONDS] [HOST:PORT ...]'; exit 0 ;;
+        *:*) args+=(--endpoint "$1"); shift ;;
+        *) echo "Unknown option: $1" >&2; exit 2 ;;
+    esac
+done
+exec "${ANDROID_ADB_DEMAND_TOOL:-${HOME}/.local/bin/android-adb-on-demand}" "${args[@]}"

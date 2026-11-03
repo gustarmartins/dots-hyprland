@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec "${ANDROID_ADB_DEMAND_TOOL:-${HOME}/.local/bin/android-adb-on-demand}" "$@"
