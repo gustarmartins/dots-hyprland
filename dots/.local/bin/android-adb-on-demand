@@ -51,6 +51,30 @@ def aliases():
     return {alias: key for key, (_, values) in DEVICES.items() for alias in values}
 
 
+def route_order(endpoint):
+    host = endpoint.rsplit(":", 1)[0].strip("[]")
+    try:
+        address = ipaddress.ip_address(host)
+        lan = any(address in ipaddress.ip_network(net) for net in
+                  ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+    except ValueError:
+        lan = False
+    return 0 if lan else 1
+
+
+def select_routes(records, endpoints, wanted, all_devices):
+    groups = [[endpoint] for endpoint in dict.fromkeys(endpoints)]
+    keys = list(dict.fromkeys(row["device"] for row in records
+                            if all_devices or row["device"] in wanted))
+    for key in keys:
+        routes = list(dict.fromkeys(row["endpoint"] for row in records if row["device"] == key))
+        if key in DEVICES:
+            groups.append(sorted(routes, key=route_order))
+        else:
+            groups.extend([endpoint] for endpoint in routes)
+    return list(dict.fromkeys(endpoint for group in groups for endpoint in group)), groups
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     body = []
@@ -93,9 +117,7 @@ def main(argv=None):
         if value.lower() not in names:
             parser.error(f"Unknown device alias: {value}; use --endpoint for a specific address")
         wanted.add(names[value.lower()])
-    selected = list(args.endpoint)
-    selected.extend(row["endpoint"] for row in records if args.all or row["device"] in wanted)
-    selected = list(dict.fromkeys(selected))
+    selected, route_groups = select_routes(records, args.endpoint, wanted, args.all)
     if not selected:
         parser.error("Select a saved --device, --endpoint, or --all; automatic network scans are disabled")
     library = Path(__file__).resolve().parent.parent / "lib/android-on-demand"
@@ -103,7 +125,8 @@ def main(argv=None):
     try:
         from adb_scope import execute
         seconds = args.max_seconds if args.command == "run" else min(args.max_seconds, 6 + args.timeout * len(selected))
-        return execute(selected, seconds, args.timeout, body, not args.no_connect)
+        return execute(selected, seconds, args.timeout, body, not args.no_connect,
+                       route_groups=route_groups)
     except (OSError, RuntimeError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 1

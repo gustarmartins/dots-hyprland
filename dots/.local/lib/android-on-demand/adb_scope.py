@@ -125,13 +125,22 @@ def check_owner(owner_fd, deadline):
         raise ScopeStopped(124)
 
 
-def run_child(argv, env, owner_fd, deadline, capture=False):
+def run_child(argv, env, owner_fd, deadline, capture=False, soft_timeout=False):
     """Use pidfds, never kill a recycled PID/process group. systemd owns cleanup."""
     check_owner(owner_fd, deadline)
     process = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE if capture else None,
                                stderr=subprocess.PIPE if capture else None, text=True)
     with os.fdopen(os.pidfd_open(process.pid), "rb", buffering=0) as child_fd:
         ready, _, _ = select.select([owner_fd, child_fd], [], [], max(0, deadline - time.monotonic()))
+        if soft_timeout and owner_fd not in ready and child_fd not in ready:
+            # Only a failed route's owned client is retired; the private server
+            # remains available for the next explicitly saved route.
+            try:
+                signal.pidfd_send_signal(child_fd.fileno(), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate(timeout=1)
+            return subprocess.CompletedProcess(argv, 124, stdout or "", (stderr or "") + "Bounded connection timed out")
         check_owner(owner_fd, deadline)
         if child_fd not in ready:
             raise ScopeStopped(124)
@@ -201,16 +210,27 @@ def worker(directory):
             raise RuntimeError("Private ADB server did not become ready")
         failed = False
         if config["connect_first"]:
-            for endpoint in config["endpoints"]:
-                result = run_child([str(shim), "connect", endpoint], env, owner_fd,
-                                   min(deadline, time.monotonic() + config["connect_timeout"]), True)
-                message = result.stdout.strip()
-                accepted = result.returncode == 0 and message in (f"connected to {endpoint}", f"already connected to {endpoint}")
-                print(json.dumps({"endpoint": endpoint, "transport_connected_during_operation": accepted,
-                                  "returncode": result.returncode, "message": message[:2048],
-                                  "stderr": result.stderr.strip()[:2048], "device_identity_verified": False}),
-                      file=sys.stderr if config["command"] else sys.stdout, flush=True)
+            connected = []
+            groups = config.get("route_groups") or [[endpoint] for endpoint in config["endpoints"]]
+            for group in groups:
+                accepted = False
+                for endpoint in group:
+                    result = run_child([str(shim), "connect", endpoint], env, owner_fd,
+                                       min(deadline, time.monotonic() + config["connect_timeout"]), True,
+                                       soft_timeout=len(group) > 1)
+                    check_owner(owner_fd, deadline)
+                    message = result.stdout.strip()
+                    accepted = result.returncode == 0 and message in (f"connected to {endpoint}", f"already connected to {endpoint}")
+                    print(json.dumps({"endpoint": endpoint, "transport_connected_during_operation": accepted,
+                                      "returncode": result.returncode, "message": message[:2048],
+                                      "stderr": result.stderr.strip()[:2048], "device_identity_verified": False}),
+                          file=sys.stderr if config["command"] else sys.stdout, flush=True)
+                    if accepted:
+                        connected.append(endpoint)
+                        break
                 failed |= not accepted
+            if len(set(connected)) == 1:
+                env["ANDROID_SERIAL"] = connected[0]
         if failed:
             return 1
         if not config["command"]:
@@ -228,11 +248,14 @@ def worker(directory):
         os.close(owner_fd)
 
 
-def execute(endpoints, seconds, connect_timeout, command=(), connect_first=True):
+def execute(endpoints, seconds, connect_timeout, command=(), connect_first=True, *, route_groups=None):
     if not math.isfinite(seconds) or not 0 < seconds <= 3600:
         raise ValueError("Operation duration must be finite, greater than zero and at most 3600 seconds")
     if os.environ.get("ANDROID_ADB_SCOPE_SOCKET"):
         raise RuntimeError("Already inside an on-demand operation; use its adb route directly")
+    if route_groups is not None and (not route_groups or
+            any(not group or any(endpoint not in endpoints for endpoint in group) for group in route_groups)):
+        raise ValueError("Fallback routes must belong to this explicitly selected operation")
     runtime = Path(f"/run/user/{os.getuid()}")
     if not runtime.is_dir() or runtime.stat().st_uid != os.getuid():
         raise RuntimeError("A local systemd user runtime is required; refusing a shared-server fallback")
@@ -245,6 +268,7 @@ def execute(endpoints, seconds, connect_timeout, command=(), connect_first=True)
     base.mkdir(mode=0o700)
     identity = base.stat()
     config = {"unit": unit, "adb": str(Path(adb).resolve()), "endpoints": list(endpoints),
+              "route_groups": route_groups,
               "command": list(command), "connect_first": connect_first, "connect_timeout": connect_timeout,
               "environment": dict(os.environ), "owner_pid": os.getpid(), "owner_birth": process_birth(os.getpid()),
               "deadline": time.monotonic() + seconds}

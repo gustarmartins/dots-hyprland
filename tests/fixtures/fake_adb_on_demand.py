@@ -70,7 +70,10 @@ if args == ['devices'] or args == ['devices', '-l']:
     print('List of devices attached')
     for endpoint, state in states.items(): print(endpoint + '\t' + state)
 elif args[0] == 'connect':
-    if os.environ.get('FAKE_ADB_CONNECT') == 'success':
+    outcome = json.loads(os.environ.get('FAKE_ADB_CONNECT_RESULTS', '{}')).get(args[1], os.environ.get('FAKE_ADB_CONNECT'))
+    if outcome == 'timeout':
+        time.sleep(10)
+    if outcome == 'success':
         states[args[1]] = 'device'
         states_path.write_text(json.dumps(states))
         print('connected to ' + args[1])

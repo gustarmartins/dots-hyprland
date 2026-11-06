@@ -79,6 +79,40 @@ class AndroidDemandTest(unittest.TestCase):
         self.assertEqual(self.invoke(TOOL, "connect", "--now", "--device", "fe").returncode, 0)
         self.assertEqual(self.calls(), [{"args": ["connect", "100.64.0.10:7777"], "mdns": "0"}])
 
+    def test_named_phone_prefers_lan_and_exports_actual_route(self):
+        self.known.write_text("100.64.0.10:7777|SM-S711B|36\n192.168.0.22:7777|SM-S711B|36\n")
+        self.env["FAKE_ADB_CONNECT"] = "success"
+        result = self.invoke(TOOL, "run", "--now", "--device", "fe", "--",
+                             "python3", "-c", "import os; print(os.environ['ANDROID_SERIAL'])")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "192.168.0.22:7777")
+        self.assertEqual([row["args"] for row in self.calls()], [["connect", "192.168.0.22:7777"]])
+
+    def test_named_phone_falls_back_once_and_runs_body_once(self):
+        self.known.write_text("100.64.0.10:7777|SM-S711B|36\n192.168.0.22:7777|SM-S711B|36\n")
+        self.env["FAKE_ADB_CONNECT_RESULTS"] = json.dumps({"100.64.0.10:7777": "success"})
+        result = self.invoke(TOOL, "run", "--now", "--device", "fe", "--",
+                             "python3", "-c", "import os; print(os.environ['ANDROID_SERIAL'])")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "100.64.0.10:7777")
+        self.assertEqual([row["args"] for row in self.calls()],
+                         [["connect", "192.168.0.22:7777"], ["connect", "100.64.0.10:7777"]])
+
+    def test_lan_timeout_retires_client_then_uses_fallback(self):
+        self.known.write_text("192.168.0.22:7777|SM-S711B|36\n100.64.0.10:7777|SM-S711B|36\n")
+        self.env["FAKE_ADB_CONNECT_RESULTS"] = json.dumps({"192.168.0.22:7777": "timeout", "100.64.0.10:7777": "success"})
+        result = self.invoke(TOOL, "connect", "--now", "--device", "fe", "--timeout", "0.2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([row["args"] for row in self.calls()],
+                         [["connect", "192.168.0.22:7777"], ["connect", "100.64.0.10:7777"]])
+
+    def test_no_available_phone_route_does_not_start_body(self):
+        self.known.write_text("192.168.0.22:7777|SM-S711B|36\n100.64.0.10:7777|SM-S711B|36\n")
+        result = self.invoke(TOOL, "run", "--now", "--device", "fe", "--", "python3", "-c", "print('BODY_STARTED')")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("BODY_STARTED", result.stdout)
+        self.assertEqual(len(self.calls()), 2)
+
     def test_adbc_without_arguments_only_lists_local_records(self):
         self.assertEqual(self.invoke(BIN / "adbc").returncode, 0)
         self.assertEqual(self.calls(), [])

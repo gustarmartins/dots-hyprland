@@ -59,3 +59,24 @@ refusal, bounded reconnect, startup/body failures, cancellation, timeout,
 parent death, resistant/detached children and SDK server replacement. No fake
 connect contacts a phone. The discoverable skill follows
 [OpenAI's skill entrypoint format](https://developers.openai.com/plugins/concepts/skills).
+## LAN and Tailscale routes
+
+Named devices use their saved routes as alternatives: RFC1918 LAN addresses
+first, then the remaining routes such as Tailscale. Each route gets one bounded
+connection attempt, and a successful route stops that device's fallback list.
+An unavailable alternative does not fail an otherwise connected phone. Multiple
+requested devices still each need a working route; explicit `--endpoint` values
+remain explicit requirements. No address discovery or persistent connection is
+introduced.
+
+Inside a single-phone `run` scope, `ANDROID_SERIAL` contains the actual selected
+endpoint. Use it for fresh pins or explicit `adb -s` calls. Do not hardcode a
+Tailscale address in a script launched with a named device. Connection success
+still does not establish model, boot, root or framework readiness.
+
+The existing `codex-fe-wake` helper accepts up to three explicitly saved
+`lan_endpoints` in its private config. It tries LAN before querying Tailscale and
+can wake an already registered task while Tailscale is stopped. Notifications
+name the actual route and retain the requirement for a fresh identity preflight.
+Its existing master Off switch and one-wake-per-registration behavior remain.
+
