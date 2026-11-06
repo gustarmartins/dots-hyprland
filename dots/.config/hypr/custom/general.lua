@@ -16,6 +16,8 @@ hl.config({
         create_abstract_socket = false,
     },
     misc = {
+        -- CryoD and manual freezes intentionally stop app ping replies.
+        enable_anr_dialog = false,
         focus_on_activate = false,
         middle_click_paste = false,
         animate_mouse_windowdragging = true,

@@ -1,5 +1,11 @@
 # CryoD session integration
 
+The owner-selected Hyprland Lua configuration disables
+`misc.enable_anr_dialog` globally. Intentionally frozen applications cannot answer
+compositor pings. This changes only the popup behavior; CryoD retains per-app
+consent and foreground/activity checks. The option is documented in the
+[Hyprland configuration reference](https://wiki.hypr.land/Configuring/Basics/Variables/).
+
 Super+I → CryoD also has **Group new launcher apps**. With the master enabled,
 this choice defaults On and routes new nonterminal entries/actions through
 `/usr/local/libexec/cryod-desktop/cryod-app-launch` (alpha31). It groups only the
