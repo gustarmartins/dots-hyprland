@@ -10,6 +10,16 @@ try:
     assert json.loads(call('test', 'locate', 'cryodFeatures')) is None
     click('cryodMaster')
     until(lambda: json.loads(call('test', 'locate', 'cryodFeatures')))
+    assert json.loads(call('test', 'locate', 'cryodPerformanceOptions')) is None
+    click('cryodPerformance')
+    until(lambda: json.loads(call('test', 'locate', 'cryodPerformanceHardware')))
+    click('cryodPerformanceHardware')
+    until(lambda: json.loads((focus_state / f'performance-{os.getuid()}.json').read_text())['hardware'])
+    click('cryodPerformance')
+    until(lambda: json.loads(call('test', 'locate', 'cryodPerformanceOptions')) is None)
+    until(lambda: not (focus_run / f'hardware-{os.getuid()}.json').exists())
+    assert json.loads((focus_state / f'performance-{os.getuid()}.json').read_text())['hardware'] is True
+    assert (OUT / 'performance-calls').read_text().splitlines() == ['on', 'hardware-on', 'off']
     click('cryodFocused')
     until(lambda: json.loads(config.read_text()).get('cryod', {}).get('protectForeground') is False)
     click('cryodVisible')
@@ -38,6 +48,6 @@ try:
         else:
             assert before == after, path
     unchanged(initial, saved)
-    print('PASS: real CryoD settings master, hidden features, independent choices and unrelated config preservation')
+    print('PASS: real CryoD integration and Performance masters, hidden optional hardware, retained preference, independent choices and unrelated config preservation')
 finally:
     process.terminate();process.wait(timeout=10);log.close()

@@ -71,16 +71,36 @@ ColumnLayout {
         }
         RowLayout {
             Layout.fillWidth: true
-            StyledText { Layout.fillWidth: true; text: "Focus Mode CPU boost" }
+            StyledText { Layout.fillWidth: true; text: "Performance"; font.weight: Font.Medium }
             SettingsSwitch {
+                objectName: "cryodPerformance"
                 checked: FocusMode.enabled
-                enabled: !FocusMode.busy && (FocusMode.available || FocusMode.enabled)
+                enabled: !FocusMode.busy && (FocusMode.available || FocusMode.enabled || FocusMode.hardwareLeased)
                 onToggled: FocusMode.setEnabled(checked)
             }
         }
         StyledText {
             Layout.fillWidth: true; wrapMode: Text.WordWrap
-            text: FocusMode.statusText + ". Prioritizes an isolated app group while focused. Shared terminal jobs and build quotas keep their own settings."
+            text: FocusMode.statusText + ". Gives supported focused apps CPU priority. Off restores its CPU and optional hardware boosts."
+        }
+        ColumnLayout {
+            objectName: "cryodPerformanceOptions"
+            visible: FocusMode.enabled
+            Layout.fillWidth: true
+            RowLayout {
+                Layout.fillWidth: true
+                StyledText { Layout.fillWidth: true; text: "Include GPU and latency boost" }
+                SettingsSwitch {
+                    objectName: "cryodPerformanceHardware"
+                    checked: FocusMode.hardwareEnabled
+                    enabled: !FocusMode.busy
+                    onToggled: FocusMode.setHardwareEnabled(checked)
+                }
+            }
+            StyledText {
+                Layout.fillWidth: true; wrapMode: Text.WordWrap
+                text: "Uses more power. Remembers your choice for the next time Performance is enabled."
+            }
         }
         RowLayout {
             Layout.fillWidth: true
@@ -94,7 +114,7 @@ ColumnLayout {
         }
         StyledText {
             Layout.fillWidth: true; wrapMode: Text.WordWrap
-            text: "Keeps each new launcher app in its own group for Focus Mode. Already running apps and terminal launches keep their current groups. This does not enable app freezing."
+            text: "Keeps each new launcher app in its own group for Performance. Already running apps and terminal launches keep their current groups. This does not enable app freezing."
         }
         RowLayout {
             Layout.fillWidth: true
@@ -184,19 +204,6 @@ ColumnLayout {
             visible: text.length > 0
             color: CryoDConsent.error || CryoDConsent.suggestionError ? Appearance.m3colors.m3error : Appearance.m3colors.m3onSurface
         }
-    }
-    RowLayout {
-        Layout.fillWidth: true
-        StyledText { Layout.fillWidth: true; text: "GPU and latency boost" }
-        SettingsSwitch {
-            checked: FocusMode.hardwareEnabled
-            enabled: !FocusMode.busy
-            onToggled: FocusMode.setHardwareEnabled(checked)
-        }
-    }
-    StyledText {
-        Layout.fillWidth: true; wrapMode: Text.WordWrap
-        text: "Optional manual hardware boost. Uses more power and restores its previous settings when turned off."
     }
     StyledText {
         Layout.fillWidth: true; wrapMode: Text.WordWrap

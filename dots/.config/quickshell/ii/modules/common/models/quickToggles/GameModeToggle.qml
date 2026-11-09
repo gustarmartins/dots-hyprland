@@ -6,9 +6,9 @@ import qs.services
 
 QuickToggleModel {
     id: root
-    name: Translation.tr("Performance mode")
+    name: Translation.tr("Reduced effects")
     toggled: !confOpt.value
-    icon: "speed"
+    icon: "animation"
 
     mainAction: () => {
         root.toggled = !root.toggled;
@@ -40,5 +40,5 @@ QuickToggleModel {
         key: "animations:enabled"
     }
 
-    tooltipText: Translation.tr("Performance mode")
+    tooltipText: Translation.tr("Reduce desktop animations, shadows, blur and decoration.")
 }

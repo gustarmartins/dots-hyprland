@@ -101,7 +101,7 @@ var pages = [
     "icon": "settings",
     "description": "Interaction tuning, privacy rules and alternate shell options."
   },
-  {"id":"cryod", "title":"CryoD", "icon":"memory", "description":"Foreground protection, app freezing preferences, Focus Mode CPU priority and optional GPU/latency boost."},
+  {"id":"cryod", "title":"CryoD", "icon":"memory", "description":"Performance master, CPU priority, optional GPU/latency boost, foreground protection and app freezing preferences."},
   {
     "id": "about",
     "title": "About",

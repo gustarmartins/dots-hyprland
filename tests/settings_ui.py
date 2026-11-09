@@ -109,6 +109,37 @@ print(json.dumps(reply))
 consent_client.chmod(0o755)
 consent_qml = OUT / 'config/quickshell/ii/services/CryoDConsent.qml'
 consent_qml.write_text(consent_qml.read_text().replace('/usr/local/libexec/cryod-desktop/cryod-control-client', str(consent_client)))
+# Performance actions and readback stay in this disposable desktop as well.
+focus_run = OUT / 'focus-runtime'
+focus_state = OUT / 'focus-state'
+focus_run.mkdir(); focus_state.mkdir()
+focus_status = dict(timestamp=time.time(), native=dict(focus_performance=dict(
+    schema=1, uid=os.getuid(), available=True, enabled=False, active=False, reason='off')))
+(focus_run / 'status.json').write_text(json.dumps(focus_status))
+focus_helper = OUT / '.local/bin/focus-mode.sh'
+focus_helper.write_text('''#!/usr/bin/python3
+import json,os,sys,time
+from pathlib import Path
+root=Path.home();run=root/'focus-runtime';state=root/'focus-state';uid=os.getuid()
+status=run/'status.json';value=json.loads(status.read_text());focus=value['native']['focus_performance']
+preference=state/f'performance-{uid}.json'
+profile=json.loads(preference.read_text()) if preference.exists() else dict(schema=1,uid=uid,hardware=False)
+command=sys.argv[1]
+if command.startswith('hardware-'):profile['hardware']=command=='hardware-on'
+else:focus['enabled']=command=='on'
+focus['active']=False;focus['reason']='no-isolated-focused-workload' if focus['enabled'] else 'off'
+lease=run/f'hardware-{uid}.json'
+if focus['enabled'] and profile['hardware']:lease.write_text('{"schema":1}')
+else:lease.unlink(missing_ok=True)
+tmp=state/'new';tmp.write_text(json.dumps(profile));os.replace(tmp,preference)
+value['timestamp']=time.time();tmp=run/'new';tmp.write_text(json.dumps(value));os.replace(tmp,status)
+with (root/'performance-calls').open('a') as f:f.write(command+'\\n')
+''')
+focus_helper.chmod(0o755)
+focus_qml = OUT / 'config/quickshell/ii/services/FocusMode.qml'
+focus_qml.write_text(focus_qml.read_text().replace('"/run/cryod"', json.dumps(str(focus_run)))
+                     .replace('"/run/focus-mode"', json.dumps(str(focus_run)))
+                     .replace('"/var/lib/cryod-desktop"', json.dumps(str(focus_state))))
 env = os.environ.copy()
 for key in ['WAYLAND_DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE']:
     env.pop(key, None)

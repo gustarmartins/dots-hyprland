@@ -6,11 +6,15 @@ import Quickshell.Io
 Singleton {
     id: root
     property var state: ({})
-    property bool hardwareEnabled: false
+    property var profile: ({})
+    property bool hardwareLeased: false
+    readonly property bool hardwareEnabled: typeof profile.hardware === "boolean" ? profile.hardware : hardwareLeased
     property string error: ""
     property string request: ""
     property string executable: Quickshell.env("HOME") + "/.local/bin/focus-mode.sh"
     property string runtimePath: "/run/cryod"
+    property string performancePath: "/run/focus-mode"
+    property string preferencesPath: "/var/lib/cryod-desktop"
     property double now: Date.now()
     property double timestamp: 0
     readonly property bool fresh: now >= timestamp && now - timestamp < 15000
@@ -18,10 +22,12 @@ Singleton {
     readonly property bool active: fresh && state.active === true
     readonly property bool available: fresh && state.available === true
     readonly property bool busy: control.running
-    readonly property string statusText: !enabled ? "Off" : !fresh ? "Waiting for CryoD"
-        : active ? "Focused" : state.reason === "external-setting-preserved" ? "Custom CPU settings"
-        : state.reason === "no-isolated-focused-workload" ? "Waiting for an app"
-        : state.reason === "native-policy-paused" ? "CryoD effects paused" : "Waiting for focus"
+    readonly property string statusText: busy ? "Applying…" : !fresh ? "Waiting for CryoD"
+        : !enabled ? (hardwareLeased ? "Restore pending" : "Off")
+        : active ? "CPU priority active" : state.reason === "external-setting-preserved" ? "Custom CPU settings"
+        : state.reason === "no-isolated-focused-workload" ? "On · app not eligible"
+        : state.reason === "native-policy-paused" ? "On · effects paused"
+        : state.reason === "restore-pending" ? "Restore pending" : "On · waiting for focus"
 
     function setEnabled(value) { submit(value ? "on" : "off"); }
     function setHardwareEnabled(value) { submit(value ? "hardware-on" : "hardware-off"); }
@@ -31,13 +37,21 @@ Singleton {
         request = value;
         control.running = true;
     }
+    IpcHandler {
+        target: "cryodPerformance"
+        function status(): string {
+            return JSON.stringify({schema: 1, enabled: root.enabled, cpuActive: root.active,
+                fresh: root.fresh, status: root.statusText, hardwareRequested: root.hardwareEnabled,
+                hardwareLeased: root.hardwareLeased, busy: root.busy, error: root.error});
+        }
+    }
     Process {
         id: control
         command: [root.executable, root.request]
         stderr: StdioCollector { onStreamFinished: if (text.trim()) root.error = text.trim() }
         onExited: (code, status) => {
-            if (code !== 0 && !root.error) root.error = "Focus Mode could not apply the change.";
-            stateFile.reload(); hardwareFile.reload();
+            if (code !== 0 && !root.error) root.error = "Performance could not apply the change.";
+            stateFile.reload(); hardwareFile.reload(); profileFile.reload();
         }
     }
     FileView {
@@ -57,21 +71,36 @@ Singleton {
     }
     FileView {
         id: hardwareFile
-        path: root.state.uid == null ? "" : "/run/focus-mode/hardware-" + root.state.uid + ".json"
+        path: root.state.uid == null ? "" : root.performancePath + "/hardware-" + root.state.uid + ".json"
         // This opt-in marker normally does not exist while hardware tuning is off.
         printErrors: false
         watchChanges: true
-        onPathChanged: root.hardwareEnabled = false
+        onPathChanged: root.hardwareLeased = false
         onFileChanged: reload()
         onLoaded: {
-            try { root.hardwareEnabled = JSON.parse(text()).schema === 1; }
-            catch (_) { root.hardwareEnabled = false; }
+            try { root.hardwareLeased = JSON.parse(text()).schema === 1; }
+            catch (_) { root.hardwareLeased = false; }
         }
         onLoadFailed: error => {
-            root.hardwareEnabled = false;
+            root.hardwareLeased = false;
             if (error !== FileViewError.FileNotFound)
-                console.warn("Focus Mode hardware state:", FileViewError.toString(error));
+                console.warn("Performance hardware state:", FileViewError.toString(error));
         }
+    }
+    FileView {
+        id: profileFile
+        path: root.state.uid == null ? "" : root.preferencesPath + "/performance-" + root.state.uid + ".json"
+        printErrors: false
+        watchChanges: true
+        onPathChanged: root.profile = ({})
+        onFileChanged: reload()
+        onLoaded: {
+            try {
+                const value = JSON.parse(text());
+                root.profile = value.schema === 1 && value.uid === root.state.uid ? value : {};
+            } catch (_) { root.profile = ({}); }
+        }
+        onLoadFailed: root.profile = ({})
     }
     Timer { interval: 2000; running: root.enabled; repeat: true; onTriggered: root.now = Date.now() }
 }

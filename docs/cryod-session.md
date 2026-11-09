@@ -9,7 +9,7 @@ consent and foreground/activity checks. The option is documented in the
 Super+I → CryoD also has **Group new launcher apps**. With the master enabled,
 this choice defaults On and routes new nonterminal entries/actions through
 `/usr/local/libexec/cryod-desktop/cryod-app-launch` (alpha31). It groups only the
-new launch for Focus Mode; an already running instance keeps its current group.
+new launch for Performance; an already running instance keeps its current group.
 It does not enable app freezing. Turning the choice or master Off uses the
 ordinary launch route and starts no watcher. Existing app processes keep running.
 
@@ -157,3 +157,34 @@ No owner app was enrolled or frozen during delivery. VM Atlas publication stays
 separate. Workstation receipts are under
 `~/.local/state/cryod-build/alpha32-qml-20261020/`; the private desktop tracker has
 `evidence/20261020-alpha32-quickshell-consent.json`.
+
+## Performance control — November 9, 2026
+
+The quick tile is **Performance**. Settings → CryoD provides the same master
+switch and an optional **Include GPU and latency boost** choice, shown while
+Performance is enabled. Turning the master off withdraws the CPU request and
+restores its owned hardware effects. The hardware preference is retained for
+the next explicit On. Hardware boost is opt-in; it is not inferred from a GPU
+clock or kernel value. The legacy `focusMode` tile key and `focus-mode.sh`
+commands remain compatible, so existing layouts do not need migration.
+
+The tile distinguishes an enabled request from an applied CPU priority lease.
+`On · app not eligible` does not claim a performance gain. The current CPU owner
+adjusts CFS cgroup weight and utilization minimum; realtime game threads are
+not scheduled by CFS weight. The separately named **Reduced effects** tile changes
+compositor decoration and animation, and does not activate Feral GameMode.
+Build-quota, fan control and explicit governor settings retain their own choices.
+
+The helper persists the hardware preference in root-owned
+`/var/lib/cryod-desktop/performance-UID.json`; its runtime lease stays under
+`/run/focus-mode`. Off attempts both cleanup paths even when the native owner is
+unavailable or preference storage fails, and reports incomplete restoration.
+An existing hardware lease whose kernel/unit readback changed is refused rather
+than reported as active. Compare-and-restore cannot attribute a different writer
+that writes the same GPU value; other GPU performance owners must not compete.
+
+`qs -c ii ipc call cryodPerformance status` is a read-only view of the loaded
+shell's state. The 18 backend checks, private service UI test and actual private
+settings clicks cover master Off, retained hardware intent, refusal, status and
+hidden optional controls. These checks do not establish game FPS improvement or
+make an orphaned terminal-launched application eligible for native CPU priority.

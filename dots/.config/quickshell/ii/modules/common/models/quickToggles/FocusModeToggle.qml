@@ -7,11 +7,12 @@ import qs.modules.common
 
 QuickToggleModel {
     id: root
-    name: Translation.tr("Focus Mode")
+    name: Translation.tr("Performance")
 
     readonly property bool active: FocusMode.enabled
 
-    icon: root.active ? "center_focus_strong" : "center_focus_weak"
+    icon: "speed"
+    available: !FocusMode.busy
     toggled: root.active
     statusText: FocusMode.statusText
 
@@ -19,5 +20,5 @@ QuickToggleModel {
         FocusMode.setEnabled(!FocusMode.enabled)
     }
 
-    tooltipText: FocusMode.error || Translation.tr("Prioritizes an isolated focused app through CryoD. GPU and latency boost are separate controls in CryoD settings.")
+    tooltipText: FocusMode.error || Translation.tr("CryoD CPU priority and your optional hardware boost. Configure in Settings → CryoD. Turning off restores both.")
 }

@@ -11,7 +11,11 @@ ColumnLayout {
     property bool expanded: false
     // Matches AndroidQuickPanel.availableToggleTypes; checked by the catalog audit.
     readonly property var available: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "cloudflareWarp", "gameMode", "tearing", "vrr", "lsfg", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile", "musicRecognition", "antiFlashbang", "memoryMode", "focusMode", "buildCache", "zramAlgo", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
-    function label(type) { return type.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, c => c.toUpperCase()); }
+    function label(type) {
+        if (type === "focusMode") return "Performance";
+        if (type === "gameMode") return "Reduced effects";
+        return type.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, c => c.toUpperCase());
+    }
     function change(index, action) {
         let next = Array.from(tiles).map(t => Object.assign({}, t));
         if (action === "remove") next.splice(index, 1);

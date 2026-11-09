@@ -155,7 +155,9 @@ AbstractQuickPanel {
                         onClicked: Config.options.sidebar.quickToggles.android.toggles = Array.from(root.toggles).concat([{type: modelData, size: 2, height: 1}])
                         contentItem: StyledText {
                             id: label
-                            text: "+ " + modelData.replace(/([a-z])([A-Z])/g, "$1 $2")
+                            text: "+ " + (modelData === "focusMode" ? "Performance"
+                                : modelData === "gameMode" ? "Reduced effects"
+                                : modelData.replace(/([a-z])([A-Z])/g, "$1 $2"))
                             font.pixelSize: 12
                         }
                     }
