@@ -73,6 +73,14 @@ Singleton {
             bridge.write(encoded + "\n");
         }
     }
+    function historyGap() {
+        if (!owner || !bridge.running || !wanted) return;
+        // Structural events can be coalesced before the compatibility inventory
+        // refreshes. Revoke interval continuity, keeping the current protection.
+        const frame = snapshot();
+        frame.history_gap = true;
+        bridge.write(JSON.stringify(frame) + "\n");
+    }
     onWantedChanged: sync()
     Connections {
         target: Config
@@ -87,6 +95,11 @@ Singleton {
     Connections {
         target: Hyprland
         function onActiveToplevelChanged() { root.publish(); }
+        function onRawEvent(event) {
+            if (["activewindow", "activewindowv2", "windowtitle", "windowtitlev2",
+                 "openlayer", "closelayer", "screencast"].includes(event.name)) return;
+            root.historyGap();
+        }
     }
     Connections {
         target: HyprlandData

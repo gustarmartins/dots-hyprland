@@ -63,6 +63,7 @@ import qs.modules.common
 ShellRoot {
  property int step: 0
  property int producer: 0
+ property int gapSequence: 0
  function fail(message) { console.log("CRYOD_QML_FAIL " + message); Qt.quit(); }
  Component.onCompleted: {
   CryoDSession.runtimePath = RUNTIME;
@@ -82,8 +83,13 @@ ShellRoot {
     producer = CryoDSession.receipt.producer_pid;
    }
    if (step >= 11 && step <= 24) HyprlandData.monitors = [{id:0, activeWorkspace:{id:step % 2 + 1}}];
+   if (step === 25) {
+    gapSequence = CryoDSession.receipt.sequence;
+    CryoDSession.historyGap();
+   }
    if (step === 27) {
     if (!CryoDSession.fresh || CryoDSession.receipt.producer_pid !== producer) { fail("producer duplicated or stale"); return; }
+    if (CryoDSession.receipt.sequence < gapSequence + 2) { fail("history gap was hidden"); return; }
     Config.options.cryod.enabled = false;
    }
    if (step === 33) {
