@@ -1,4 +1,5 @@
 import QtQuick
+import "../../services/CryoDAppStats.js" as AppStats
 import QtQuick.Layouts
 import qs.services
 import qs.modules.common
@@ -10,12 +11,19 @@ ColumnLayout {
     property string appFilter: ""
     property int appPage: 0
     readonly property int appPageSize: 12
-    readonly property var matchingApps: CryoDConsent.available ? CryoDConsent.apps.filter(app =>
-        (CryoDConsent.appName(app.app_id) + " " + app.app_id).toLowerCase().includes(appFilter.trim().toLowerCase())) : []
+    property string appScope: "relevant"
+    property string appSort: "relevant"
+    property real minimumCpu: 0
+    readonly property var matchingApps: CryoDConsent.available ? AppStats.select(
+        CryoDConsent.apps, CryoDConsent.appName, appFilter, appScope, appSort, minimumCpu) : []
     onAppFilterChanged: appPage = 0
+    onAppScopeChanged: appPage = 0
+    onAppSortChanged: appPage = 0
+    onMinimumCpuChanged: appPage = 0
+    onMatchingAppsChanged: appPage = Math.min(appPage, Math.max(0, Math.ceil(matchingApps.length / appPageSize) - 1))
     Connections {
         target: CryoDConsent
-        function onAppsChanged() { root.appPage = 0; }
+        function onAvailableChanged() { if (!CryoDConsent.available) root.appPage = 0; }
     }
     onVisibleChanged: CryoDConsent.viewActive = visible
     Component.onCompleted: CryoDConsent.viewActive = visible
@@ -154,6 +162,39 @@ ColumnLayout {
             placeholderText: "Search apps"
             onTextChanged: root.appFilter = text
         }
+        Flow {
+            Layout.fillWidth: true
+            spacing: 8
+            StyledComboBox {
+                objectName: "cryodAppScope"
+                width: Math.min(230, parent.width)
+                model: ["Seen or configured", "Seen by CryoD", "Background CPU", "Running apps", "All installed apps"]
+                onActivated: root.appScope = ["relevant", "seen", "cpu", "running", "all"][currentIndex]
+            }
+            StyledComboBox {
+                objectName: "cryodAppSort"
+                width: Math.min(230, parent.width)
+                model: ["Sort: Most relevant", "Sort: Background CPU", "Sort: Last seen", "Sort: Name"]
+                onActivated: root.appSort = ["relevant", "cpu", "recent", "name"][currentIndex]
+            }
+            StyledComboBox {
+                objectName: "cryodAppCpuMinimum"
+                width: Math.min(200, parent.width)
+                model: ["Any CPU usage", "CPU ≥ 1%", "CPU ≥ 5%", "CPU ≥ 10%", "CPU ≥ 25%"]
+                onActivated: root.minimumCpu = [0, 1, 5, 10, 25][currentIndex]
+            }
+        }
+        StyledText {
+            Layout.fillWidth: true; wrapMode: Text.WordWrap
+            text: "CPU shows peak sustained background use recorded by suggestions over the last 30 days. 100% equals one CPU core."
+        }
+        StyledText {
+            objectName: "cryodAppCount"
+            Layout.fillWidth: true; wrapMode: Text.WordWrap
+            text: !CryoDConsent.available ? "Waiting for app information…"
+                : root.matchingApps.length === 0 ? "No matching apps. Try All installed apps or lower the CPU filter."
+                : root.matchingApps.length + " matching apps"
+        }
         Repeater {
             model: root.matchingApps.slice(root.appPage * root.appPageSize, (root.appPage + 1) * root.appPageSize)
             delegate: RowLayout {
@@ -162,6 +203,11 @@ ColumnLayout {
                 ColumnLayout {
                     Layout.fillWidth: true
                     StyledText { text: CryoDConsent.appName(modelData.app_id); textFormat: Text.PlainText }
+                    StyledText {
+                        text: AppStats.summary(modelData)
+                        textFormat: Text.PlainText
+                        Layout.fillWidth: true; wrapMode: Text.WordWrap
+                    }
                     StyledText {
                         text: CryoDConsent.preference(modelData)
                             + (CryoDConsent.canChoose(modelData) ? "" : " · App unavailable")
@@ -200,7 +246,7 @@ ColumnLayout {
         }
         StyledText {
             Layout.fillWidth: true; wrapMode: Text.WordWrap
-            text: CryoDConsent.error || CryoDConsent.suggestionError || CryoDConsent.message
+            text: CryoDConsent.error || CryoDConsent.suggestionError || CryoDConsent.historyError || CryoDConsent.message
             visible: text.length > 0
             color: CryoDConsent.error || CryoDConsent.suggestionError ? Appearance.m3colors.m3error : Appearance.m3colors.m3onSurface
         }

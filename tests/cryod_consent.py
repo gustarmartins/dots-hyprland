@@ -68,6 +68,7 @@ with tempfile.TemporaryDirectory(prefix='cryod-qml-consent-') as temporary:
         assert json.loads(receiver.recv(8192))['registered'] and receiver.recv(8192) == b''
         receiver.close()
         shutil.copy2(repo / 'dots/.config/quickshell/ii/services/CryoDConsent.qml', root / 'shell/services/CryoDConsent.qml')
+        shutil.copy2(repo / 'dots/.config/quickshell/ii/services/CryoDAppStats.js', root / 'shell/services/CryoDAppStats.js')
         shutil.copy2(repo / 'dots/.config/quickshell/ii/services/CryoDAppLaunch.qml', root / 'shell/services/CryoDAppLaunch.qml')
         (root / 'shell/services/Notifications.qml').write_text('''pragma Singleton
 import Quickshell

@@ -1,6 +1,8 @@
 pragma Singleton
 pragma ComponentBehavior: Bound
 import QtQuick
+import QtCore
+import "CryoDAppStats.js" as AppStats
 import Quickshell
 import Quickshell.Io
 import qs.modules.common
@@ -21,6 +23,52 @@ Singleton {
     property string suggestionError: ""
     property bool notificationAutomatic: false
     property bool available: false
+    property var history: []
+    property bool historyReady: false
+    property bool historyDirty: false
+    property int historySaveInterval: 60000
+    property string historyError: ""
+    property string historyPath: StandardPaths.writableLocation(StandardPaths.StateLocation) + "/cryod-app-observations.json"
+    function remember(observed) {
+        if (!owner || !enabled || !historyReady) return;
+        const updated = AppStats.observe(history, observed, Date.now());
+        if (JSON.stringify(updated) === JSON.stringify(history)) return;
+        history = updated;
+        historyDirty = true;
+        if (!historySave.running) historySave.start();
+    }
+    Timer {
+        id: historySave
+        interval: root.historySaveInterval
+        onTriggered: {
+            if (!root.owner || !root.enabled || !root.historyReady || !root.historyDirty) return;
+            historyFile.setText(JSON.stringify({version:1, apps:root.history}));
+        }
+    }
+    FileView {
+        id: historyFile
+        path: root.enabled ? root.historyPath : ""
+        watchChanges: root.enabled && !root.owner
+        onFileChanged: reload()
+        onLoaded: {
+            try {
+                const document = JSON.parse(text());
+                if (document.version !== 1 || !Array.isArray(document.apps)) throw new Error("Invalid history");
+                root.history = AppStats.sanitize(document.apps, Date.now());
+                root.historyReady = true; root.historyError = "";
+            } catch (_) {
+                root.historyReady = false;
+                root.historyError = "App observation history is unavailable.";
+            }
+        }
+        onLoadFailed: error => {
+            root.historyReady = error === FileViewError.FileNotFound;
+            root.historyError = root.historyReady ? "" : "App observation history is unavailable.";
+        }
+        onSaved: { root.historyDirty = false; root.historyError = ""; }
+        onSaveFailed: error => { root.historyError = "App observations could not be saved."; }
+    }
+    onHistoryChanged: if (enabled && available) rebuildApps()
     property var apps: []
     property var collected: []
     property var choices: []
@@ -50,6 +98,11 @@ Singleton {
 
     IpcHandler {
         target: "cryodConsent"
+        function observations(): string {
+            return JSON.stringify({ready:root.historyReady, appCount:root.history.length,
+                cpuMeasuredCount:root.history.filter(app => AppStats.validNumber(app.cpu_peak_x100)).length,
+                error:root.historyError});
+        }
         function status(): string {
             return JSON.stringify({enabled:root.enabled, owner:root.owner,
                 suggestionsEnabled:root.suggestionsWanted, subscribed:root.subscriptionId.length > 0,
@@ -110,6 +163,10 @@ Singleton {
             if (entry.runInTerminal || !entry.command.length) continue;
             const appId = entry.id.endsWith(".desktop") ? entry.id : entry.id + ".desktop";
             merged.set(appId, {app_id:appId, installed:true});
+        }
+        for (const stats of AppStats.sanitize(history, Date.now())) {
+            merged.set(stats.app_id, Object.assign({}, merged.get(stats.app_id) || {},
+                {app_id:stats.app_id, stats:stats}));
         }
         for (const rule of choices) {
             if (["application", "installed-application"].includes(rule.selector?.kind))
@@ -205,6 +262,7 @@ Singleton {
                 suggestionError = "CryoD suggestion timing or app information is unavailable.";
                 scheduleSuggestions(suggestionInterval);return;
             }
+            remember(reply.apps);
             suggestionInterval = interval;suggestionError = "";suggestionCursor = reply.next_cursor;
             scheduleSuggestions(suggestionCursor ? 1 : suggestionInterval);
             const candidate = reply.apps.find(app => app.recommended === true && typeof app.app_id === "string"
@@ -226,6 +284,7 @@ Singleton {
                 return;
             }
             if (reply.next_cursor !== 0 || collected.length > 64) { available = false; return; }
+            remember(collected);
             rebuildApps();
             available = true;
         } else if (request.purpose === "propose") {
