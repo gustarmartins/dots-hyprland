@@ -1,0 +1,14 @@
+[Unit]
+Description=AI agent session and workload observations
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-monitor serve
+Restart=on-failure
+RestartSec=10
+Nice=10
+UMask=0077
+
+[Install]
+WantedBy=default.target

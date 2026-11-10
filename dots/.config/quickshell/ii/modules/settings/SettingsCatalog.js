@@ -94,6 +94,7 @@ var pages = [
     "icon": "chat",
     "description": "Assistant models, translation and image-search preferences."
   },
+  {"id":"agents", "title":"AI sessions", "icon":"terminal", "description":"Identify agent sessions, terminal PIDs and heavy child workloads."},
   {"id":"memory", "title":"Memory locks", "icon":"memory", "description":"Keep important apps responsive. Review RAM use and choose which processes to protect from swap."},
   {
     "id": "advanced",
@@ -442,6 +443,7 @@ function sections(pageId, query) {
 }
 
 var destinations = [
+    {page:"agents", title:"AI sessions and workloads", description:"Codex agent session thread ID PID CPU RAM RSS swap virtual memory child process tmux Haven SSH terminal Kitty monitor"},
     {page:"storage", title:"Disk space alerts & build cleanup", description:"storage disk disks NVMe SSD SATA HDD Btrfs btrfs-stat capacity free space full warning forecast Gradle compiler caches trash cleanup preview master off"},
     {page:"cryod", title:"CryoD desktop integration", description:"memory foreground focus mode cpu priority gpu latency boost visible windows monitor workload protection session bridge master off app application launcher groups freeze freezer allow deny preference consent"},
     {page:"company", title:"PC reconnection alerts", description:"remote Windows PC SSH online reconnect connection monitor polling desktop notification watcher arm stop"},
