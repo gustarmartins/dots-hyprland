@@ -8,6 +8,8 @@ Applications receive ordinary keyboard keys directly.
 
 | Action | Binding or command |
 | --- | --- |
+| Open the usual Kitty window | Super+Enter |
+| Open an independent emergency Bash prompt | Super+Ctrl+Enter |
 | Interrupt the foreground program | Ctrl+C |
 | Copy Kitty selection | Ctrl+Shift+C |
 | Search Kitty output | Ctrl+Shift+F |
@@ -26,6 +28,13 @@ Applications receive ordinary keyboard keys directly.
 | tmux prefix / detach | Ctrl+B / Ctrl+B then D |
 | tmux scrollback | Ctrl+B then `[` |
 | Reload tmux configuration | Ctrl+B then Shift+R |
+
+The emergency shortcut starts a standalone Wayland `foot` process and Bash
+with startup files and saved history disabled. Its opaque window uses one
+render worker and 256 lines of scrollback. It needs a working Hyprland session
+and the `foot` package. Super+I → Launcher → Emergency terminal turns the
+shortcut on or off. Hyprland reads that preference when the key is pressed, so
+the shortcut works while Quickshell, Kitty, tmux or the session bus is busy.
 
 SSH clipboard delivery depends on the client's OSC 52 support; pane capture and
 file saving do not. No shell startup automatically attaches to tmux or overrides
@@ -51,11 +60,11 @@ extension remains separate from personal history. Only SHARE_HISTORY writes and
 imports personal shell history; its incompatible incremental options are off.
 Leading-space commands are omitted from saved history.
 
-Kitty keeps 50,000 interactive scrollback lines plus 64 MB of pager history per
+Kitty keeps 10,000 interactive scrollback lines plus 64 MiB of pager history per
 window, allocated as needed. Existing windows retain their old history limits
 until recreated. tmux keeps 50,000 lines for new panes; existing panes keep their
-old allocation. These limits are not transcript backups. Rendering uses upstream
-10 ms redraw / 3 ms input batching, with monitor synchronization enabled.
+old allocation. Rendering uses 6 ms redraw and 3 ms input batching, with monitor
+synchronization enabled for the 144 Hz desktop.
 
 Kitty remote control uses its local socket. The search kitten, local control tools
 and shell integration remain available; terminal output received over SSH does

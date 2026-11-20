@@ -6,42 +6,67 @@ from time import monotonic, time
 from kitty.fast_data_types import get_boss
 
 _cache = {}
-_snapshot_cache = (0, {})
+_snapshot_deadline = 0
+_snapshot_version = None
+_snapshot_timestamp = 0
+_window_clients = {}
+
+
+def refresh_title_index():
+    global _snapshot_deadline, _snapshot_version, _snapshot_timestamp, _window_clients
+    now = monotonic()
+    if now < _snapshot_deadline:
+        return
+    _snapshot_deadline = now + 2
+    path = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / 'agent-monitor/snapshot.json'
+    try:
+        with path.open('rb') as handle:
+            stat = os.fstat(handle.fileno())
+            version = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+            if version == _snapshot_version:
+                return
+            limit = 4 * 1024 * 1024
+            raw = handle.read(limit + 1) if stat.st_size <= limit else b''
+            data = json.loads(raw) if 0 < len(raw) <= limit else {}
+        config = data.get('config', {})
+        index = {}
+        if config.get('enabled') and config.get('titles'):
+            def add(clients):
+                for client in clients:
+                    for window in client.get('kitty', []):
+                        index.setdefault((window['id'], window['pid']), set()).add((client['pid'], client['start_ticks']))
+            for session in data.get('sessions', []):
+                add(session.get('clients', []))
+            add(data.get('unmatched_clients', []))
+        _window_clients = index
+        _snapshot_timestamp = float(data.get('timestamp', 0))
+        _snapshot_version = version
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        _snapshot_version = None
+        _snapshot_timestamp = 0
+        _window_clients = {}
 
 def session_pid(window_id, shell_pid):
-    global _snapshot_cache
-    now = monotonic()
-    if now - _snapshot_cache[0] >= 2:
-        try:
-            path = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / 'agent-monitor/snapshot.json'
-            with path.open() as handle:
-                raw = handle.read(4 * 1024 * 1024 + 1)
-            data = json.loads(raw) if len(raw) <= 4 * 1024 * 1024 else {}
-        except (OSError, ValueError):
-            data = {}
-        _snapshot_cache = (now, data)
-    data = _snapshot_cache[1]
-    if not data.get('config', {}).get('enabled') or not data.get('config', {}).get('titles'):
+    refresh_title_index()
+    if not 0 <= time() - _snapshot_timestamp < 20:
         return None
-    if not 0 <= time() - data.get('timestamp', 0) < 20:
-        return None
-    candidates = [client for session in data.get('sessions', []) for client in session.get('clients', [])]
-    candidates += data.get('unmatched_clients', [])
     matched = set()
-    for client in candidates:
-        if not any(w['id'] == window_id and w['pid'] == shell_pid for w in client.get('kitty', [])):
-            continue
+    for pid, start in _window_clients.get((window_id, shell_pid), ()):
         try:
-            birth = int((Path('/proc') / str(client['pid']) / 'stat').read_text().rsplit(')', 1)[1].split()[19])
-            if birth == client['start_ticks']:
-                matched.add(client['pid'])
+            birth = int((Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()[19])
+            if birth == start:
+                matched.add(pid)
         except (OSError, ValueError, IndexError):
             continue
     return next(iter(matched)) if len(matched) == 1 else None
 
 
 def draw_window_title(data):
-    window = get_boss().window_id_map.get(data.window_id)
+    windows = get_boss().window_id_map
+    if len(_cache) > len(windows) + 16:
+        for obsolete in _cache.keys() - windows.keys():
+            del _cache[obsolete]
+    window = windows.get(data.window_id)
     if window is None:
         return '[?]'
     key = window.child.pid

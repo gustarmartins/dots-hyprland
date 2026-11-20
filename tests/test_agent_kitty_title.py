@@ -23,15 +23,18 @@ class Title(unittest.TestCase):
             client=dict(pid=pid,start_ticks=birth,kitty=[dict(id=9,pid=123)])
             data=dict(config=dict(enabled=True,titles=True),timestamp=time.time(),sessions=[dict(clients=[client])],unmatched_clients=[])
             def check(expected):
-                path.write_text(json.dumps(data));title._snapshot_cache=(0,{})
+                path.write_text(json.dumps(data));title._snapshot_deadline=0
                 self.assertEqual(title.session_pid(9,123),expected)
             check(pid)
+            with patch.object(title.json, 'loads', side_effect=AssertionError('Unchanged snapshot was parsed twice')):
+                title._snapshot_deadline = 0
+                self.assertEqual(title.session_pid(9, 123), pid)
             self.assertIsNone(title.session_pid(9,999))
             client['start_ticks']+=1;check(None)
             client['start_ticks']=birth;data['timestamp']=time.time()-25;check(None)
             data['timestamp']=time.time();data['config']['titles']=False;check(None)
             data['config']['titles']=True;data['config']['enabled']=False;check(None)
-            path.write_text('{broken');title._snapshot_cache=(0,{})
+            path.write_text('{broken');title._snapshot_deadline=0
             self.assertIsNone(title.session_pid(9,123))
 
 if __name__=='__main__':unittest.main()

@@ -462,6 +462,7 @@ function sections(pageId, query) {
 }
 
 var destinations = [
+    {page:"launcher", title:"Emergency terminal shortcut", description:"Super Ctrl Enter recovery rescue lightweight foot Bash shell memory pressure independent Kitty"},
     {page:"control", title:"VRR by monitor", description:"display variable refresh rate FreeSync Adaptive Sync per monitor Off Always fullscreen games video global policy GPU actual state flicker"},
     {page:"agents", title:"AI sessions and workloads", description:"Codex agent session thread ID PID CPU RAM RSS swap virtual memory child process tmux Haven SSH terminal Kitty monitor"},
     {page:"agents", title:"Codex session notifications", description:"Codex notification full response expand ellipsis dots open focus terminal Kitty tmux detached resume reopen session master off"},

@@ -31,6 +31,14 @@ ScrollView {
         width: root.availableWidth
         spacing: 22
         Loader {
+            active: !root.query.trim() && root.pageId === "launcher"
+            visible: active
+            Layout.fillWidth: true
+            Layout.leftMargin: 20
+            Layout.rightMargin: 20
+            sourceComponent: EmergencyTerminalSettings { writable: root.writable && !Config.writesPaused }
+        }
+        Loader {
             id: extra
             visible: active
             Layout.fillWidth: true

@@ -266,6 +266,22 @@ try:
     time.sleep(.3)
     assert json.loads(call('settings','status'))['page']=='design'
     assert json.loads(call('settings','status'))['pages'][0]=='design'
+    emergency_state = OUT / 'config/hypr/emergency-terminal.state'
+    emergency_state.parent.mkdir(exist_ok=True)
+    call('settings', 'open', 'launcher')
+    def emergency_switch():
+        return json.loads(call('test', 'locate', 'emergencyTerminalShortcut'))
+    until(lambda: emergency_switch() and emergency_switch()['enabled'])
+    assert emergency_switch()['checked'] and not emergency_state.exists()
+    click('emergencyTerminalShortcut')
+    until(lambda: emergency_state.exists() and emergency_state.read_text() == 'off\n')
+    call('settings', 'open', 'design')
+    call('settings', 'open', 'launcher')
+    until(lambda: emergency_switch() and emergency_switch()['enabled'] and not emergency_switch()['checked'])
+    click('emergencyTerminalShortcut')
+    until(lambda: emergency_state.read_text() == 'on\n')
+    assert config.read_bytes() == initial_bytes
+    call('settings', 'open', 'design')
     assert 'effects' not in json.loads(call('settings','status'))['pages']
     assert 'fonts' not in json.loads(call('settings','status'))['pages']
     until(lambda: json.loads(call('test','locate','designGpuPresets'))['enabled'])
