@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Resize every local Kitty instance on demand; no background watcher."""
+import concurrent.futures
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+def targets():
+    result = set()
+    for line in Path('/proc/net/unix').read_text().splitlines():
+        fields = line.split()
+        if len(fields) != 8 or fields[3] != '00010000':
+            continue
+        match = re.fullmatch(r'@kitty-(\d+)\.sock', fields[7])
+        if match:
+            proc = Path('/proc') / match[1]
+            try:
+                if proc.stat().st_uid == os.getuid() and (proc / 'comm').read_text().strip() == 'kitty':
+                    result.add('unix:' + fields[7])
+            except OSError:
+                pass
+    return sorted(result)
+
+
+def resize(address, amount):
+    return subprocess.run(['kitten', '@', '--to', address, 'set-font-size', '--all', '--', amount],
+                          capture_output=True, text=True, timeout=3)
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in ('+1', '-1', '0'):
+        raise SystemExit('Usage: kitty-font-all +1|-1|0')
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(resize, address, sys.argv[1]): address for address in targets()}
+        for future, address in futures.items():
+            try:
+                result = future.result()
+                if result.returncode:
+                    print(address + ': ' + result.stderr.strip(), file=sys.stderr)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print(address + ': ' + str(error), file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()

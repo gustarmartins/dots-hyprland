@@ -155,6 +155,30 @@ class StartupTests(unittest.TestCase):
             exchange.assert_called_once_with('show_window', reply=False)
             notify.assert_not_called()
 
+    def test_start_prefers_user_local_launcher_only_for_system_binary(self):
+        local_ee = self.root / 'home/.local/bin/easyeffects'
+        local_ee.parent.mkdir(parents=True)
+        local_ee.write_text('#!/bin/sh\nexit 0\n')
+        local_ee.chmod(0o755)
+        popen = Mock()
+        with patch.dict(self.ns, confirmed_state=lambda: {'active': False}, wait_for_tray=lambda: True,
+                        state=lambda: {'active': True, 'bypassed': False, 'presets': []},
+                        shutil=types.SimpleNamespace(which=lambda _: '/usr/bin/easyeffects'),
+                        subprocess=types.SimpleNamespace(Popen=popen, STDOUT=subprocess.STDOUT)):
+            with patch.dict('os.environ', HOME=str(self.root / 'home'), XDG_STATE_HOME=str(self.root / 'state')):
+                self.api['start']()
+        self.assertEqual(popen.call_args.args[0], ['easyeffects', '--hide-window', '--service-mode'])
+        self.assertEqual(popen.call_args.kwargs['executable'], str(local_ee))
+
+        popen.reset_mock()
+        with patch.dict(self.ns, confirmed_state=lambda: {'active': False}, wait_for_tray=lambda: True,
+                        state=lambda: {'active': True, 'bypassed': False, 'presets': []},
+                        shutil=types.SimpleNamespace(which=lambda _: str(self.root / 'custom/easyeffects')),
+                        subprocess=types.SimpleNamespace(Popen=popen, STDOUT=subprocess.STDOUT)):
+            with patch.dict('os.environ', HOME=str(self.root / 'home'), XDG_STATE_HOME=str(self.root / 'state')):
+                self.api['start']()
+        self.assertIsNone(popen.call_args.kwargs['executable'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -7,11 +7,13 @@ only while enabled. `music-eq status` reports service state and its last decisio
 current selection. Manual preset changes last until the next song.
 
 Dependencies: EasyEffects with its local command socket, Python, python-gobject,
-Playerctl GI bindings, WirePlumber (`wpctl`), a user D-Bus session and systemd.
+Playerctl GI bindings, WirePlumber (`wpctl`), PipeWire (`pw-dump`), a user D-Bus session and systemd.
 The existing EasyEffects instance must be running. The watcher neither starts
 nor restarts the audio stack. Spotify desktop supplies MPRIS. Jukebox uses mpv's
-MPRIS plugin; its process must have a jukebox input-IPC argument. Generic mpv
-video players are excluded. No Spotify account/API credentials are needed.
+MPRIS plugin with a jukebox input-IPC argument. Ordinary mpv video/audio players
+can be explicitly toggled via the `mpv` switch while keeping exact-file rules
+scoped exclusively to Jukebox. osu!lazer audio is detected from active playback
+streams (`Stream/Output/Audio` in running state). No Spotify account/API credentials are needed.
 
 Install `dots/.local/bin/music-eq`, `dots/.config/systemd/user/music-eq.service`,
 and the QML changes using the repository's normal dotfile workflow, then run
@@ -20,19 +22,27 @@ before enabling on a new machine:
 
 ```json
 {
-  "spotify": true, "jukebox": true, "artists": true, "genres": true,
+  "spotify": true, "jukebox": true, "mpv": true, "osu": true,
+  "artists": true, "genres": true,
   "tracks": [{"artist": "Artist", "title": "Song", "preset": "measured-preset"}],
   "artist_rules": {}, "genre_rules": {},
   "fallback": "saved-baseline-preset",
+  "osu_preset": "astra-osu",
   "route": "your-output-node-name"
 }
 ```
 
 All referenced presets must exist in the EasyEffects output directory and have
 `limiter#0`. Song rules win over artist rules, genre rules, then the baseline.
-Matching preserves title/version suffixes. Artist and genre choices are style
-approximations, not measurements of every song. Spotify often supplies no genre;
-known song/artist rules still work. Multiple playing players, missing metadata,
+Active osu!lazer audio applies `osu_preset` (`astra-osu` by default) whenever no
+music is playing. Music listening sessions (Spotify, Jukebox, mpv) take precedence
+over simultaneous osu! audio. When music pauses or finishes while osu! continues
+producing audio, the preset automatically returns to the osu! profile; when osu!
+audio stops or closes and no music is playing, the prior baseline preset is restored.
+A silent or open osu! window with no active running audio stream does not trigger
+preset switching. Matching preserves title/version suffixes. Artist and genre choices
+are style approximations, not measurements of every song. Spotify often supplies no
+genre; known song/artist rules still work. Multiple playing players, missing metadata,
 a different configured output, manual bypass and active `astra-profiled` suspend
 selection. `wpctl inspect @DEFAULT_AUDIO_SINK@` identifies the output node; a
 physical headphone change on the same analog jack cannot be detected.

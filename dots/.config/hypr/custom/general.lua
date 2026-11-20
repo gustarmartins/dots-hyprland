@@ -21,7 +21,7 @@ hl.config({
         focus_on_activate = false,
         middle_click_paste = false,
         animate_mouse_windowdragging = true,
-        vrr = 1,
+        -- VRR is configured in the control-center panel (custom/vrr.lua).
     },
     cursor = {
         no_break_fs_vrr = 1,

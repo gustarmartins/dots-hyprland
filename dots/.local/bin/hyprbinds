@@ -1,0 +1,731 @@
+#!/usr/bin/env python3
+"""
+hyprbinds - Real-time Hyprland keybind search & inspector for Lua and Conf configurations.
+"""
+
+import sys
+import os
+import re
+import json
+import shutil
+import argparse
+import subprocess
+from pathlib import Path
+
+# --- ANSI Color Helpers ---
+USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+def col(text, code):
+    if not USE_COLOR:
+        return str(text)
+    return f"\033[{code}m{text}\033[0m"
+
+def bold(text): return col(text, "1")
+def dim(text): return col(text, "2")
+def green(text): return col(text, "32")
+def bold_green(text): return col(text, "1;32")
+def cyan(text): return col(text, "36")
+def bold_cyan(text): return col(text, "1;36")
+def yellow(text): return col(text, "33")
+def bold_yellow(text): return col(text, "1;33")
+def magenta(text): return col(text, "35")
+def bold_magenta(text): return col(text, "1;35")
+def blue(text): return col(text, "34")
+def bold_blue(text): return col(text, "1;34")
+def red(text): return col(text, "31")
+def bold_red(text): return col(text, "1;31")
+
+MOD_MAP = {
+    'super': 'SUPER', 'win': 'SUPER', 'mod4': 'SUPER', 'mod': 'SUPER', 'logo': 'SUPER',
+    'super_l': 'SUPER', 'super_r': 'SUPER',
+    'ctrl': 'CTRL', 'control': 'CTRL', 'mod3': 'CTRL',
+    'alt': 'ALT', 'mod1': 'ALT', 'opt': 'ALT', 'option': 'ALT',
+    'shift': 'SHIFT',
+}
+
+MOD_ORDER = {'SUPER': 1, 'CTRL': 2, 'ALT': 3, 'SHIFT': 4}
+
+KEY_MAP = {
+    '/': 'Slash', 'slash': 'Slash',
+    '\\': 'Backslash', 'backslash': 'Backslash',
+    '.': 'Period', 'period': 'Period', 'dot': 'Period',
+    ',': 'Comma', 'comma': 'Comma',
+    ';': 'Semicolon', 'semicolon': 'Semicolon',
+    "'": 'Apostrophe', '"': 'Apostrophe', 'apostrophe': 'Apostrophe', 'quote': 'Apostrophe',
+    '-': 'Minus', 'minus': 'Minus',
+    '=': 'Equal', 'equal': 'Equal', '+': 'Equal', 'plus': 'Equal',
+    '[': 'BracketLeft', 'bracketleft': 'BracketLeft',
+    ']': 'BracketRight', 'bracketright': 'BracketRight',
+    'space': 'Space', 'spacebar': 'Space',
+    'tab': 'Tab',
+    'return': 'Return', 'enter': 'Return',
+    'backspace': 'Backspace',
+    'escape': 'Escape', 'esc': 'Escape',
+    'delete': 'Delete', 'del': 'Delete',
+    'left': 'Left', 'right': 'Right', 'up': 'Up', 'down': 'Down',
+    'pageup': 'Page_Up', 'page_up': 'Page_Up', 'pgup': 'Page_Up',
+    'pagedown': 'Page_Down', 'page_down': 'Page_Down', 'pgdn': 'Page_Down',
+}
+
+PUNCT_MAP = {
+    ',': 'Comma', '.': 'Period', '/': 'Slash', '\\': 'Backslash', ';': 'Semicolon',
+    "'": 'Apostrophe', '"': 'Apostrophe', '-': 'Minus', '=': 'Equal', '+': 'Equal',
+    '[': 'BracketLeft', ']': 'BracketRight', '`': 'Grave', '~': 'Tilde',
+}
+
+def normalize_key(k: str) -> str:
+    if not k:
+        return ""
+    k_strip = k.strip()
+    k_low = k_strip.lower()
+    if k_low in KEY_MAP:
+        return KEY_MAP[k_low]
+    if k_strip in PUNCT_MAP:
+        return PUNCT_MAP[k_strip]
+    if k_low.startswith('code:'):
+        return 'code:' + k_strip[5:]
+    if k_low.startswith('mouse:'):
+        return 'mouse:' + k_strip[6:]
+    if k_low.startswith('xf86'):
+        return k_strip
+    if len(k_strip) == 1 and k_strip.isalpha():
+        return k_strip.upper()
+    return k_strip.capitalize()
+
+def parse_combo_string(combo_str: str):
+    """
+    Parses a combo string like 'SUPER + SHIFT + D' or 'Ctrl+Super, Slash' into (mods_set, key_str).
+    """
+    parts = [p.strip() for p in re.split(r'[\s+]+', combo_str) if p.strip()]
+    mods = set()
+    key = None
+    for p in parts:
+        p_low = p.lower()
+        if p_low in MOD_MAP:
+            mods.add(MOD_MAP[p_low])
+        else:
+            key = normalize_key(p)
+    return mods, key
+
+def format_combo(mods: set, key: str) -> str:
+    sorted_mods = sorted(list(mods), key=lambda m: MOD_ORDER.get(m, 99))
+    if key:
+        return " + ".join(sorted_mods + [key])
+    return " + ".join(sorted_mods)
+
+def tokenize_user_query(q: str):
+    """
+    Tokenizes flexible user query strings like:
+    - 'super,shift,d'
+    - 'super+shift+d'
+    - 'super,a'
+    - 'a'
+    - 'super,,'
+    - 'ctrl,alt,del'
+    """
+    q = q.strip()
+    if not q:
+        return set(), None, q
+
+    # Special handling if entire query is single punctuation
+    if q in PUNCT_MAP:
+        return set(), PUNCT_MAP[q], q
+
+    cleaned = q
+    trailing_key = None
+    if q.endswith(',,') or q.endswith('+,') or q.endswith(' ,') or q.endswith('-,') or q.endswith('/,'):
+        trailing_key = 'Comma'
+        cleaned = q[:-1]
+    elif q.endswith('++') or q.endswith(',+') or q.endswith(' +'):
+        trailing_key = 'Equal'
+        cleaned = q[:-1]
+    elif q.endswith('--') or q.endswith(',-') or q.endswith(' -'):
+        trailing_key = 'Minus'
+        cleaned = q[:-1]
+
+    parts = [p for p in re.split(r'[,+\s]+', cleaned) if p]
+    mods = set()
+    key = trailing_key
+
+    for p in parts:
+        p_low = p.lower()
+        if p_low in MOD_MAP:
+            mods.add(MOD_MAP[p_low])
+        else:
+            if key is None:
+                key = KEY_MAP.get(p_low, PUNCT_MAP.get(p, normalize_key(p)))
+
+    return mods, key, q
+
+def get_lua_extractor_script():
+    return """
+HOME = os.getenv("HOME")
+package.path = HOME .. "/.config/hypr/?.lua;" .. HOME .. "/.config/hypr/?/init.lua;" .. package.path
+
+local binds = {}
+local unbinds = {}
+local current_submap = ""
+
+local function create_proxy(name)
+    local t = {}
+    setmetatable(t, {
+        __index = function(_, k)
+            return function(arg)
+                local arg_str = ""
+                if type(arg) == "table" then
+                    local parts = {}
+                    for k2, v2 in pairs(arg) do
+                        table.insert(parts, tostring(k2) .. "=" .. tostring(v2))
+                    end
+                    arg_str = "{" .. table.concat(parts, ", ") .. "}"
+                elseif arg ~= nil then
+                    arg_str = tostring(arg)
+                end
+                return name .. "." .. k .. "(" .. arg_str .. ")"
+            end
+        end,
+        __call = function(_, arg)
+            local arg_str = ""
+            if type(arg) == "table" then
+                local parts = {}
+                for k2, v2 in pairs(arg) do
+                    table.insert(parts, tostring(k2) .. "=" .. tostring(v2))
+                end
+                arg_str = "{" .. table.concat(parts, ", ") .. "}"
+            elseif arg ~= nil then
+                arg_str = tostring(arg)
+            end
+            return name .. "(" .. arg_str .. ")"
+        end
+    })
+    return t
+end
+
+hl = {
+    dsp = setmetatable({}, {
+        __index = function(_, k)
+            return create_proxy("dsp." .. k)
+        end
+    }),
+    bind = function(key, action, opts)
+        local info = debug.getinfo(2, "Sl")
+        local is_fn = (type(action) == "function")
+        local act_str = is_fn and "<custom lua function>" or tostring(action or "")
+        table.insert(binds, {
+            key = key,
+            action = act_str,
+            is_function = is_fn,
+            file = info.short_src or "",
+            line = info.currentline or 0,
+            submap = current_submap,
+            options = opts or {}
+        })
+    end,
+    unbind = function(key)
+        local info = debug.getinfo(2, "Sl")
+        table.insert(unbinds, {
+            key = key,
+            file = info.short_src or "",
+            line = info.currentline or 0
+        })
+    end,
+    define_submap = function(name, fn)
+        local prev = current_submap
+        current_submap = name
+        if type(fn) == "function" then
+            pcall(fn)
+        end
+        current_submap = prev
+    end,
+    env = function(k, v) end,
+    get_config = function() return 1.0 end,
+    config = function() end,
+    notification = { create = function() end },
+    dispatch = function() end,
+    get_active_monitor = function() return {} end,
+    get_active_window = function() return {} end,
+    get_active_workspace = function() return {id=1} end,
+    get_active_special_workspace = function() return {} end,
+    get_current_submap = function() return current_submap end,
+}
+
+function is_file_exists(f)
+    local file = io.open(f, "r")
+    if file then file:close(); return true end
+    return false
+end
+
+function workspace_in_group(i) return i end
+
+-- Find all keybinds.lua files
+local files_to_load = {}
+local function find_files()
+    local p = io.popen("find " .. HOME .. "/.config/hypr -name '*.lua' 2>/dev/null")
+    if p then
+        for f in p:lines() do
+            if f:match("keybinds%.lua") or f:match("variables%.lua") then
+                table.insert(files_to_load, f)
+            end
+        end
+        p:close()
+    end
+end
+find_files()
+
+-- Ensure variables are loaded first
+pcall(function() dofile(HOME .. "/.config/hypr/hyprland/variables.lua") end)
+if is_file_exists(HOME .. "/.config/hypr/custom/variables.lua") then
+    pcall(function() dofile(HOME .. "/.config/hypr/custom/variables.lua") end)
+end
+
+-- Load default keybinds
+pcall(function() dofile(HOME .. "/.config/hypr/hyprland/keybinds.lua") end)
+
+-- Load custom keybinds
+if is_file_exists(HOME .. "/.config/hypr/custom/keybinds.lua") then
+    pcall(function() dofile(HOME .. "/.config/hypr/custom/keybinds.lua") end)
+end
+
+-- Load any other keybinds.lua files found
+for _, f in ipairs(files_to_load) do
+    if f ~= HOME .. "/.config/hypr/hyprland/keybinds.lua" and f ~= HOME .. "/.config/hypr/custom/keybinds.lua" and not f:match("variables%.lua") then
+        pcall(function() dofile(f) end)
+    end
+end
+
+-- JSON Output
+local function escape_json(s)
+    if not s then return "" end
+    s = s:gsub('\\\\', '\\\\\\\\'):gsub('"', '\\\\"'):gsub('\\n', '\\\\n'):gsub('\\r', '\\\\r'):gsub('\\t', '\\\\t')
+    return s
+end
+
+local json_binds = {}
+for _, b in ipairs(binds) do
+    local opt_desc = (b.options and b.options.description) or ""
+    local opt_locked = (b.options and b.options.locked) and true or false
+    local opt_repeat = (b.options and b.options.repeating) and true or false
+    local opt_non_consuming = (b.options and b.options.non_consuming) and true or false
+    table.insert(json_binds, string.format('{"key":"%s","action":"%s","is_function":%s,"file":"%s","line":%d,"submap":"%s","description":"%s","locked":%s,"repeating":%s,"non_consuming":%s}',
+        escape_json(b.key), escape_json(b.action), tostring(b.is_function), escape_json(b.file), b.line, escape_json(b.submap), escape_json(opt_desc), tostring(opt_locked), tostring(opt_repeat), tostring(opt_non_consuming)))
+end
+
+local json_unbinds = {}
+for _, u in ipairs(unbinds) do
+    table.insert(json_unbinds, string.format('{"key":"%s","file":"%s","line":%d}', escape_json(u.key), escape_json(u.file), u.line))
+end
+
+print("{" .. '"binds":[' .. table.concat(json_binds, ",") .. '],' .. '"unbinds":[' .. table.concat(json_unbinds, ",") .. ']}')
+"""
+
+def extract_function_body(filepath: str, start_line: int, max_lines: int = 15) -> str:
+    """Extracts a short snippet of a Lua function from the source file."""
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            lines = f.readlines()
+        if start_line > len(lines):
+            return ""
+        snippet_lines = []
+        depth = 0
+        started = False
+        for idx in range(start_line - 1, min(start_line - 1 + max_lines, len(lines))):
+            line = lines[idx]
+            snippet_lines.append(line.rstrip())
+            # Count function / end balance
+            if "function" in line:
+                depth += line.count("function")
+                started = True
+            if "end" in line:
+                depth -= line.count("end")
+            if started and depth <= 0 and idx > start_line - 1:
+                break
+        return "\n".join(snippet_lines)
+    except Exception:
+        return ""
+
+def load_lua_binds():
+    """Runs Lua evaluator to extract all binds dynamically defined in Lua configs."""
+    lua_code = get_lua_extractor_script()
+    try:
+        res = subprocess.run(['lua', '-e', lua_code], capture_output=True, text=True, timeout=5)
+        if res.returncode == 0 and res.stdout.strip():
+            for line in res.stdout.splitlines():
+                if line.startswith('{"binds":'):
+                    data = json.loads(line)
+                    return data.get("binds", []), data.get("unbinds", [])
+    except Exception:
+        pass
+    return [], []
+
+def scan_conf_binds(hypr_dir: str):
+    """Scans .conf files for any bind/unbind directives."""
+    conf_binds = []
+    conf_unbinds = []
+    bind_pattern = re.compile(r'^\s*(bind[elmd]?|unbind)\s*=\s*(.*?)(?:#(.*))?$', re.IGNORECASE)
+    
+    for conf_file in Path(hypr_dir).rglob("*.conf"):
+        if ".conf-old" in conf_file.parts:
+            continue
+        try:
+            with open(conf_file, 'r', encoding='utf-8', errors='ignore') as f:
+                for line_num, line in enumerate(f, start=1):
+                    line_clean = line.strip()
+                    if not line_clean or line_clean.startswith('#'):
+                        continue
+                    m = bind_pattern.match(line)
+                    if m:
+                        directive = m.group(1).lower()
+                        rest = m.group(2).strip()
+                        comment = (m.group(3) or "").strip()
+                        
+                        parts = [p.strip() for p in rest.split(',')]
+                        if len(parts) >= 2:
+                            mods_raw = parts[0]
+                            key_raw = parts[1]
+                            combo = f"{mods_raw} + {key_raw}" if mods_raw else key_raw
+                            action = ", ".join(parts[2:]) if len(parts) > 2 else ""
+                            
+                            if directive == 'unbind':
+                                conf_unbinds.append({
+                                    "key": combo,
+                                    "file": str(conf_file),
+                                    "line": line_num,
+                                })
+                            else:
+                                conf_binds.append({
+                                    "key": combo,
+                                    "action": action,
+                                    "is_function": False,
+                                    "file": str(conf_file),
+                                    "line": line_num,
+                                    "submap": "",
+                                    "description": comment,
+                                    "locked": 'l' in directive,
+                                    "repeating": 'e' in directive,
+                                    "non_consuming": False,
+                                    "directive": directive
+                                })
+        except Exception:
+            continue
+            
+    return conf_binds, conf_unbinds
+
+class KeybindEntry:
+    def __init__(self, raw_data, source_type="lua"):
+        self.raw_key = raw_data.get("key", "")
+        self.action = raw_data.get("action", "")
+        self.is_function = raw_data.get("is_function", False)
+        self.file = raw_data.get("file", "")
+        self.line = raw_data.get("line", 0)
+        self.submap = raw_data.get("submap", "")
+        self.description = raw_data.get("description", "")
+        self.locked = raw_data.get("locked", False)
+        self.repeating = raw_data.get("repeating", False)
+        self.non_consuming = raw_data.get("non_consuming", False)
+        self.source_type = source_type
+        self.is_override = False
+        self.is_unbound = False
+        self.is_custom = "custom" in self.file.lower()
+        self.function_code = ""
+
+        self.mods, self.key = parse_combo_string(self.raw_key)
+        self.combo_formatted = format_combo(self.mods, self.key)
+
+        # Prettify file path
+        home = os.path.expanduser("~")
+        if self.file.startswith(home):
+            self.display_file = "~" + self.file[len(home):]
+        else:
+            self.display_file = self.file
+
+        # Clean up description
+        if self.description:
+            self.description = re.sub(r'^\s*\[hidden\]\s*', '', self.description).strip()
+
+def collect_all_binds(include_conf=True):
+    hypr_dir = os.path.expanduser("~/.config/hypr")
+    lua_binds_raw, lua_unbinds_raw = load_lua_binds()
+    conf_binds_raw, conf_unbinds_raw = scan_conf_binds(hypr_dir) if include_conf else ([], [])
+
+    all_entries = []
+    
+    # Process unbinds
+    unbound_combos = set()
+    for u in lua_unbinds_raw + conf_unbinds_raw:
+        umods, ukey = parse_combo_string(u.get("key", ""))
+        unbound_combos.add((frozenset(umods), ukey))
+
+    # Process lua entries
+    seen_combos = {}
+    for b in lua_binds_raw:
+        entry = KeybindEntry(b, source_type="lua")
+        combo_key = (frozenset(entry.mods), entry.key, entry.submap)
+        
+        # Check if overridden
+        if combo_key in seen_combos:
+            seen_combos[combo_key].is_override = True
+        
+        if combo_key[:2] in unbound_combos and not entry.is_custom:
+            entry.is_unbound = True
+            
+        if entry.is_function and entry.file:
+            entry.function_code = extract_function_body(entry.file, entry.line)
+            
+        seen_combos[combo_key] = entry
+        all_entries.append(entry)
+
+    # Process conf entries
+    if include_conf:
+        for b in conf_binds_raw:
+            entry = KeybindEntry(b, source_type="conf")
+            combo_key = (frozenset(entry.mods), entry.key, entry.submap)
+            if combo_key[:2] in unbound_combos and not entry.is_custom:
+                entry.is_unbound = True
+            all_entries.append(entry)
+
+    return all_entries
+
+def search_binds(entries, query: str):
+    mods_q, key_q, raw_q = tokenize_user_query(query)
+    
+    exact_matches = []
+    superset_matches = []
+    key_matches = []
+    text_matches = []
+    
+    raw_lower = raw_q.lower()
+    is_single_key_query = bool(key_q and not mods_q)
+    
+    for e in entries:
+        is_exact = False
+        is_superset = False
+        is_key_match = False
+        is_text = False
+        
+        if key_q and e.key:
+            if e.key.lower() == key_q.lower():
+                if mods_q == e.mods:
+                    is_exact = True
+                elif mods_q.issubset(e.mods) and len(mods_q) > 0:
+                    is_superset = True
+                else:
+                    is_key_match = True
+        elif not key_q and mods_q:
+            # Query is only modifiers (e.g. 'super', 'super+shift')
+            if mods_q == e.mods:
+                is_exact = True
+            elif mods_q.issubset(e.mods):
+                is_superset = True
+
+        # Only perform text match if not already matched AND query is not a single character key
+        if not (is_exact or is_superset or is_key_match):
+            if not is_single_key_query and len(raw_lower) >= 2:
+                if (raw_lower in e.description.lower() or 
+                    raw_lower in e.action.lower() or 
+                    raw_lower in e.combo_formatted.lower() or
+                    raw_lower in e.display_file.lower()):
+                    is_text = True
+
+        if is_exact:
+            exact_matches.append(e)
+        elif is_superset:
+            superset_matches.append(e)
+        elif is_key_match:
+            key_matches.append(e)
+        elif is_text:
+            text_matches.append(e)
+
+    # Sort each group: custom entries first, then lua before conf, then by line
+    def sort_key(e: KeybindEntry):
+        return (0 if e.is_custom else 1, 0 if e.source_type == "lua" else 1, len(e.mods), e.display_file, e.line)
+
+    exact_matches.sort(key=sort_key)
+    superset_matches.sort(key=sort_key)
+    key_matches.sort(key=sort_key)
+    text_matches.sort(key=sort_key)
+
+    return exact_matches, superset_matches, key_matches, text_matches, (mods_q, key_q)
+
+def render_entry(e: KeybindEntry, highlight_exact=False):
+    status_tags = []
+    if e.is_custom:
+        status_tags.append(bold_green("[CUSTOM]"))
+    if e.is_unbound:
+        status_tags.append(red("[UNBOUND/OVERRIDDEN]"))
+    elif e.is_override:
+        status_tags.append(yellow("[OVERRIDDEN]"))
+    if e.submap:
+        status_tags.append(magenta(f"[Submap: {e.submap}]"))
+    if e.locked:
+        status_tags.append(dim("[locked]"))
+    if e.repeating:
+        status_tags.append(dim("[repeating]"))
+
+    tag_str = (" " + " ".join(status_tags)) if status_tags else ""
+    
+    combo_disp = bold_green(e.combo_formatted) if highlight_exact else bold_cyan(e.combo_formatted)
+    loc_disp = dim(f"{e.display_file}:{e.line}")
+    
+    print(f"  • {combo_disp}{tag_str}  {loc_disp}")
+    
+    if e.description:
+        print(f"    {bold('Description:')} {e.description}")
+    
+    if e.is_function:
+        print(f"    {bold('Action:')}      {cyan('[Custom Lua Function]')}")
+        if e.function_code:
+            code_lines = e.function_code.strip().split('\n')
+            preview = code_lines[:6]
+            print(dim("    ┌─ (Function Preview)"))
+            for cl in preview:
+                print(dim(f"    │  {cl}"))
+            if len(code_lines) > 6:
+                print(dim("    │  ..."))
+            print(dim("    └─"))
+    elif e.action:
+        act = e.action
+        if act.startswith("dsp.exec_cmd("):
+            cmd = act[13:-1]
+            print(f"    {bold('Command:')}     {cyan(cmd)}")
+        elif act.startswith("dsp.global("):
+            target = act[11:-1]
+            print(f"    {bold('Quickshell:')}  {bold_magenta(target)}")
+        elif act.startswith("dsp."):
+            print(f"    {bold('Action:')}      {cyan(act)}")
+        else:
+            print(f"    {bold('Action:')}      {cyan(act)}")
+    print()
+
+def display_results(query: str, exact, superset, key_m, text_m, parsed_tuple):
+    mods_q, key_q = parsed_tuple
+    norm_query_str = format_combo(mods_q, key_q) if (mods_q or key_q) else query
+
+    print()
+    print(bold(f"🔍 Search results for: ") + bold_yellow(f"'{query}'") + (dim(f" (normalized: {norm_query_str})") if norm_query_str != query else ""))
+    print(dim("─" * 65))
+
+    if not (exact or superset or key_m or text_m):
+        print(bold_red(f"  ✖ No keybinds found matching '{query}'"))
+        if mods_q or key_q:
+            print(dim(f"    • Combo: {norm_query_str} is currently unassigned in ~/.config/hypr"))
+        print()
+        return
+
+    if exact:
+        print(bold_green("  ✔ EXACT MATCH:"))
+        for e in exact:
+            render_entry(e, highlight_exact=True)
+
+    if superset:
+        print(bold_cyan(f"  ✦ COMBINATIONS CONTAINING {norm_query_str}:"))
+        for e in superset:
+            render_entry(e, highlight_exact=False)
+
+    if key_m and not exact:
+        print(bold_yellow(f"  ◆ ALL KEYBINDS ON KEY [{key_q}]:"))
+        for e in key_m:
+            render_entry(e, highlight_exact=False)
+
+    if text_m:
+        print(bold_cyan("  ✦ MATCHES BY ACTION / DESCRIPTION / PATH:"))
+        for e in text_m:
+            render_entry(e, highlight_exact=False)
+
+def run_interactive(entries):
+    print(bold_cyan("Hyprland Keybind Inspector (Interactive Mode)"))
+    print(dim("Type a key combo (e.g. 'super,shift,d', 'super,a', 'a', 'terminal') or 'exit'/'q' to quit.\n"))
+    while True:
+        try:
+            q = input(bold("hyprbinds > ")).strip()
+            if not q:
+                continue
+            if q.lower() in ('q', 'quit', 'exit'):
+                break
+            exact, superset, key_m, text_m, parsed = search_binds(entries, q)
+            display_results(q, exact, superset, key_m, text_m, parsed)
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting.")
+            break
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Real-time Hyprland Keybind Search & Inspector across ~/.config/hypr",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  hyprbinds super,shift,d       Search for Super+Shift+D
+  hyprbinds super,a             Search for Super+A
+  hyprbinds a                   Search all bindings using key 'A'
+  hyprbinds "ctrl + alt + del"  Search multi-modifier combos
+  hyprbinds super,,             Search Super + Comma
+  hyprbinds terminal            Search binds by description or action
+  hyprbinds --lua-only          Only search Lua keybinds (keybinds.lua)
+  hyprbinds --all               List all registered keybinds
+  hyprbinds                     Start interactive search mode
+"""
+    )
+    parser.add_argument("query", nargs="*", help="Key combination or search term (e.g. 'super,shift,d', 'a', 'super,a')")
+    parser.add_argument("-a", "--all", action="store_true", help="List all configured keybindings")
+    parser.add_argument("-L", "--lua-only", action="store_true", help="Only inspect Lua config files (keybinds.lua)")
+    parser.add_argument("-j", "--json", action="store_true", help="Output results in JSON format")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Start interactive search mode")
+    parser.add_argument("--no-color", action="store_true", help="Disable colored output")
+
+    args = parser.parse_args()
+
+    global USE_COLOR
+    if args.no_color:
+        USE_COLOR = False
+
+    include_conf = not args.lua_only
+    entries = collect_all_binds(include_conf=include_conf)
+
+    if args.all:
+        if args.json:
+            print(json.dumps([{
+                "combo": e.combo_formatted,
+                "mods": list(e.mods),
+                "key": e.key,
+                "description": e.description,
+                "action": e.action,
+                "file": e.file,
+                "line": e.line,
+                "submap": e.submap,
+                "unbound": e.is_unbound,
+                "override": e.is_override,
+                "custom": e.is_custom
+            } for e in entries], indent=2))
+        else:
+            print(bold_cyan(f"All Configured Hyprland Keybinds ({len(entries)} total):"))
+            print(dim("─" * 65))
+            for e in entries:
+                render_entry(e)
+        return
+
+    if not args.query or args.interactive:
+        run_interactive(entries)
+        return
+
+    query_str = " ".join(args.query)
+    exact, superset, key_m, text_m, parsed = search_binds(entries, query_str)
+
+    if args.json:
+        results = exact + superset + key_m + text_m
+        print(json.dumps([{
+            "combo": e.combo_formatted,
+            "mods": list(e.mods),
+            "key": e.key,
+            "description": e.description,
+            "action": e.action,
+            "file": e.file,
+            "line": e.line,
+            "submap": e.submap,
+            "unbound": e.is_unbound,
+            "override": e.is_override,
+            "custom": e.is_custom
+        } for e in results], indent=2))
+    else:
+        display_results(query_str, exact, superset, key_m, text_m, parsed)
+
+if __name__ == "__main__":
+    main()

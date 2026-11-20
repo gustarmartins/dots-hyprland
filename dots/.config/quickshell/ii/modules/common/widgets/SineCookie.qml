@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import QtQuick.Shapes
 import Quickshell
 import qs.modules.common
@@ -20,7 +21,7 @@ Item {
     property real shapeRotation: 0
 
     Loader {
-        active: constantlyRotate
+        active: root.constantlyRotate && root.visible && (root.Window.window?.visible ?? false)
         sourceComponent: FrameAnimation {
             running: true
             onTriggered: {

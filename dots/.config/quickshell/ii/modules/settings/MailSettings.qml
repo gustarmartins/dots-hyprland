@@ -26,7 +26,7 @@ ColumnLayout {
     }
     StyledText {
         Layout.fillWidth: true
-        text: Mail.enabled ? (Mail.state.connected ? Mail.state.status || "Connected to Thunderbird" : "Waiting for Thunderbird. If it is already open, use its Quickshell Mail toolbar button to reconnect.") : "Off. Background mail checking is stopped."
+        text: Mail.enabled ? (Mail.state.connected ? Mail.state.status || "Connected to Thunderbird" : Mail.state.issue || "Waiting for Thunderbird. If it is already open, use its Quickshell Mail toolbar button to reconnect.") : "Off. Background mail checking is stopped."
         wrapMode: Text.WordWrap
         font.pixelSize: 13
         color: Appearance.m3colors.m3onSurfaceVariant
@@ -38,6 +38,7 @@ ColumnLayout {
         Repeater {
             model: [
                 {key:"notifications", title:"New mail notifications"},
+                {key:"careerOnly", title:"Only job application updates"},
                 {key:"preview", title:"Show message previews"},
                 {key:"codes", title:"Copy verification codes"},
                 {key:"links", title:"Show link actions"}

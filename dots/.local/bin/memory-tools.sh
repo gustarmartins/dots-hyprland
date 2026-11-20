@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+if [ -x /usr/local/libexec/cryod-desktop/memory-tools.sh ] && [ -z "${MEMORY_TOOLS_STANDALONE:-}" ]; then
+    exec /usr/local/libexec/cryod-desktop/memory-tools.sh "$@"
+fi
 set -euo pipefail
 
 ROOT_HELPER=/usr/local/bin/memory-tool-apply

@@ -104,8 +104,12 @@ MouseArea { // Notification group area
         }
 
         onClicked: (mouse) => {
-            if (mouse.button === Qt.LeftButton)
-                root.toggleExpanded();
+            if (mouse.button === Qt.LeftButton) {
+                const notif = root.notifications[0];
+                if (!root.multipleNotifications && Notifications.visibleActions(notif).some(a => a.identifier === "default"))
+                    Notifications.attemptInvokeAction(notif.notificationId, "default");
+                else root.toggleExpanded();
+            }
             else if (mouse.button === Qt.MiddleButton)
                 root.destroyWithAnimation();
         }
@@ -232,6 +236,7 @@ MouseArea { // Notification group area
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
                         count: root.notificationCount
+                        more: !root.multipleNotifications
                         expanded: root.expanded
                         fontSize: topRow.fontSize
                         onClicked: { root.toggleExpanded() }
@@ -266,7 +271,8 @@ MouseArea { // Notification group area
                         required property int index
                         required property var modelData
                         notificationObject: modelData
-                        expanded: root.expanded
+                        groupExpanded: root.expanded
+                        onGroupExpansionRequested: root.toggleExpanded()
                         popup: root.popup
                         onlyNotification: (root.notificationCount === 1)
                         opacity: (!root.expanded && index == 1 && root.notificationCount > 2) ? 0.5 : 1

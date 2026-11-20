@@ -37,42 +37,18 @@ rows=[proc(101,'editor',3*GIB,'editor.scope',True),proc(102,'worker',256*1024**2
       proc(203,'render-helper',1500*1024**2,'render.scope')]
 rows[2]['group_count']=2
 rows += [proc(204,'browser-helper',128*1024**2,'browser.scope')]
+# Large transient builds should not crowd out apps; separate instances remain searchable.
+rows += [proc(205,'java',8*GIB,'cryomgr-build-123.service'),
+         proc(206,'browser',300*1024**2,'browser-other.scope')]
+external=proc(207,'external',100*1024**2,'external.scope',True)
+external.update(lock_id=None,can_lock=True)
+rows.append(external)
 fixture=dict(schema=2,boot='fixture-boot',sampled_at=time.time(),enabled=True,automatic=True,reminders=True,remind_days=2,
              rules=[dict(name='editor')],memory=memory,processes=rows,
              locks=[dict(id='group-a',unit='editor.scope',status='locked',age_days=2.3,members=rows[:2])])
 (OUT/'fixture.json').write_text(json.dumps(fixture))
 p=bins/'noswap'
-p.write_text('''#!/usr/bin/env python3
-import json,sys,time
-from pathlib import Path
-root=Path.home();path=root/'fixture.json';data=json.loads(path.read_text());args=sys.argv[1:]
-with (root/'calls.jsonl').open('a') as f:f.write(json.dumps(args)+'\\n')
-if args[0]=='dashboard':
- if (root/'read-failure').exists():print('Fixture cannot read process memory',file=sys.stderr);sys.exit(1)
- print(json.dumps(data))
-elif args[0]=='inspect':
- p=next(p for p in data['processes'] if p['pid']==int(args[1]))
- assert args[args.index('--expect-start')+1]==str(p['start'])
- assert args[args.index('--expect-boot')+1]==data['boot']
- members=[q for q in data['processes'] if q['group']==p['group']]
- print(json.dumps(dict(process=p,identity=dict(pid=p['pid'],start=p['start'],boot=data['boot']),unit=p['unit'],members=members,memory=data['memory'],group_memory=sum(q['rss'] for q in members),group_swap=p['swap'],risky=len(members)>1 or p['large_rss'],warnings=['Shared group: all listed processes will be protected.'] if len(members)>1 else [])))
-elif args[0]=='lock':
- assert '--expect-identity' in args and '--force' in args
- if (root/'stale-preview').exists():print('Process or group changed since the preview. Refresh and review it again.',file=sys.stderr);sys.exit(1)
- target=next(p for p in data['processes'] if p['pid']==int(args[1]))
- for p in data['processes']:
-  if p['group']==target['group']:p.update(protected=True,can_lock=False,lock_id='new-lock',age_days=0)
- data['locks'].append(dict(id='new-lock',unit=target['unit'],status='locked',members=[p for p in data['processes'] if p['group']==target['group']]))
- path.write_text(json.dumps(data))
-elif args[0]=='unlock':
- for p in data['processes']:
-  if p['lock_id']==args[1]:p.update(protected=False,can_lock=True,lock_id=None,age_days=None)
- data['locks']=[r for r in data['locks'] if r['id']!=args[1]];path.write_text(json.dumps(data))
-elif args[0] in ('off','on'):
- if len(args)>1 and args[1]=='automatic':data['automatic']=args[0]=='on'
- else:data['enabled']=args[0]=='on'
- path.write_text(json.dumps(data))
-''');p.chmod(0o755)
+shutil.copy2(REPO/'tests/fixtures/noswap_ui.py',p);p.chmod(0o755)
 env=os.environ.copy()
 env.update(HOME=str(OUT),XDG_CONFIG_HOME=str(OUT/'config'),XDG_DATA_HOME=str(OUT/'data'),XDG_CACHE_HOME=str(OUT/'cache'),
            XDG_STATE_HOME=str(OUT/'state'),XDG_RUNTIME_DIR=str(RUNTIME),QT_QPA_PLATFORM='xcb',QT_QUICK_BACKEND='software',
@@ -102,7 +78,12 @@ probe=r'''
         }
         function state(): string {
             const n=root.findMemoryNode("memoryLocks");
-            return JSON.stringify(n ? {ready:n.ready,enabled:n.state.enabled,rows:n.rows.map(p=>p.pid),tab:n.tab,error:n.error,readError:n.readError,pending:n.pendingKind,busy:n.busy} : {});
+            return JSON.stringify({ready:MemoryLockDraft.ready,enabled:MemoryLockDraft.snapshot.enabled,
+                draftEnabled:MemoryLockDraft.draft.enabled,rows:n ? n.rows.map(p=>p.pid) : [],tab:n ? n.tab : -1,
+                error:MemoryLockDraft.error,readError:MemoryLockDraft.readError,dirty:MemoryLockDraft.dirty,
+                applying:MemoryLockDraft.applying,checking:MemoryLockDraft.checking,ops:MemoryLockDraft.operations,
+                names:MemoryLockDraft.draft.rules.map(r=>r.name),results:MemoryLockDraft.results,version:MemoryLockDraft.editVersion,
+                windowWidth:root.width});
         }
         function reveal(name: string): void {
             const n=root.findMemoryNode(name);if(!n)return;
@@ -111,10 +92,15 @@ probe=r'''
             view.contentY=Math.max(0,Math.min(view.contentHeight-view.height,view.contentY+at.y-180));
         }
         function query(value: string): void { root.findMemoryNode("memorySearch").text=value; }
+        function name(value: string): void { MemoryLockDraft.nameText=value; }
         function sort(value: int): void { root.findMemoryNode("memoryLocks").sortIndex=value; }
         function refresh(): void { root.findMemoryNode("memoryLocks").refresh(); }
         function resize(width: int, height: int): void { root.width=width;root.height=height; }
         function top(): void { catalogPage.contentItem.contentY=0; }
+        function apply(): void { MemoryLockDraft.applyAll(); }
+        function release(pid: int): void { MemoryLockDraft.selectRelease(MemoryLockDraft.snapshot.processes.find(p=>p.pid===pid)); }
+        function remove(id: string): void { MemoryLockDraft.removeOperation(id); }
+        function acknowledge(): void { MemoryLockDraft.acknowledged=true; }
     }
 '''
 s=entry.read_text();entry.write_text(s[:s.rfind('}')]+probe+'\n}\n')
@@ -138,7 +124,7 @@ def node(name):return json.loads(call('memoryTest','locate',name))
 def window():return subprocess.check_output(['xdotool','search','--name','^illogical-impulse Settings$'],env=env,text=True).splitlines()[-1]
 def click(name,dialog=False):
     n=until(lambda:node(name))
-    if not dialog:
+    if not dialog and name not in ('memoryApplyAll','memoryDiscard','memoryReview'):
         call('memoryTest','reveal',name);time.sleep(.1);n=node(name)
     assert n['enabled'],(name,n)
     assert 0<=n['x']<=1180 and 0<=n['y']<=800,(name,n)
@@ -148,69 +134,142 @@ def screenshot(name):
     subprocess.run(['magick','import','-window',window(),str(OUT/(name+'.png'))],env=env,check=True,capture_output=True)
 def mutations():
     return [a for a in map(json.loads,(OUT/'calls.jsonl').read_text().splitlines()) if a[0] not in ('dashboard','inspect')]
+def saved():
+    click('memoryTabSaved')
+def on_screen(name, bottom):
+    n=until(lambda:node(name))
+    assert n['height'] > 0 and n['y'] - n['height']/2 >= 0 and n['y'] + n['height']/2 <= bottom, (name,n)
+    assert n['x'] - n['width']/2 >= 0 and n['x'] + n['width']/2 <= state()['windowWidth'], (name,n,state()['windowWidth'])
+def tabs_fit():
+    parent=node('memoryViews')
+    names=['memoryTabSuggested','memoryTabSearch','memoryTabLocked','memoryTabSaved']
+    if node('memoryTabReview'): names.append('memoryTabReview')
+    for name in names:
+        n=node(name)
+        assert n['x']-n['width']/2 >= parent['x']-parent['width']/2-1, (name,n,parent)
+        assert n['x']+n['width']/2 <= parent['x']+parent['width']/2+1, (name,n,parent)
 try:
     until(lambda:json.loads(call('settings','status'))['ready'])
-    call('settings','open','memory')
-    until(lambda:state().get('ready'))
-    assert state()['rows']==[101,102],state()
-    call('memoryTest','top');time.sleep(.2);screenshot('locked')
-    click('memoryTabSuggested')
-    until(lambda:state()['tab']==1)
-    assert state()['rows']==[201,203,202],state()  # one candidate per group
-    click('memoryTabSearch');call('memoryTest','query','music')
-    until(lambda:state()['rows']==[202])
-    call('memoryTest','query','201');until(lambda:state()['rows']==[201])
-    click('memoryAction:201')
-    until(lambda:node('memoryApply'))
-    assert not node('memoryApply')['enabled'],'Risk bypass must require explicit acknowledgement'
-    screenshot('risk-dialog')
-    click('memoryCancel',True)
-    assert mutations()==[],mutations()
-    click('memoryAction:201');until(lambda:node('memoryApply'))
-    click('memoryRiskAccepted',True)
-    assert node('memoryApply')['enabled']
-    click('memoryApply',True)
-    until(lambda:node('memoryAction:201')['text']=='Release…')
-    assert mutations()[0][0]=='lock'
-    assert '--expect-identity' in mutations()[0]
-    click('memoryAction:201');until(lambda:node('memoryApply'))
-    click('memoryApply',True)
-    until(lambda:node('memoryAction:201')['text']=='Lock…')
-    assert mutations()[-1]==['unlock','new-lock']
-    call('memoryTest','query','does-not-exist');until(lambda:state()['rows']==[])
-    call('memoryTest','query','');call('memoryTest','sort','1')
-    until(lambda:state()['rows'][0]==201)
-    call('memoryTest','sort','3');until(lambda:state()['rows']==[101,102,201,202,203,204])
-    call('memoryTest','resize','700','650');call('memoryTest','top');time.sleep(.25);screenshot('compact')
-    call('memoryTest','query','201');call('memoryTest','reveal','memoryAction:201');time.sleep(.15);screenshot('compact-process')
-    click('memoryAction:201');until(lambda:node('memoryApply'));screenshot('compact-dialog');click('memoryCancel',True)
-    call('memoryTest','resize','1180','800')
-    call('memoryTest','query','201');click('memoryAction:201');until(lambda:node('memoryApply'))
-    (OUT/'stale-preview').touch()
-    click('memoryRiskAccepted',True);click('memoryApply',True)
-    until(lambda:'changed since the preview' in state()['error'])
-    assert node('memoryAction:201')['text']=='Lock…'
-    (OUT/'stale-preview').unlink()
+    call('settings','open','memory');until(lambda:state().get('ready'))
+    assert state()['tab']==0 and state()['rows']==[201,203,202],state()
+    assert not state()['dirty'] and mutations()==[]
+    # The primary task must be visible immediately, without scrolling, at both sizes.
+    for name in ('memorySearch','memoryTabSuggested','memoryAction:201','memoryAction:203','memoryApplyAll'):
+        on_screen(name,800)
+    tabs_fit()
+    screenshot('initial-processes')
+    call('memoryTest','resize','700','650');call('memoryTest','top');time.sleep(.2)
+    for name in ('memorySearch','memoryAction:201','memoryAction:203','memoryApplyAll'):
+        on_screen(name,650)
+    tabs_fit()
+    screenshot('compact-processes')
+    call('memoryTest','resize','1180','800');call('memoryTest','top');time.sleep(.2)
+    call('memoryTest','query','java')
+    assert state()['tab']==1 and state()['rows']==[205], 'Build jobs must remain searchable in All'
+    call('memoryTest','query','browser')
+    assert state()['rows']==[201,206,204], 'All must retain separate instances and group members'
+    call('memoryTest','query','external')
+    assert node('memoryAction:207')['text']=='Protected' and not node('memoryAction:207')['enabled'], 'External protection must not offer a release or a new lock'
+    click('memoryTabSuggested');call('memoryTest','top')
+    # No existing locks must still open on usable suggestions.
+    initial=(OUT/'fixture.json').read_text()
+    empty=json.loads(initial);empty['locks']=[]
+    for p in empty['processes']:
+        p.update(protected=False,can_lock=True,lock_id=None,age_days=None)
+    (OUT/'fixture.json').write_text(json.dumps(empty));call('memoryTest','refresh')
+    until(lambda:state()['rows'] and state()['rows'][0]==101)
+    on_screen('memoryAction:101',800)
+    (OUT/'fixture.json').write_text(initial);call('memoryTest','refresh')
+    until(lambda:state()['rows']==[201,203,202])
+    saved()
+    call('memoryTest','name','mpv, future-player');click('memorySaveName')
+    assert state()['names']==['editor','future-player','mpv']
+    assert state()['dirty'] and mutations()==[], 'Adding names must not write settings'
+    call('settings','open','about');call('settings','open','memory')
+    saved()
+    until(lambda:node('memoryRemoveName:future-player'))
+    assert state()['names']==['editor','future-player','mpv'], 'Navigation lost the draft'
+    click('memoryTabSearch');call('memoryTest','query','201');click('memoryAction:201')
+    call('memoryTest','query','202');click('memoryAction:202')
+    until(lambda:len(state()['ops'])==2 and not state()['checking'])
+    assert node('memoryAction:202')['text']=='Undo', 'Selected groups need a visible undo action'
+    call('memoryTest','resize','700','650');call('memoryTest','top');time.sleep(.2)
+    tabs_fit();on_screen('memoryReview',650);on_screen('memoryApplyAll',650);screenshot('compact-staged')
+    call('memoryTest','resize','1180','800');call('memoryTest','top');time.sleep(.2)
+    assert node('memoryConfirm') is None, 'Selections should not open blocking dialogs'
+    assert mutations()==[] and not node('memoryApplyAll')['enabled']
+    click('memoryReview')
+    click('memoryRiskAccepted');assert node('memoryApplyAll')['enabled']
+    screenshot('staged-review')
+    (OUT/'partial-failure').touch();click('memoryApplyAll')
+    until(lambda:not state()['applying'] and 'permission denied' in state()['error'])
+    assert len(mutations())==1 and mutations()[0][0]=='batch'
+    assert len(state()['ops'])==1 and state()['ops'][0]['identity']['pid']==201
+    result={r['label']:r['ok'] for r in state()['results']}
+    assert True in result.values() and False in result.values()
+    (OUT/'partial-failure').unlink();click('memoryApplyAll')
+    until(lambda:not state()['applying'] and not state()['dirty'])
+    payload=json.loads(mutations()[-1][-1]);assert len(payload['operations'])==1
+    assert payload['operations'][0]['identity']['pid']==201, 'Successful actions must not be resubmitted'
+    assert set(r['name'] for r in payload['settings']['rules'])=={'editor','mpv','future-player'}
+    # A slow helper must leave editing, navigation, and IPC responsive.
+    saved()
+    call('memoryTest','name','first-wave');click('memorySaveName')
+    (OUT/'slow-apply').touch();before_calls=len(mutations());click('memoryApplyAll')
+    until(lambda:(OUT/'apply-started').exists())
+    assert not node('memoryApplyAll')['enabled']
+    t=time.monotonic();call('memoryTest','state');assert time.monotonic()-t<1.5
+    call('memoryTest','apply');assert len(mutations())==before_calls+1, 'Duplicate apply was submitted'
+    call('memoryTest','name','next-wave');click('memorySaveName')
+    assert 'next-wave' in state()['names']
+    call('settings','open','about')
+    until(lambda:not state()['applying'])
+    assert state()['dirty'] and 'next-wave' in state()['names'], 'Edits during apply were lost'
+    call('settings','open','memory');saved();until(lambda:node('memoryName'))
+    (OUT/'slow-apply').unlink();click('memoryApplyAll')
+    until(lambda:not state()['applying'] and not state()['dirty'])
+    # Changing a saved row is also only a draft; Discard restores the saved list.
+    click('memoryRemoveName:mpv');assert 'mpv' not in state()['names']
+    count=len(mutations());click('memoryDiscard')
+    assert 'mpv' in state()['names'] and len(mutations())==count
+    # A concurrent CLI settings change must never be overwritten by a stale draft.
+    call('memoryTest','name','conflicting-draft');click('memorySaveName')
+    data=json.loads((OUT/'fixture.json').read_text());data['revision']+=1;data['reminders']=False
+    (OUT/'fixture.json').write_text(json.dumps(data));click('memoryApplyAll')
+    until(lambda:not state()['applying'] and 'changed elsewhere' in state()['error'])
+    assert state()['dirty'] and 'conflicting-draft' in state()['names']
+    call('memoryTest','refresh');time.sleep(.2);click('memoryDiscard')
+    assert 'conflicting-draft' not in state()['names']
+    # Multiple releases are selected first and submitted in one batch.
+    call('memoryTest','release','201');call('memoryTest','release','202')
+    assert len(state()['ops'])==2
+    count=len(mutations());click('memoryApplyAll');until(lambda:not state()['applying'] and not state()['dirty'])
+    assert len(mutations())==count+1
+    assert len(json.loads(mutations()[-1][-1])['operations'])==2
+    # Refresh failures preserve draft text and disable Apply without freezing navigation.
+    call('memoryTest','name','retained-after-read-failure');click('memorySaveName')
     (OUT/'read-failure').touch();call('memoryTest','refresh')
-    until(lambda:not state()['ready'] and 'Fixture cannot read' in state()['readError'])
-    assert node('memoryTabSearch') is None,'Failed reads must not leave stale actions enabled'
-    (OUT/'read-failure').unlink();call('memoryTest','refresh')
-    until(lambda:state()['ready'] and state()['readError']=='')
-    call('memoryTest','query','202');click('memoryAction:202');until(lambda:node('memoryApply'))
-    assert node('memoryRiskAccepted') is None,'Single small group should use a normal confirmation'
-    assert node('memoryApply')['enabled']
-    click('memoryCancel',True)
-    click('memoryMaster');until(lambda:node('memoryApply'))
-    click('memoryCancel',True);assert state()['enabled']
-    click('memoryMaster');until(lambda:node('memoryApply'));click('memoryApply',True)
-    until(lambda:not state()['enabled'])
-    assert node('memoryTabSearch') is None,'Master off must hide owned feature UI'
-    assert mutations()[-1]==['off','--force']
-    assert config.read_bytes()==original_config,'Browsing memory tools changed desktop configuration'
-    log.flush()
-    issues=[line for line in (OUT/'settings.log').read_text().splitlines() if ('MemoryLocks.qml' in line or 'MemoryProcessRow.qml' in line) and any(e in line for e in ('Error','Unable to assign','Binding loop','Cannot assign','ReferenceError'))]
+    until(lambda:not state()['ready'])
+    assert 'retained-after-read-failure' in state()['names'] and not node('memoryApplyAll')['enabled']
+    assert node('memoryName')['enabled'], 'Status refresh failure froze draft editing'
+    call('memoryTest','name','edited-while-status-unavailable');click('memorySaveName')
+    assert 'edited-while-status-unavailable' in state()['names']
+    call('settings','open','about');call('settings','open','memory')
+    saved()
+    (OUT/'read-failure').unlink();call('memoryTest','refresh');until(lambda:state()['ready'])
+    assert 'retained-after-read-failure' in state()['names'];click('memoryDiscard')
+    # Footer stays visible on a compact window; master off stages before applying.
+    call('memoryTest','resize','700','650');call('memoryTest','top');time.sleep(.2);screenshot('compact-batch')
+    assert 0<node('memoryApplyAll')['y']<650
+    count=len(mutations());click('memoryMaster')
+    assert not state()['draftEnabled'] and state()['enabled'] and len(mutations())==count
+    assert node('memoryTabSearch') is None
+    click('memoryApplyAll');until(lambda:not state()['enabled'] and not state()['dirty'])
+    assert config.read_bytes()==original_config, 'Memory editing changed unrelated desktop configuration'
+    issues=[line for line in (OUT/'settings.log').read_text().splitlines() if any(n in line for n in ('MemoryLocks.qml','MemoryProcessRow.qml','MemoryLockDraft.qml')) and any(e in line for e in ('Error','Unable to assign','Binding loop','Cannot assign','ReferenceError'))]
     assert not issues,issues
-    print('PASS: RSS/swap sorting, candidates, PID/name search, risk cancel/override, guarded lock, group release, stale preview, master off and compact rendering; no real memory actions')
+    print('PASS: stage multiple names and groups; no mutation before Apply all; partial retry only failed actions; slow apply remains editable; navigation retains drafts; concurrent changes rejected; compact footer and master off verified')
+
 finally:
     process.terminate()
     try:process.wait(timeout=5)

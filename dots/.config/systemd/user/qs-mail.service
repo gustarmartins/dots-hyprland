@@ -2,6 +2,8 @@
 Description=Thunderbird for Quickshell Mail
 After=graphical-session.target
 PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -11,6 +13,7 @@ TimeoutStopSec=20
 Restart=always
 RestartSec=3
 RestartPreventExitStatus=75
+SuccessExitStatus=75
 
 [Install]
 WantedBy=graphical-session.target

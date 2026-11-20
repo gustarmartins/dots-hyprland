@@ -22,7 +22,10 @@ current workspace, and right-clicking exposes **Open Mail**, **Hide to Tray**,
 stops its entire process group, disconnects the bridge and removes mail previews
 from Quickshell. A separately started Thunderbird is never killed; its extension
 goes dormant on disable. If Thunderbird ever exits while Mail is enabled, the
-user service automatically restarts it in the background.
+user service automatically restarts it in the background. Repeated failures are
+rate-limited. If Thunderbird or its profile is missing, the service stops and
+Settings explains how to recover; after installing or setting it up, select
+**Start checking**.
 No mail polling timer or model runs
 in Quickshell. The disabled Mail settings entry remains available to enable it.
 

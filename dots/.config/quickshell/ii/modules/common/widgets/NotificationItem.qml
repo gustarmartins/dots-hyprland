@@ -14,7 +14,10 @@ Item { // Notification item area
     objectName: "notificationCard"
     readonly property string formattedBody: NotificationUtils.processNotificationBody(String(notificationObject?.mailData && !Mail.config.preview ? (notificationObject?.body ?? "").split("\n\n")[0] : notificationObject?.body ?? ""), notificationObject?.appName || notificationObject?.summary).replace(/\n/g, "<br/>")
     property var notificationObject
-    property bool expanded: false
+    property bool groupExpanded: false
+    property bool detailsExpanded: false
+    property bool expanded: groupExpanded && (onlyNotification || detailsExpanded)
+    onGroupExpandedChanged: if (!groupExpanded) detailsExpanded = false
     property bool popup: false
     property bool onlyNotification: false
     readonly property var compactActions: Notifications.visibleActions(notificationObject).filter(action => action.identifier !== "default" && String(action.text ?? "").trim().length > 0)
@@ -22,7 +25,7 @@ Item { // Notification item area
     property real padding: onlyNotification ? 0 : 8
     property real summaryElideRatio: 0.85
     property int compactBodyLineCount: popup ? 3 : 2
-    property int expandedBodyLineCount: popup ? 16 : 24
+    property int expandedBodyLineCount: popup ? 16 : 2147483647
 
     property real dragConfirmThreshold: 70 // Drag further to discard notification
     property real dismissOvershoot: notificationIcon.implicitWidth + 20 // Account for gaps and bouncy animations
@@ -36,6 +39,28 @@ Item { // Notification item area
         dragIndexDiff == 2 ? (parentDragDistance * 0.1) : 0
 
     implicitHeight: background.implicitHeight
+    signal groupExpansionRequested()
+
+    Connections {
+        target: Notifications
+        function onSessionOpening(id) {
+            if (root.notificationObject?.notificationId === id) GlobalStates.sidebarRightOpen = false;
+        }
+        function onSessionOpened(id) {
+            if (root.notificationObject?.notificationId === id) GlobalStates.sidebarRightOpen = false;
+        }
+    }
+
+    function toggleExpanded() {
+        if (!root.groupExpanded || root.onlyNotification) root.groupExpansionRequested();
+        else root.detailsExpanded = !root.detailsExpanded;
+    }
+
+    function activate() {
+        const action = Notifications.visibleActions(root.notificationObject).find(a => a.identifier === "default");
+        if (action) Notifications.attemptInvokeAction(root.notificationObject.notificationId, action.identifier);
+        else root.toggleExpanded();
+    }
 
     function destroyWithAnimation(left = false) {
         root.qmlParent.resetDrag()
@@ -72,14 +97,15 @@ Item { // Notification item area
         id: dragManager
         anchors.fill: root
         anchors.leftMargin: root.expanded ? -notificationIcon.implicitWidth : 0
-        interactive: expanded
+        interactive: root.groupExpanded || root.onlyNotification
         automaticallyReset: false
-        acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
 
         onClicked: (mouse) => {
             if (mouse.button === Qt.MiddleButton) {
                 root.destroyWithAnimation();
-            }
+            } else if (mouse.button === Qt.RightButton) root.toggleExpanded();
+            else root.activate();
         }
 
         onDraggingChanged: () => {
@@ -131,13 +157,13 @@ Item { // Notification item area
             }
         }
 
-        color: (expanded && !onlyNotification) ? 
+        color: (root.groupExpanded && !onlyNotification) ?
             ((notificationObject?.urgency ?? NotificationUrgency.Normal) == NotificationUrgency.Critical) ?
                 ColorUtils.mix(Appearance.colors.colSecondaryContainer, Appearance.colors.colLayer2, 0.35) :
                 (Appearance.colors.colLayer3) :
             ColorUtils.transparentize(Appearance.colors.colLayer3)
 
-        implicitHeight: contentColumn.implicitHeight + (expanded ? padding * 2 : 0)
+        implicitHeight: contentColumn.implicitHeight + (root.groupExpanded ? padding * 2 : 0)
         Behavior on implicitHeight {
             animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
         }
@@ -145,7 +171,7 @@ Item { // Notification item area
         ColumnLayout { // Content column
             id: contentColumn
             anchors.fill: parent
-            anchors.margins: expanded ? root.padding : 0
+            anchors.margins: root.groupExpanded ? root.padding : 0
             spacing: 3
 
             Behavior on anchors.margins {
@@ -154,16 +180,18 @@ Item { // Notification item area
 
             RowLayout { // Summary row
                 id: summaryRow
-                visible: !root.onlyNotification || !root.expanded
+                visible: !root.onlyNotification || !root.expanded || summaryText.text.length > 0
                 Layout.fillWidth: true
-                implicitHeight: Math.max(summaryText.implicitHeight, compactBodyText.implicitHeight)
+                implicitHeight: Math.max(summaryText.implicitHeight, compactBodyText.implicitHeight, expansionControl.visible ? expansionControl.implicitHeight : 0)
                 StyledText {
                     id: summaryText
                     Layout.fillWidth: summaryTextMetrics.width >= summaryRow.implicitWidth * root.summaryElideRatio
-                    visible: !root.onlyNotification
+                    visible: !root.onlyNotification || root.expanded
                     font.pixelSize: root.fontSize
                     color: Appearance.colors.colOnLayer3
                     elide: Text.ElideRight
+                    wrapMode: root.expanded ? Text.Wrap : Text.NoWrap
+                    maximumLineCount: root.expanded ? 2147483647 : 1
                     text: root.notificationObject?.summary ?? ""
                 }
                 StyledText {
@@ -185,6 +213,18 @@ Item { // Notification item area
                     text: {
                         return root.expanded ? "" : root.formattedBody
                     }
+                }
+                NotificationGroupExpandButton {
+                    id: expansionControl
+                    objectName: "notificationExpand-" + root.notificationObject?.notificationId
+                    visible: root.groupExpanded && !root.onlyNotification
+                    count: 1
+                    more: true
+                    expanded: root.expanded
+                    onClicked: root.toggleExpanded()
+                    altAction: () => root.toggleExpanded()
+                    Accessible.name: root.expanded ? Translation.tr("Collapse notification") : Translation.tr("Expand notification")
+                    StyledToolTip { text: root.expanded ? Translation.tr("Collapse") : Translation.tr("Show full notification") }
                 }
             }
 

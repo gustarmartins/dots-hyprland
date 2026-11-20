@@ -13,9 +13,11 @@
 #   extras          show pinned sysctl overrides
 #   apply-extras    re-apply /etc/sysctl.d/99-vmscope.conf
 #   legend          show color and status badge legend
+#   restore [NAME] [--check]  undo a saved tuning checkpoint
 set -uo pipefail
 
-NVME=/dev/nvme0n1p1
+NVME=$(findmnt -n -o SOURCE / 2>/dev/null || echo /dev/nvme0n1p1)
+NVME=${NVME%%\[*}
 RAM_PLUS=/var/lib/ram-plus.swap
 STATE=/run/vmatlas-profile.state
 PROFILE_TOOL=/usr/local/bin/vmatlas-profile
@@ -37,7 +39,7 @@ declare -a ORDER=(
   watermark_scale_factor watermark_boost_factor zone_reclaim_mode
   dirty_bytes dirty_background_bytes dirty_ratio dirty_background_ratio
   dirty_expire_centisecs dirty_writeback_centisecs
-  compaction_proactiveness compact_unevictable_allowed defrag_mode extfrag_threshold
+  compaction_proactiveness compact_unevictable_allowed defrag_mode extfrag_threshold percpu_pagelist_high_fraction
   overcommit_memory overcommit_ratio max_map_count numa_stat stat_interval
 )
 declare -A GRP DEF UNIT DESC
@@ -59,6 +61,7 @@ grp compaction_proactiveness  "Compaction & frag" 20        raw   "Background co
 grp compact_unevictable_allowed "Compaction & frag" 1        raw   "Whether compaction may move mlocked/unevictable pages. 0 avoids their fault latency."
 grp defrag_mode              "Compaction & frag" 0          raw   "Proactive anti-fragmentation allocator behavior. 0 keeps it disabled."
 grp extfrag_threshold         "Compaction & frag" 500       raw   "Compact-vs-reclaim tipping point for high-order allocations."
+grp percpu_pagelist_high_fraction "Compaction & frag" 0     raw   "Per-CPU free-page cache cap: 0=automatic; N caps caches at roughly 1/N of zone pages."
 grp overcommit_memory         "Overcommit & maps" 0         raw   "0=heuristic 1=always 2=strict. Desktop wants 0."
 grp overcommit_ratio          "Overcommit & maps" 50        pct   "With mode 2 only: % RAM overcommittable. Ignored in mode 0/1."
 grp max_map_count             "Overcommit & maps" 65530     raw   "Max VMAs/process. Wine/ESync/games want it high (1M+)."
@@ -365,6 +368,8 @@ ${B}vmscope${R} — VM sysctl lens & live rolling delta monitor
   ${GRY}○ default${R}   free knob still at kernel default
 
 usage: vmscope [live [1|10|60]|status|diff|json|watch|explain <knob>|pin <k>[=v]|unpin <k>|extras|apply-extras]
+       vmscope restore [NAME] [--check]
+       vmscope checkpoint {save|seal} NAME
 EOF
 }
 
@@ -378,6 +383,14 @@ liveview() {
 }
 
 case "${1:-live}" in
+  restore)
+    shift
+    exec /usr/local/libexec/vmscope-checkpoint restore "$@"
+    ;;
+  checkpoint)
+    shift
+    exec /usr/local/libexec/vmscope-checkpoint "$@"
+    ;;
   live|watch|monitor)
     shift || true
     liveview "${1:-1}"

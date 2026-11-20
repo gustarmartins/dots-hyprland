@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Manage temporary single-display / virtual-display Hyprland layouts for Sunshine
+# streaming and restore the dual-monitor baseline (DP-1 AOC + HDMI-A-1 Arzopa).
+
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+LOCK_FILE="$RUNTIME_DIR/sunshine-display.lock"
+STATE_FILE="$RUNTIME_DIR/sunshine-display.pending"
+AOC_SELECTOR="desc:AOC 27G2G4 0x00000A71"
+AOC_NAME="DP-1"
+ARZOPA_NAME="HDMI-A-1"
+VIRTUAL_NAME="SUNSHINE"
+
+resolve_hypr_env() {
+    local instances chosen display="${WAYLAND_DISPLAY:-}"
+    instances=$(hyprctl instances -j)
+    chosen=$(jq -er --arg sig "${HYPRLAND_INSTANCE_SIGNATURE:-}" --arg wl "${display##*/}" '
+        . as $all
+        | [.[] | select(.instance == $sig)] as $exact
+        | [.[] | select(.wl_socket == $wl)] as $display
+        | (if ($exact | length) == 1 then $exact
+           elif ($display | length) == 1 then $display
+           elif ($all | length) == 1 then $all
+           else [] end)
+        | if length == 1 then .[0] | [.instance, .wl_socket] | @tsv
+          else error("No unique live Hyprland session") end
+    ' <<<"$instances") || return
+    IFS=$'\t' read -r HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY <<<"$chosen"
+    export HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY
+}
+
+eval_checked() {
+    local result
+    result=$(hyprctl eval "$1") || return
+    if [[ "$result" != ok ]]; then
+        printf 'Hyprland rejected Sunshine display change: %s\n' "$result" >&2
+        return 1
+    fi
+}
+
+lock_displays() {
+    exec 8>"$RUNTIME_DIR/refresh-displays.lock"
+    flock -n 8 || { echo 'Another display operation is running.' >&2; return 1; }
+}
+
+hypr_monitors_all_json() {
+    hyprctl monitors all -j
+}
+
+hypr_monitors_active_json() {
+    hyprctl monitors -j
+}
+
+output_exists() {
+    local name="$1"
+    hypr_monitors_all_json | jq -e --arg n "$name" 'any(.[]; .name == $n)' >/dev/null
+}
+
+output_active() {
+    local name="$1"
+    hypr_monitors_active_json | jq -e --arg n "$name" 'any(.[]; .name == $n and .disabled == false)' >/dev/null
+}
+
+wait_output_active() {
+    local name="$1"
+    local attempts=30
+    while ((attempts > 0)); do
+        if output_active "$name"; then
+            return 0
+        fi
+        sleep 0.05
+        attempts=$((attempts - 1))
+    done
+    return 1
+}
+
+resolve_hz() {
+    local requested="${1:-auto}"
+    if [[ "$requested" == "60" || "$requested" == "120" ]]; then
+        printf '%s\n' "$requested"
+        return 0
+    fi
+    local client_fps="${SUNSHINE_CLIENT_FPS:-60}"
+    if [[ "$client_fps" =~ ^[0-9]+$ ]] && ((client_fps >= 105)); then
+        printf '120\n'
+    else
+        printf '60\n'
+    fi
+}
+
+resolve_virtual_dims() {
+    local w="${SUNSHINE_CLIENT_WIDTH:-1920}"
+    local h="${SUNSHINE_CLIENT_HEIGHT:-1080}"
+    if ! [[ "$w" =~ ^[0-9]+$ ]] || ((w < 640 || w > 3840)); then
+        w=1920
+    fi
+    if ! [[ "$h" =~ ^[0-9]+$ ]] || ((h < 360 || h > 2160)); then
+        h=1080
+    fi
+    # Ensure even dimensions for YUV420 / VAAPI encoding.
+    w=$((w - (w % 2)))
+    h=$((h - (h % 2)))
+    printf '%sx%s\n' "$w" "$h"
+}
+
+apply_lua_monitor() {
+    local output="$1"
+    local mode="$2"
+    local pos="$3"
+    local vrr="$4"
+    eval_checked "hl.monitor({ output = '$output', disabled = false, mode = '$mode', position = '$pos', scale = 1.0, transform = 0, bitdepth = 8, cm = 'srgb', supports_hdr = -1, supports_wide_color = -1, vrr = $vrr })"
+}
+
+disable_lua_monitor() {
+    local selector="$1"
+    if output_exists "$AOC_NAME" && [[ "$selector" == "$AOC_SELECTOR" || "$selector" == "$AOC_NAME" ]]; then
+        eval_checked "hl.monitor({ output = '$selector', disabled = true })"
+    elif output_exists "$selector"; then
+        eval_checked "hl.monitor({ output = '$selector', disabled = true })"
+    fi
+}
+
+remove_virtual_if_present() {
+    if output_exists "$VIRTUAL_NAME"; then
+        hyprctl output remove "$VIRTUAL_NAME" >/dev/null
+        if output_exists "$VIRTUAL_NAME"; then
+            echo 'Sunshine virtual display could not be removed.' >&2
+            return 1
+        fi
+    fi
+}
+
+ensure_dpms_on() {
+    local name="$1"
+    local dpms
+    dpms=$(hypr_monitors_all_json | jq -r --arg n "$name" '.[] | select(.name == $n) | .dpmsStatus')
+    if [[ "$dpms" == "false" ]]; then
+        # refresh-displays wake also reloads the 144 Hz desktop profile, undoing
+        # the streaming mode we just selected. Wake only the requested output.
+        eval_checked "assert(hl.get_monitor('$name')); hl.dispatch(hl.dsp.dpms({ action = 'on', monitor = '$name' }))"
+        dpms=$(hypr_monitors_all_json | jq -r --arg n "$name" '.[] | select(.name == $n) | .dpmsStatus')
+        [[ "$dpms" == true ]] || { echo "Could not wake $name" >&2; return 1; }
+    fi
+}
+
+focus_monitor_lua() {
+    local name="$1"
+    eval_checked "hl.dispatch(hl.dsp.focus({ monitor = '$name' }))"
+}
+
+focus_workspace_lua() {
+    local ws="$1"
+    eval_checked "hl.dispatch(hl.dsp.focus({ workspace = '$ws' }))"
+}
+
+prepare_virtual() {
+    local hz="$1"
+    local dims mode prev_ws
+    dims="$(resolve_virtual_dims)"
+    mode="${dims}@${hz}.0"
+
+    prev_ws=$(hypr_monitors_active_json | jq -r '.[] | select(.focused) | .activeWorkspace.id // empty' || true)
+    [[ "$prev_ws" =~ ^[0-9]+$ ]] || prev_ws=1
+
+    if ! output_exists "$VIRTUAL_NAME"; then
+        hyprctl output create headless "$VIRTUAL_NAME" >/dev/null
+    fi
+    apply_lua_monitor "$VIRTUAL_NAME" "$mode" "0x0" 0
+    wait_output_active "$VIRTUAL_NAME"
+
+    disable_lua_monitor "$AOC_SELECTOR"
+    disable_lua_monitor "$ARZOPA_NAME"
+    sleep 0.15
+    focus_monitor_lua "$VIRTUAL_NAME"
+    focus_workspace_lua "$prev_ws"
+}
+
+prepare_aoc() {
+    local hz="$1"
+    if ! output_exists "$AOC_NAME"; then
+        if output_exists "$ARZOPA_NAME"; then
+            prepare_arzopa "$hz"
+            return 0
+        fi
+        prepare_virtual "$hz"
+        return 0
+    fi
+
+    apply_lua_monitor "$AOC_SELECTOR" "1920x1080@${hz}.0" "0x0" 0
+    wait_output_active "$AOC_NAME"
+    ensure_dpms_on "$AOC_NAME"
+
+    disable_lua_monitor "$ARZOPA_NAME"
+    remove_virtual_if_present
+    sleep 0.1
+    focus_monitor_lua "$AOC_NAME"
+}
+
+prepare_arzopa() {
+    local hz="$1"
+    if ! output_exists "$ARZOPA_NAME"; then
+        hyprctl notify -1 3500 "rgb(ffb86c)" "Sunshine: $ARZOPA_NAME disconnected, falling back" >/dev/null 2>&1 || true
+        if output_exists "$AOC_NAME"; then
+            prepare_aoc "$hz"
+            return 0
+        fi
+        prepare_virtual "$hz"
+        return 0
+    fi
+
+    apply_lua_monitor "$ARZOPA_NAME" "1920x1080@${hz}.0" "0x0" 0
+    wait_output_active "$ARZOPA_NAME"
+    ensure_dpms_on "$ARZOPA_NAME"
+
+    disable_lua_monitor "$AOC_SELECTOR"
+    remove_virtual_if_present
+    sleep 0.1
+    focus_monitor_lua "$ARZOPA_NAME"
+}
+
+restore_monitors() {
+    local restored_any=0
+    lock_displays
+
+    # Re-enable physical monitors BEFORE removing SUNSHINE so Hyprland never hits 0 outputs.
+    eval_checked '
+        local monitors = assert(package.loaded["monitors"], "Monitor profiles are not loaded")
+        local function clone_enabled(src)
+            local t = {}
+            for k, v in pairs(src) do t[k] = v end
+            t.disabled = false
+            return t
+        end
+        hl.monitor(clone_enabled(monitors.aoc))
+        hl.monitor(clone_enabled(monitors.arzopa))
+    '
+
+    if output_exists "$AOC_NAME"; then
+        wait_output_active "$AOC_NAME"
+        restored_any=1
+    fi
+    if output_exists "$ARZOPA_NAME"; then
+        wait_output_active "$ARZOPA_NAME"
+        restored_any=1
+    fi
+
+    if ((restored_any)); then
+        remove_virtual_if_present
+    else
+        echo 'No physical display available; keeping virtual display and recovery state.' >&2
+        return 1
+    fi
+
+    # Re-apply canonical profiles and color state when both physical outputs exist.
+    # refresh-displays acquires this same lock itself; never nest it.
+    flock -u 8
+    if output_exists "$AOC_NAME" && output_exists "$ARZOPA_NAME" && [[ -x "$HOME/.local/bin/refresh-displays" ]]; then
+        "$HOME/.local/bin/refresh-displays" apply >/dev/null
+    fi
+}
+
+ensure_virtual_keyboard_us() {
+    local kb_name="libvirtualhid-keyboard"
+    local us_index
+    us_index=$(hyprctl devices -j 2>/dev/null | jq -r --arg n "$kb_name" '
+        first(.keyboards[]? | select(.name == $n)) as $k
+        | if $k then ($k.layout | split(",") | index("us")) else empty end
+    ' || true)
+    if [[ "$us_index" =~ ^[0-9]+$ ]]; then
+        hyprctl switchxkblayout "$kb_name" "$us_index" >/dev/null 2>&1 || true
+    fi
+}
+
+mark_restore_pending() {
+    local pending
+    pending=$(mktemp "$STATE_FILE.XXXXXX")
+    printf '%s\n' "$HYPRLAND_INSTANCE_SIGNATURE" >"$pending"
+    mv -f -- "$pending" "$STATE_FILE"
+}
+
+rollback_failed_prepare() {
+    local result=$?
+    trap - EXIT
+    if ((result != 0)); then
+        echo 'Sunshine display preparation failed; restoring the desktop.' >&2
+        set +e
+        flock -u 8
+        (set -e; restore_monitors)
+        local restored=$?
+        if ((restored == 0)); then rm -f -- "$STATE_FILE"; fi
+    fi
+    exit "$result"
+}
+
+cmd="${1:-status}"
+
+exec 9>"$LOCK_FILE"
+flock -w 5 9 || { echo 'Another Sunshine display operation is running.' >&2; exit 1; }
+
+case "$cmd" in
+    prepare)
+        target="${2:-auto}"
+        case "$target" in
+            aoc|arzopa|virtual|auto) ;;
+            *) echo "Unknown prepare target: $target" >&2; exit 2 ;;
+        esac
+        resolve_hypr_env
+        hz="$(resolve_hz "${3:-auto}")"
+        lock_displays
+        # Record ownership before changing anything, including partial failures.
+        # Both Sunshine's app undo and systemd's stop hook use this same marker.
+        mark_restore_pending
+        trap rollback_failed_prepare EXIT
+        ensure_virtual_keyboard_us
+        case "$target" in
+            aoc) prepare_aoc "$hz" ;;
+            arzopa) prepare_arzopa "$hz" ;;
+            virtual) prepare_virtual "$hz" ;;
+            auto)
+                if output_exists "$AOC_NAME"; then
+                    prepare_aoc "$hz"
+                elif output_exists "$ARZOPA_NAME"; then
+                    prepare_arzopa "$hz"
+                else
+                    prepare_virtual "$hz"
+                fi
+                ;;
+            *)
+                echo "Unknown prepare target: $target" >&2
+                exit 2
+                ;;
+        esac
+        trap - EXIT
+        ;;
+    restore)
+        case "${2:-}" in
+            ''|--force) ;;
+            *) echo 'Usage: sunshine-display restore [--force]' >&2; exit 2 ;;
+        esac
+        if [[ "${2:-}" != --force ]]; then
+            if [[ ! -f "$STATE_FILE" ]]; then
+                echo 'No Sunshine display changes to restore.'
+                exit 0
+            fi
+            resolve_hypr_env
+            if [[ "$(<"$STATE_FILE")" != "$HYPRLAND_INSTANCE_SIGNATURE" ]]; then
+                # A previous compositor session cannot own this session's layout.
+                rm -f -- "$STATE_FILE"
+                echo 'Discarded Sunshine display state from an earlier session.'
+                exit 0
+            fi
+        else
+            resolve_hypr_env
+        fi
+        restore_monitors
+        # Keep the marker if restore fails, so a later undo/stop can retry.
+        rm -f -- "$STATE_FILE"
+        ;;
+    status)
+        resolve_hypr_env
+        hypr_monitors_all_json | jq -c '.[] | {name, width, height, refreshRate, x, y, disabled, vrr, dpmsStatus, activeWorkspace: .activeWorkspace.id}'
+        ;;
+    *)
+        echo "Usage: $(basename "$0") {prepare {aoc|arzopa|virtual|auto} [60|120|auto]|restore [--force]|status}" >&2
+        exit 2
+        ;;
+esac

@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Profile-scoped browser fonts. Never rewrite a running browser's Preferences.
+
+Firefox reads user.js at startup; prefs.js is deliberately never written here.
+Chromium has no user.js equivalent, so a busy profile is reported as deferred.
+No extension, content CSS injection, policy lock, watcher or browser restart.
+"""
+import argparse
+import configparser
+import datetime
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import sys
+import tempfile
+
+BEGIN = '// BEGIN fontctl browser fonts'
+END = '// END fontctl browser fonts'
+PREF = re.compile(r'^\s*user_pref\("([^"\n]+)",\s*(.*?)\);\s*(?://.*)?$')
+FORCE = 'gfx.webrender.quality.force-subpixel-aa-where-possible'
+ENABLE = 'gfx.webrender.enable-subpixel-aa'
+GAMMA = 'gfx.font_rendering.freetype.gamma'
+CONTRAST = 'gfx.font_rendering.freetype.enhanced_contrast'
+DOCUMENT = 'browser.display.use_document_fonts'
+# Firefox omits user values equal to built-in defaults when saving prefs.js.
+DEFAULT_PREFS = {FORCE: False, ENABLE: True, GAMMA: -1, CONTRAST: 0, DOCUMENT: 1}
+
+
+def read_prefs(path):
+    prefs = {}
+    if path.is_file():
+        for line in path.read_text().splitlines():
+            match = PREF.match(line)
+            if match:
+                try:
+                    prefs[match[1]] = json.loads(match[2])
+                except ValueError:
+                    pass
+    return prefs
+
+
+def firefox_profiles(home):
+    config = Path(os.environ.get('XDG_CONFIG_HOME', home / '.config'))
+    roots = [home / '.mozilla/firefox', config / 'mozilla/firefox',
+             home / '.var/app/org.mozilla.firefox/.mozilla/firefox',
+             home / 'snap/firefox/common/.mozilla/firefox']
+    profiles = set()
+    for root in roots:
+        ini = configparser.RawConfigParser(strict=False)
+        ini.read(root / 'profiles.ini')
+        for section in ini.sections():
+            if section.startswith('Profile') and ini.has_option(section, 'Path'):
+                path = Path(ini.get(section, 'Path'))
+                if ini.get(section, 'IsRelative', fallback='1') == '1':
+                    path = root / path
+                if path.is_dir():
+                    profiles.add(path.resolve())
+            elif section.startswith('Install') and ini.has_option(section, 'Default'):
+                path = root / ini.get(section, 'Default')
+                if path.is_dir():
+                    profiles.add(path.resolve())
+        # Include secondary/older profiles, but not arbitrary nested backups.
+        for filename in ('prefs.js', 'user.js'):
+            profiles.update(p.parent.resolve() for p in root.glob('*/' + filename))
+    return sorted(profiles)
+
+
+def chromium_profiles(home):
+    config = Path(os.environ.get('XDG_CONFIG_HOME', home / '.config'))
+    roots = [config / n for n in ('chromium', 'google-chrome', 'google-chrome-beta',
+             'google-chrome-unstable', 'BraveSoftware/Brave-Browser',
+             'microsoft-edge', 'vivaldi')]
+    roots += [home / '.var/app' / app / 'config' / name for app, name in (
+        ('org.chromium.Chromium', 'chromium'), ('com.google.Chrome', 'google-chrome'),
+        ('com.brave.Browser', 'BraveSoftware/Brave-Browser'))]
+    roots.append(home / 'snap/chromium/common/chromium')
+    return sorted({p.resolve() for root in roots for p in root.glob('*/Preferences')})
+
+
+def chromium_busy(root):
+    lock = root / 'SingletonLock'
+    if lock.is_symlink():
+        target = os.readlink(lock)
+        host, _, pid = target.rpartition('-')
+        # Foreign host / ambiguous locks are never treated as free.
+        if host != socket.gethostname() or not pid.isdigit():
+            return True
+        if Path('/proc', pid).exists():
+            return True
+    elif lock.exists():
+        return True
+    return False
+
+
+def firefox_running(profile):
+    # Firefox keeps an fcntl lock even after the file itself has been created.
+    import fcntl
+    path = profile / '.parentlock'
+    if path.exists():
+        try:
+            with path.open('r+') as stream:
+                fcntl.lockf(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, PermissionError):
+            return True
+    return False
+
+
+def write_backed_up(path, content, backup, guard=lambda: False):
+    """Compare again before atomic replacement; keep exact originals private."""
+    path = path.resolve()
+    old = path.read_bytes() if path.exists() else None
+    new = content.encode()
+    if old == new:
+        return False
+    backup.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(backup, 0o700)
+    destination = backup / str(path).lstrip('/')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if old is not None:
+        destination.write_bytes(old)
+        destination.chmod(0o600)
+    else:
+        destination.with_name(destination.name + '.created').touch(mode=0o600)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix='.' + path.name + '.fontctl-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(new)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if guard() or (path.read_bytes() if path.exists() else None) != old:
+            raise RuntimeError(f'Profile became busy or changed during update: {path}')
+        if path.exists():
+            os.chmod(temp, path.stat().st_mode & 0o777)
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+    return True
+
+
+def firefox_values(ui, mono, serif, subpixel, rendering_only=False):
+    values = {FORCE: False, ENABLE: subpixel in ('rgb', 'bgr'),
+              GAMMA: 0, CONTRAST: 100}
+    if not rendering_only:
+        values[DOCUMENT] = 1
+        for language in ('x-western', 'x-unicode'):
+            values['font.default.' + language] = 'sans-serif'
+            for generic, family in [('sans-serif', ui), ('monospace', mono), ('serif', serif)]:
+                values[f'font.name.{generic}.{language}'] = family
+                values[f'font.name-list.{generic}.{language}'] = family
+    return values
+
+
+def merge_userjs(text, values):
+    # Retain previous managed family choices on a rendering-only update.
+    old_block = re.search(re.escape(BEGIN) + r'\n(.*?)' + re.escape(END), text, re.S)
+    previous = {}
+    if old_block:
+        for line in old_block[1].splitlines():
+            match = PREF.match(line)
+            if match:
+                previous[match[1]] = json.loads(match[2])
+    previous.update(values)
+    text = re.sub(re.escape(BEGIN) + r'\n.*?' + re.escape(END) + r'\n?', '', text, flags=re.S)
+    lines = []
+    for line in text.splitlines(keepends=True):
+        match = PREF.match(line.rstrip('\r\n'))
+        if not match or match[1] not in previous:
+            lines.append(line)
+    body = ''.join(lines).rstrip('\n')
+    block = '\n'.join('user_pref(' + json.dumps(key) + ', ' + json.dumps(value, ensure_ascii=False) + ');'
+                      for key, value in sorted(previous.items()))
+    return (body + '\n\n' if body else '') + BEGIN + '\n' + block + '\n' + END + '\n'
+
+
+def merge_chromium(data, ui, mono, serif):
+    fonts = data.setdefault('webkit', {}).setdefault('webprefs', {}).setdefault('fonts', {})
+    for generic, family in [('standard', ui), ('sansserif', ui), ('fixed', mono), ('serif', serif)]:
+        # Chromium 156 can select its Latin-script default (Arial) even with a
+        # different Common-script preference. Cover both, preserving non-Latin
+        # choices such as Jpan/Arab. Verified with CSS.getPlatformFontsForNode.
+        for script in ('Zyyy', 'Latn'):
+            fonts.setdefault(generic, {})[script] = family
+    # Retire the known old Roboto-everywhere assignments, which broke math and
+    # made cursive/fantasy indistinguishable. Preserve other explicit choices.
+    for generic in ('math', 'cursive', 'fantasy'):
+        if fonts.get(generic, {}).get('Zyyy') == 'Roboto':
+            del fonts[generic]['Zyyy']
+    return data
+
+
+def apply(home, args):
+    backup = home / '.config/fontctl/backups' / (datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '-browsers')
+    values = firefox_values(args.ui, args.mono, args.serif, args.subpixel, args.rendering_only)
+    failures = 0
+    for profile in firefox_profiles(home):
+        path = profile / 'user.js'
+        try:
+            old = path.read_text() if path.exists() else ''
+            changed = write_backed_up(path, merge_userjs(old, values), backup)
+            print(f'Firefox {profile}: ' + ('saved' if changed else 'current') + '; read on next browser start')
+        except (OSError, ValueError, RuntimeError) as error:
+            print(error, file=sys.stderr)
+            failures += 1
+    if not args.rendering_only:
+        for path in chromium_profiles(home):
+            if chromium_busy(path.parent.parent):
+                print(f'DEFERRED {path.parent}: browser is running; close it and reapply fontctl', file=sys.stderr)
+                failures += 1
+                continue
+            try:
+                data = merge_chromium(json.loads(path.read_text()), args.ui, args.mono, args.serif)
+                changed = write_backed_up(path, json.dumps(data, ensure_ascii=False, separators=(',', ':')), backup,
+                                         lambda: chromium_busy(path.parent.parent))
+                print(f'Chromium {path.parent}: ' + ('saved' if changed else 'current'))
+            except (OSError, ValueError, RuntimeError, TypeError, AttributeError) as error:
+                print(f'{path}: {error}', file=sys.stderr)
+                failures += 1
+    if backup.exists():
+        print(f'Browser backup: {backup}')
+    return 1 if failures else 0
+
+
+def status(home):
+    for profile in firefox_profiles(home):
+        saved = read_prefs(profile / 'prefs.js')
+        startup = read_prefs(profile / 'user.js')
+        expected = saved | startup
+        pending = any(saved.get(key, DEFAULT_PREFS.get(key)) != value for key, value in startup.items()
+                      if key.startswith('font.') or key in (FORCE, ENABLE, GAMMA, CONTRAST, DOCUMENT))
+        font = expected.get('font.name.sans-serif.x-western', '(browser default)')
+        mono = expected.get('font.name.monospace.x-western', '(browser default)')
+        website = 'allowed' if expected.get(DOCUMENT, 1) else 'BLOCKED'
+        state = 'running' if firefox_running(profile) else 'closed'
+        if pending:
+            state += '; startup differs from last saved prefs'
+        else:
+            state += '; last saved preferences agree (live renderer not inspected)'
+        print(f'Firefox {profile}\n  Next start: sans={font}, mono={mono}; website fonts={website}\n  {state}')
+    for path in chromium_profiles(home):
+        try:
+            data = json.loads(path.read_text())
+            fonts = data.get('webkit', {}).get('webprefs', {}).get('fonts', {})
+            ui = fonts.get('sansserif', {}).get('Zyyy', '(browser default)')
+            mono = fonts.get('fixed', {}).get('Zyyy', '(browser default)')
+            state = 'RUNNING: disk preferences may differ' if chromium_busy(path.parent.parent) else 'closed'
+            latin = fonts.get('sansserif', {}).get('Latn', '(browser default)')
+            print(f'Chromium {path.parent}\n  Saved: sans={ui}, Latin={latin}, mono={mono}; {state}')
+        except (ValueError, OSError) as error:
+            print(f'{path}: {error}', file=sys.stderr)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['apply', 'status'])
+    for name in ('ui', 'mono', 'serif'):
+        parser.add_argument('--' + name)
+    parser.add_argument('--subpixel', choices=['rgb', 'bgr', 'none', 'vrgb', 'vbgr'], default='rgb')
+    parser.add_argument('--rendering-only', action='store_true')
+    args = parser.parse_args()
+    if args.command == 'status':
+        status(Path.home())
+        return 0
+    if not all((args.ui, args.mono, args.serif)):
+        parser.error('apply requires --ui, --mono and --serif')
+    return apply(Path.home(), args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

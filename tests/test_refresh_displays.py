@@ -45,15 +45,21 @@ elif tool == 'hyprsunsetctl':
     if args[0] == 'identity': s['color']['identity'] = args[1]
     else: s['color'][args[0]] = args[1]
 elif tool == 'hyprctl':
-    if args[0] == 'monitors': result = json.dumps(s['monitors'])
+    if args[0] == 'monitors' or args == ['-j', 'monitors']: result = json.dumps(s['monitors'])
     elif args[:2] == ['-j', 'getoption']:
-        result = json.dumps({'bool': s['options'][args[2].split(':')[1]]})
+        result = (json.dumps({'int': s['global_vrr']}) if args[2] == 'misc:vrr'
+                  else json.dumps({'bool': s['options'][args[2].split(':')[1]]}))
     elif args[0] == 'hyprsunset': result = s['color'][args[1]]
     elif args[0] == 'eval':
         code = args[1]
         if 'hl.config' in code:
             for key, value in re.findall(r'(mouse_move_enables_dpms|key_press_enables_dpms)\s*=\s*(true|false)', code):
                 s['options'][key] = value == 'true'
+            policy = re.search(r'vrr=(\d+)', code)
+            if policy:
+                s['global_vrr'] = int(policy.group(1))
+                for m in s['monitors']:
+                    if m.get('policy') == -1: m['vrr'] = s['global_vrr'] == 1
         elif 'hl.dsp.dpms' in code:
             action = re.search(r'action\s*=\s*"(\w+)"', code).group(1)
             selector = re.search(r'monitor\s*=\s*"([^"]+)"', code)
@@ -69,11 +75,28 @@ elif tool == 'hyprctl':
             else:
                 for m in targets: m['dpmsStatus'] = action == 'on'
         elif 'hl.monitor' in code:
-            selector = re.search(r'output\s*=\s*"([^"]+)"', code)
+            selector = re.search(r'(?:output|\["output"\])\s*=\s*"([^"]+)"', code)
             if not selector: raise RuntimeError('missing profile output')
-            s['applied'].append(selector.group(1))
+            output = selector.group(1)
+            brightness = re.search(r'\["sdrbrightness"\]=([0-9.]+)', code)
+            if brightness:
+                # Model Hyprland 0.57: a VRR-only rule is ignored; changing
+                # brightness makes the new policy take effect.
+                policy = int(re.search(r'\["vrr"\]=(-?\d+)', code).group(1))
+                targets = [m for m in s['monitors'] if m['name'] == output or 'desc:' + m['description'] == output]
+                for m in targets:
+                    value = float(brightness.group(1))
+                    if m['sdrBrightness'] != value:
+                        m['sdrBrightness'] = value
+                        m['policy'] = policy
+                        m['vrr'] = (s['global_vrr'] if policy == -1 else policy) == 1
+                    s['vrr_updates'].append(m['name'])
+            else:
+                s['applied'].append(output)
         elif 'require("monitors")' in code:
             s['applied'].extend(['DP-1', 'HDMI-A-1'])
+        elif code.startswith('local modes='):
+            pass  # Lua's cached recovery table; no display transaction.
         else: raise RuntimeError('unexpected eval: ' + code)
     else: raise RuntimeError('unexpected IPC: ' + repr(args))
 else: raise RuntimeError(tool)
@@ -102,6 +125,7 @@ class DisplayRecovery(unittest.TestCase):
         config = self.home / '.config/hypr'
         config.mkdir(parents=True)
         shutil.copy2(ROOT / 'dots/.config/hypr/monitors.lua', config / 'monitors.lua')
+        shutil.copy2(ROOT / 'dots/.local/bin/vrrctl', bindir / 'vrrctl')
         self.command = bindir / 'refresh-displays'
         # Redirect only the sysfs boundary; all production shell/Lua logic runs.
         self.command.write_text(COMMAND.read_text().replace('/sys/class/drm', str(self.home / 'drm')))
@@ -113,12 +137,15 @@ class DisplayRecovery(unittest.TestCase):
             (bindir / name).symlink_to(fake)
         self.statefile = self.home / 'state.json'
         monitors = []
-        for name, x, y, vrr in [('DP-1', 0, 0, True), ('HDMI-A-1', 1920, 500, False)]:
+        for name, x, y, vrr in [('DP-1', 0, 0, False), ('HDMI-A-1', 1920, 500, False)]:
             monitors.append(dict(name=name, width=1920, height=1080, refreshRate=144.001,
                                  x=x, y=y, scale=1, transform=0, colorManagementPreset='srgb',
-                                 currentFormat='XRGB8888', disabled=False, dpmsStatus=True, vrr=vrr))
+                                 currentFormat='XRGB8888', disabled=False, dpmsStatus=True, vrr=vrr,
+                                 description='AOC 27G2G4 0x00000A71' if name == 'DP-1' else 'ARZOPA serial',
+                                 model='27G2G4' if name == 'DP-1' else 'ARZOPA',
+                                 sdrBrightness=.87, sdrSaturation=1))
         self.statefile.write_text(json.dumps(dict(
-            monitors=monitors, time=0, events=[], applied=[],
+            monitors=monitors, time=0, events=[], applied=[], vrr_updates=[], global_vrr=2,
             options=dict(mouse_move_enables_dpms=True, key_press_enables_dpms=True),
             color=dict(identity='false', temperature='4800', gamma='83'))))
         self.env = dict(os.environ, HOME=str(self.home), XDG_RUNTIME_DIR=str(runtime),
@@ -246,6 +273,68 @@ class DisplayRecovery(unittest.TestCase):
         self.assertTrue(state['monitors'][0]['dpmsStatus'])
         self.assertFalse(state['monitors'][1]['dpmsStatus'])
         self.assertEqual(state['applied'], ['DP-1'])
+
+    def test_longer_off_interval_is_explicit_and_only_cycles_selected_output(self):
+        result = self.run_command('cycle', 'DP-1', '--off-seconds', '15')
+        state = self.state()
+        self.assertIn('15 seconds', result.stdout)
+        events = [(time, args) for time, tool, args in state['events']
+                  if tool == 'hyprctl' and args[0] == 'eval' and 'hl.dsp.dpms' in args[1]]
+        off = next(time for time, args in events if 'action = "off"' in args[1])
+        on = next(time for time, args in events if 'action = "on"' in args[1])
+        self.assertGreaterEqual(on - off, 15)
+        self.assertEqual(state['applied'], ['DP-1'])
+        self.assert_restored()
+
+    def test_off_interval_validation_never_dispatches(self):
+        for args in [('cycle', '--off-seconds', '0'), ('cycle', '--off-seconds', '61'),
+                     ('cycle', '--off-seconds', '5.5'), ('cycle', '--off-seconds'),
+                     ('wake', '--off-seconds', '15')]:
+            with self.subTest(args=args):
+                self.run_command(*args, expected=2)
+        self.assertFalse(any(tool == 'hyprctl' for _, tool, _ in self.state()['events']))
+
+    def test_verify_rejects_stale_global_policy_without_changing_it(self):
+        self.update(global_vrr=1)
+        result = self.run_command('verify', expected=1)
+        self.assertIn('Global VRR policy=1, expected saved policy 2', result.stderr)
+        self.assertEqual(self.state()['global_vrr'], 1)
+        self.assertFalse(any(a[0] == 'eval' for _, tool, a in self.state()['events'] if tool == 'hyprctl'))
+
+    def test_verify_resolves_follow_global_always(self):
+        config = self.home / '.config/hypr'
+        (config / 'vrr-policies.lua').write_text('return {global=1,monitors={}}')
+        self.update(global_vrr=1)
+        result = self.run_command('verify', expected=1)
+        self.assertIn('vrr=False, expected True', result.stdout)
+
+    def test_wake_reconciles_vrr_only_change_and_preserves_peer_brightness_and_files(self):
+        config = self.home / '.config/hypr'
+        policy = config / 'vrr-policies.lua'
+        policy.write_text('return {global=2,monitors={["desc:AOC 27G2G4 0x00000A71"]={policy=1}}}')
+        settings = config / 'vrr.json'
+        settings.write_text('{"global":2,"monitors":{}}\n')
+        before = {f: f.read_bytes() for f in (policy, settings)}
+        peer = dict(self.state()['monitors'][1])
+        self.run_command('wake', 'DP-1')
+        state = self.state()
+        self.assertTrue(state['monitors'][0]['vrr'])
+        self.assertEqual(state['monitors'][0]['sdrBrightness'], .87)
+        self.assertEqual(state['monitors'][1], peer)
+        self.assertEqual(state['vrr_updates'], ['DP-1', 'DP-1'])
+        self.assertEqual({f: f.read_bytes() for f in before}, before)
+        self.run_command('verify')
+
+    def test_apply_reconciles_saved_global_policy(self):
+        self.update(global_vrr=0)
+        self.run_command('apply')
+        self.assertEqual(self.state()['global_vrr'], 2)
+
+    def test_missing_vrr_helper_fails_before_power_change(self):
+        (self.home / '.local/bin/vrrctl').unlink()
+        result = self.run_command('cycle', 'DP-1', expected=1)
+        self.assertIn('Missing ~/.local/bin/vrrctl', result.stderr)
+        self.assertFalse(any(a[0] == 'eval' for _, tool, a in self.state()['events'] if tool == 'hyprctl'))
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
+import QtQuick.Window
 import qs.modules.common
 import qs.modules.common.functions
 import qs.modules.common.widgets
@@ -8,6 +9,8 @@ Rectangle {
     id: root
 
     property bool loading: true
+    readonly property bool animating: loading && visible && (root.Window.window?.visible ?? false)
+    onAnimatingChanged: if (!animating) leapAnimation.stop()
     property double pullProgress: 0
 
     // Size, color
@@ -37,7 +40,7 @@ Rectangle {
     rotation: pullRotation + continuousRotation + leapRotation
 
     RotationAnimation on continuousRotation {
-        running: root.loading
+        running: root.animating
         duration: 12000
         easing.type: Easing.Linear
         loops: Animation.Infinite
@@ -46,7 +49,7 @@ Rectangle {
     }
     Timer {
         interval: 800
-        running: root.loading
+        running: root.animating
         repeat: true
         onTriggered: leapAnimation.start()
     }

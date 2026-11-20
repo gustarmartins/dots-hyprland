@@ -65,17 +65,24 @@ hl.bind("SUPER + Q", function()
     hl.dispatch(hl.dsp.window.close())
 end, { description = "Window: Close visible focused window" })
 
--- Use Eden's native fullscreen path instead of forcing compositor fullscreen.
+-- Use the emulator's native fullscreen path so its menus and render surface agree.
 hl.unbind("SUPER + F")
 hl.bind("SUPER + F", function()
     local window = hl.get_active_window()
+    if window and (window.class == "dev.eglantine.eglantine"
+        or ((window.class == "Eglantine" or window.class == "eglantine")
+            and window.title and window.title:match("^[Ee]glantine"))) then
+        -- The installed Eglantine profile uses Ctrl+N for its native fullscreen toggle.
+        hl.dispatch(hl.dsp.send_shortcut({ mods = "CTRL", key = "n", window = window }))
+        return
+    end
     if window and (window.class == "dev.eden_emu.eden" or window.class == "eden") then
         hl.dispatch(hl.dsp.send_shortcut({ mods = "CTRL", key = "b", window = window }))
         return
     end
 
     hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" }))
-end, { description = "Window: Fullscreen (Eden native)" })
+end, { description = "Window: Fullscreen (Eden/Eglantine native)" })
 
 hl.bind("SUPER + ALT + A",
     hl.dsp.exec_cmd("pkill rofi; rofi -show animations -modi 'animations:~/.config/hypr/custom/scripts/hypr_anim.sh'"),

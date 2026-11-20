@@ -16,6 +16,7 @@ Singleton {
     function run(args) { if (busy) return; error = ""; action.command = [helper].concat(args); action.running = true; }
     function setEnabled(value) { run([value ? "enable" : "disable"]); }
     function setFeature(key, value) { run(["set", key, value ? "true" : "false"]); }
+    function setOsuPreset(name) { run(["set-osu-preset", name]); }
     Process {
         id: read
         running: true

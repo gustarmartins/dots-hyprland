@@ -13,14 +13,14 @@ QuickToggleModel {
     toggled: false
     icon: "auto_awesome"
 
-    statusText: root.toggled ? Translation.tr("120Hz (VRR Off)") : Translation.tr("144Hz (VRR On)")
+    statusText: root.toggled ? Translation.tr("120 Hz · VRR off") : Translation.tr("Desktop profile")
 
     mainAction: () => {
         root.toggled = !root.toggled
         if (root.toggled) {
-            applyMode.command = ["bash", "-c", "hyprctl eval 'local monitors = require(\"monitors\"); local m = {}; for k,v in pairs(monitors.aoc) do m[k]=v end; m.mode = \"1920x1080@120.0\"; m.vrr = 0; hl.monitor(m); hl.config({misc={vrr=0}})'"]
+            applyMode.command = ["bash", "-c", "hyprctl eval 'local monitors = assert(package.loaded[\"monitors\"], \"Monitor profiles are not loaded\"); local m = {}; for k,v in pairs(monitors.aoc) do m[k]=v end; m.mode = \"1920x1080@120.0\"; m.vrr = 0; hl.monitor(m)'"]
         } else {
-            applyMode.command = ["bash", "-c", "hyprctl eval 'local monitors = require(\"monitors\"); hl.monitor(monitors.aoc); hl.config({misc={vrr=1}})'"]
+            applyMode.command = ["bash", "-c", "hyprctl eval 'local monitors = assert(package.loaded[\"monitors\"], \"Monitor profiles are not loaded\"); hl.monitor(monitors.aoc)'"]
         }
         applyMode.running = true
         fetchTimer.restart()
@@ -33,7 +33,7 @@ QuickToggleModel {
 
     Process {
         id: fetchActiveState
-        running: true
+        running: false
         command: ["bash", "-c", "hyprctl monitors -j | jq -e '.[] | select(.name == \"DP-1\" and .refreshRate < 130)' >/dev/null"]
         onExited: (exitCode, exitStatus) => {
             root.toggled = (exitCode === 0)
@@ -52,13 +52,14 @@ QuickToggleModel {
 
     Timer {
         interval: 3000
-        running: true
+        running: root.pollingEnabled
         repeat: true
+        triggeredOnStart: true
         onTriggered: {
             if (!fetchActiveState.running)
                 fetchActiveState.running = true
         }
     }
 
-    tooltipText: Translation.tr("Toggle between 120Hz (VRR off for LSFG) and 144Hz (VRR on for desktop)")
+    tooltipText: Translation.tr("Use 120 Hz with VRR off on the AOC, or restore its saved desktop profile. The global VRR policy stays unchanged.")
 }

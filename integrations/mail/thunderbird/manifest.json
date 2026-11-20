@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Quickshell Mail",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Local mail previews, verification codes and links for Quickshell.",
   "browser_specific_settings": {
     "gecko": {

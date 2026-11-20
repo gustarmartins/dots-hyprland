@@ -6,6 +6,7 @@ HOME=Path.home()
 STATE=HOME/'.local/state/desktop-effects'
 MODULE=HOME/'.config/hypr/custom/cinematic-effects.lua'
 SAVED=HOME/'.config/desktop-effects/presets.json'
+CUSTOM=HOME/'.config/desktop-effects/custom.json' # the user's working "Custom" look, kept while built-in/saved presets are applied
 ANIM_DIR=HOME/'.config/hypr/custom/animations'
 ACTIVE=ANIM_DIR/'active/active.lua'
 ANIM_STATE=ANIM_DIR/'state'
@@ -91,6 +92,10 @@ def preset_settings(value):
   for entry in saved_presets():
    if entry['id']==value[6:]:return entry['settings']|{'preset':'custom'}
  raise ValueError('Unknown preset')
+def stash_custom(s):
+ atomic(CUSTOM,json.dumps(validate(normalize(s))|{'preset':'custom'},indent=2)+'\n')
+def custom_settings():
+ return validate(normalize(json.loads(CUSTOM.read_text())))|{'preset':'custom'}
 def lua(v):
  if isinstance(v,bool):return str(v).lower()
  if isinstance(v,str):return json.dumps(v)
@@ -238,10 +243,16 @@ if __name__=='__main__':
    elif a.action=='delete':s=delete_preset(a.value)
    elif a.action=='save':s=save_preset(a.value)
    elif a.action=='refresh':s=apply(state())
-   elif a.action=='animation':s=apply(state()|{'motion_source':'profile','animation_profile':a.value,'preset':'custom'})
+   elif a.action=='animation':s=apply(state()|{'motion_source':'profile','animation_profile':a.value,'preset':'custom'});stash_custom(s)
    elif a.action=='preset':
-    s=apply(preset_settings(a.value))
+    cur=state()
+    # First use: keep whatever custom look is active before it is replaced.
+    if cur['preset']=='custom' and not CUSTOM.exists():stash_custom(cur)
+    if a.value=='custom':
+     s=apply(custom_settings() if CUSTOM.exists() else cur|{'preset':'custom'})
+    else:s=apply(preset_settings(a.value))
    else:
     s=validate(normalize(json.loads(a.value)));s=s if a.action=='validate' else apply(s|{'preset':'custom'})
+    if a.action!='validate':stash_custom(s)
    print(json.dumps(s))
  except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)

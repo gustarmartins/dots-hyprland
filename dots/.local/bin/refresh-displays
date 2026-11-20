@@ -10,17 +10,19 @@ hyprctl() { command timeout 5 hyprctl "$@"; }
 
 usage() {
     cat <<'EOF'
-Usage: refresh-displays [cycle|sleep|wake|apply|status|verify] [OUTPUT]
-  cycle   Hold each awake output off for 5 seconds, then restore it (default)
+Usage: refresh-displays [cycle|sleep|wake|apply|status|verify] [OUTPUT] [--off-seconds N]
+  cycle   Hold each awake output off, then restore it (default: 5 seconds)
   sleep   Put displays in standby; leave power and cables connected
   wake    Explicitly wake connected displays and restore their saved profiles
   apply   Reload profiles without blanking either display
   status  Read current mode, scale, format, VRR and color state; changes nothing
   verify  Compare connected outputs with the saved profiles; fail on mismatch
 OUTPUT optionally selects one active output for cycle/sleep/wake.
+--off-seconds N selects a protected 5–60 second interval for cycle/sleep only.
+Example: refresh-displays cycle DP-1 --off-seconds 15
 Profiles: ~/.config/hypr/monitors.lua
 Sleep affects displays only; it does not suspend the PC. Normal keyboard/mouse
-wake resumes after the initial 5-second protected off interval. No unplugging
+wake resumes after the protected off interval. No unplugging
 or monitor power-button sequence is required. Wake cannot power an unplugged
 or physically switched-off monitor.
 Cycle is a video-signal/DPMS reset, not a hardware power cut. It preserves
@@ -78,10 +80,10 @@ wait_dpms() {
 }
 
 hold_off() {
-    local monitor
+    local monitor step
     # Check throughout the dwell, including its end. Never count an early wake
     # as a completed reset merely because the first off sample succeeded.
-    for _ in {1..20}; do
+    for ((step=0; step<off_seconds*4; step++)); do
         sleep 0.25
         for monitor in "$@"; do
             dpms_matches "$monitor" false || {
@@ -131,9 +133,22 @@ end
 LUA
 }
 
+read_global_vrr() {
+    lua - "$HOME/.config/hypr/vrr-policies.lua" <<'LUA'
+local ok, settings = pcall(dofile, arg[1])
+io.write(tostring(ok and settings.global or 2))
+LUA
+}
+
 verify_profiles() {
-    local profiles selected=${1:-}
+    local profiles selected=${1:-} global_policy live_global
     profiles=$(read_profiles) || return
+    global_policy=$(read_global_vrr) || return
+    live_global=$(hyprctl -j getoption misc:vrr | jq -er '.int') || return
+    if [[ "$live_global" != "$global_policy" ]]; then
+        printf 'Global VRR policy=%s, expected saved policy %s\n' "$live_global" "$global_policy" >&2
+        return 1
+    fi
     hyprctl monitors -j | python3 -c '
 import json,sys
 profiles={p[0]:p[1:] for line in sys.argv[1].splitlines() if (p:=line.split("\t"))}
@@ -148,13 +163,34 @@ for m in monitors:
     size,hz=mode.split("@"); w,h=map(int,size.split("x")); x,y=map(int,pos.split("x"))
     expected={"width":w,"height":h,"x":x,"y":y,"scale":float(scale),"transform":int(transform),"colorManagementPreset":cm,"disabled":False}
     if bits in ("8", "10"): expected["currentFormat"]={"8":"XRGB8888", "10":"XRGB2101010"}[bits]
+    policy=vrr
+    if vrr == "-1": vrr=sys.argv[3]
     if vrr in ("0","1"): expected["vrr"]=vrr=="1"
     mismatch=[f"{k}={m.get(k)!r}, expected {v!r}" for k,v in expected.items() if m.get(k)!=v]
     if abs(m["refreshRate"]-float(hz))>0.1: mismatch.append("refresh rate differs from "+hz)
-    print(m["name"]+": "+("; ".join(mismatch) if mismatch else "matches saved profile"))
+    labels={"-1":"Follow global", "0":"Off", "1":"Always", "2":"Fullscreen-only", "3":"Fullscreen games/video"}
+    detail="; VRR policy="+labels.get(policy,policy)+", active="+str(m.get("vrr")).lower()
+    print(m["name"]+": "+("; ".join(mismatch) if mismatch else "matches saved profile")+detail)
     failed |= bool(mismatch)
 sys.exit(int(failed))
-' "$profiles" "$selected"
+' "$profiles" "$selected" "$global_policy"
+}
+
+reconcile_vrr() {
+    # The parent holds refresh-displays.lock, which vrrctl also respects.
+    # Reuse its soft-rule workaround without a nested lock or persistent write.
+    python3 - "$HOME/.local/bin/vrrctl" "${1:-}" "$(read_profiles)" "$(read_global_vrr)" <<'PY'
+import runpy, sys
+controller = runpy.run_path(sys.argv[1])
+profiles = {p[0]: p for line in sys.argv[3].splitlines() if (p := line.split("\t"))}
+targets = [m for m in controller['current']()
+           if m['name'] in profiles and (not sys.argv[2] or m['name'] == sys.argv[2])]
+if targets:
+    data = {'global': int(sys.argv[4]), 'monitors': {}}
+    for monitor in targets:
+        data['monitors'][controller['selector'](monitor)] = {'policy': int(profiles[monitor['name']][6])}
+    controller['apply'](data, targets)
+PY
 }
 
 apply_profiles() {
@@ -187,6 +223,7 @@ LUA
         # require() is cached inside the compositor: explicitly invalidate it.
         eval_checked 'package.loaded["monitors"] = nil; require("monitors")' || return
     fi
+    reconcile_vrr "$selected" || return
     for _ in {1..20}; do
         if verify_profiles "$selected" >/dev/null; then return 0; fi
         sleep 0.1
@@ -227,9 +264,25 @@ show_status() {
 }
 
 mode=${1:-cycle}
-target=${2:-}
-[[ $# -le 2 ]] || { usage >&2; exit 2; }
+if (($#)); then shift; fi
+target=""
+off_seconds=5
+off_explicit=false
+while (($#)); do
+    case "$1" in
+        --off-seconds)
+            [[ $# -ge 2 && "$2" =~ ^([5-9]|[1-5][0-9]|60)$ ]] || {
+                echo '--off-seconds requires an integer from 5 through 60.' >&2; exit 2;
+            }
+            off_seconds=$2; off_explicit=true; shift 2 ;;
+        --*) echo "Unknown option: $1" >&2; exit 2 ;;
+        *) [[ -z "$target" ]] || { usage >&2; exit 2; }; target=$1; shift ;;
+    esac
+done
 case "$mode" in cycle|sleep|wake|apply|status|verify) ;; -h|--help|help) usage; exit 0 ;; *) usage >&2; exit 2 ;; esac
+if [[ "$off_explicit" == true && "$mode" != cycle && "$mode" != sleep ]]; then
+    echo '--off-seconds applies only to cycle or sleep.' >&2; exit 2
+fi
 if [[ -n "$target" ]]; then
     [[ "$target" =~ ^[A-Za-z0-9_.:-]+$ ]] || { echo 'Invalid output name' >&2; exit 2; }
     case "$mode" in cycle|sleep|wake) ;; *) echo 'OUTPUT is only supported for cycle/sleep/wake.' >&2; exit 2 ;; esac
@@ -240,6 +293,10 @@ fi
 case "$mode" in status|verify) ;; *)
     exec 9>"$runtime_dir/refresh-displays.lock"
     flock -n 9 || { echo 'A display refresh is already running.' >&2; exit 1; }
+esac
+
+case "$mode" in cycle|wake|apply)
+    [[ -r "$HOME/.local/bin/vrrctl" ]] || { echo 'Missing ~/.local/bin/vrrctl; no display changes made.' >&2; exit 1; }
 esac
 
 pending_wake=()
@@ -276,7 +333,7 @@ case "$mode" in
         done
         guard_input_wake
         for monitor in "${monitors[@]}"; do
-            printf 'Cycling %s: holding the signal off for 5 seconds...\n' "$monitor"
+            printf 'Cycling %s: holding the signal off for %s seconds...\n' "$monitor" "$off_seconds"
             pending_wake=("$monitor")
             lua_dpms off "$monitor"
             wait_dpms "$monitor" false

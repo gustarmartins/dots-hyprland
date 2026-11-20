@@ -36,6 +36,7 @@ class Lifecycle(unittest.TestCase):
         w=m.Watcher.__new__(m.Watcher)
         w.key=None;w.last=None;w.before=None;w.held=False;w.observed=None;w.manual_id=None
         w.tracks=lambda cfg:self.tracks;w.loop=Mock()
+        w.check_osu_active=lambda: getattr(self, 'osu_active', False)
         return w
     def exchange(self,cmd):
         if cmd=='get_last_loaded_preset:output':return self.current
@@ -115,5 +116,53 @@ class Lifecycle(unittest.TestCase):
         self.manual()
         with patch.object(m,'exchange',side_effect=ConnectionRefusedError):self.w.tick()
         self.w.update();self.assertTrue(self.w.held);self.assertEqual(self.current,'manual')
+
+    def test_osu_active_switches_to_osu_preset_when_no_music(self):
+        self.tracks = []
+        self.osu_active = True
+        self.w.update()
+        self.assertEqual(self.current, 'astra-osu')
+        self.assertEqual(self.w.key, ['osu', 'active'])
+
+    def test_osu_silent_does_not_switch_preset(self):
+        self.tracks = []
+        self.osu_active = False
+        self.w.update()
+        self.assertNotEqual(self.current, 'astra-osu')
+
+    def test_music_takes_priority_over_simultaneous_active_osu(self):
+        self.osu_active = True
+        self.track['playing'] = True
+        self.tracks = [self.track]
+        self.w.update()
+        self.assertEqual(self.current, 'automatic')
+
+    def test_returning_from_music_to_osu(self):
+        self.osu_active = True
+        self.pause()
+        self.assertEqual(self.current, 'astra-osu')
+
+    def test_closing_osu_restores_prior_preset(self):
+        self.tracks = []
+        self.osu_active = True
+        self.w.update()
+        self.assertEqual(self.current, 'astra-osu')
+        self.osu_active = False
+        self.w.update()
+        self.assertEqual(self.current, 'baseline')
+
+    def test_manual_preset_held_for_osu_and_cleared_by_music(self):
+        self.tracks = []
+        self.osu_active = True
+        self.w.update()
+        self.assertEqual(self.current, 'astra-osu')
+        self.manual()
+        self.assertEqual(self.current, 'manual')
+        self.assertTrue(self.w.held)
+        # Music playback clears the osu manual hold
+        self.tracks = [self.track]
+        self.resume()
+        self.assertEqual(self.current, 'automatic')
+        self.assertFalse(self.w.held)
 
 if __name__=='__main__':unittest.main()

@@ -161,6 +161,15 @@ def restore_saved_preset(current):
         load_preset(preset)
 
 
+def easyeffects_executable():
+    """Prefer user launcher over /usr/bin so noswap isolation works without ~/.local/bin in PATH."""
+    resolved = shutil.which("easyeffects")
+    local_bin = Path.home() / ".local/bin/easyeffects"
+    if (resolved is None or resolved == "/usr/bin/easyeffects") and os.access(local_bin, os.X_OK):
+        return str(local_bin)
+    return None
+
+
 def start():
     if confirmed_state()["active"]:
         return
@@ -173,6 +182,7 @@ def start():
             output.write(b"System tray unavailable after startup grace period; starting audio processing.\n")
             output.flush()
         subprocess.Popen(["easyeffects", "--hide-window", "--service-mode"],
+                         executable=easyeffects_executable(),
                          stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
     for _ in range(80):
         current = state()

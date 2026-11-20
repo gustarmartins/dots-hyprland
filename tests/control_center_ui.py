@@ -19,7 +19,7 @@ shutil.copytree(REPO / 'dots/.config/quickshell/ii', CONFIG)
 config_file = OUT / 'config/illogical-impulse/config.json'
 config_file.parent.mkdir(parents=True)
 initial = {'sidebar': {'quickToggles': {'style': 'android', 'android': {'columns': 7, 'toggles': [
-    {'type': 'audio', 'size': 2}, {'type': 'mic', 'size': 2}, {'type': 'network', 'size': 3},
+    {'type': 'vrr', 'size': 7, 'height': 3}, {'type': 'audio', 'size': 2}, {'type': 'mic', 'size': 2}, {'type': 'network', 'size': 3},
     {'type': 'darkMode', 'size': 1}, {'type': 'easyEffects', 'size': 2}]}},
     'quickSliders': {'enable': True, 'showVolume': True, 'showMic': True, 'showBrightness': False}},
     'testSentinel': {'preserve': [42, 'extension']}}
@@ -47,7 +47,21 @@ Singleton {
 (CONFIG / 'services/DesktopEffects.qml').write_text('''pragma Singleton
 import QtQuick
 import Quickshell
-Singleton { property var settings: ({preset:"balanced", panel_opacity:100}) }
+Singleton { property var settings: ({preset:"balanced", panel_opacity:100}); property var savedPresets: []; property var animationProfiles: [] }
+''')
+(CONFIG / 'services/Vrr.qml').write_text('''pragma Singleton
+import QtQuick
+import Quickshell
+Singleton {
+ property bool ready: true
+ property bool busy: false
+ property int globalPolicy: 2
+ property int watchers: 0
+ property string error: ""
+ property var modes: [{value:0,label:"0 · Off"},{value:1,label:"1 · Always"},{value:2,label:"2 · Fullscreen only"},{value:3,label:"3 · Fullscreen games & video"}]
+ property var monitors: [{name:"DP-1",label:"AOC 27G2G4 · DP-1",policy:-1,effective:2,gpu:false,focused:true,width:1920,height:1080,hz:60,mismatch:false}]
+ function setPolicy(output,policy) {}
+}
 ''')
 # Avoid the production Directories startup cleanup's shared /tmp paths.
 p = CONFIG / 'modules/common/Directories.qml'
@@ -110,6 +124,8 @@ ApplicationWindow {
             return JSON.stringify({edit:center.editMode,columns:panel?.columns,cellWidth:panel?.baseCellWidth,cellHeight:panel?.baseCellHeight,placement:panel?.placement,tiles:Config.options.sidebar.quickToggles.android.toggles,actions:actions});
         }
         function resize(width: int, height: int): void { root.width=width;root.height=height; }
+        function showWindow(shown: bool): void { root.visible=shown; }
+        function polling(type: string): bool { return root.find("controlTile-"+type)?.toggleModel?.pollingEnabled ?? false; }
         function capture(path: string): void { center.grabToImage(result => result.saveToFile(path)); }
         function flush(): void { Config.flushPendingWrites(); }
     }
@@ -162,6 +178,11 @@ def drag(name, dx, dy):
 try:
     start()
     time.sleep(.8)
+    assert call('polling','darkMode'), 'Visible tile polling disabled'
+    call('showWindow','false'); time.sleep(.1)
+    assert not call('polling','darkMode'), 'Retained hidden window still polling'
+    call('showWindow','true'); time.sleep(.1)
+    assert call('polling','darkMode'), 'Polling did not resume on show'
     canvas = locate('controlTileCanvas'); assert abs(canvas['width'] - 628) < 2
     assert canvas['height'] == 7 * 80 - 8
     call('capture',OUT/'normal.png')
@@ -214,7 +235,9 @@ try:
     call('capture',OUT/'narrow.png')
     # Dropdown selection changes only the requested fixture preset.
     click('controlPresetPicker'); subprocess.run(['xdotool','key','End','Return'],env=env,check=True); time.sleep(.2)
-    click('controlTab-inbox'); click('controlTab-agenda'); click('controlTab-controls')
+    click('controlTab-inbox'); assert not call('polling','darkMode'), 'Hidden controls tab still polling'
+    click('controlTab-agenda'); click('controlTab-controls')
+    assert call('polling','darkMode'), 'Controls tab did not resume polling'
     expected=call('state')['tiles']; call('flush'); time.sleep(.2)
     saved=json.loads(config_file.read_text())
     assert saved['sidebar']['quickToggles']['android']['toggles']==expected

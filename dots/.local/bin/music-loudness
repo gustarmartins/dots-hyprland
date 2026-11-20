@@ -1,0 +1,748 @@
+#!/usr/bin/env python3
+"""Temporary gain for one selected playback app, preserving EasyEffects and other apps."""
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+from fractions import Fraction
+import time
+import uuid
+
+HOME=Path.home()
+RUNTIME=Path(os.environ.get('XDG_RUNTIME_DIR',f'/run/user/{os.getuid()}'))
+STORE=Path(os.environ.get('XDG_STATE_HOME',HOME/'.local/state'))/'music-loudness'
+CONFIG=Path(os.environ.get('XDG_CONFIG_HOME',HOME/'.config'))/'music-loudness/config.json'
+SESSION=RUNTIME/'music-loudness-session.json'
+UNIT='music-loudness.service'
+GAIN='output:limiter:0:inputGain'
+DEFAULT={'enabled':False,'step_db':1.0,'target_lufs':-16.0,'follow_presets':True,'selected_app':'exe:mpv',
+         'auto_match':False,'auto_interval':30.0}
+GRAPH_KEY='audioconvert.filter-graph.778'
+GAIN_KEY='music_loudness_gain:Mult'
+BACKEND='app-stream-v2'
+
+
+def read(path,default=None):
+    try:return json.loads(path.read_text())
+    except FileNotFoundError:return {} if default is None else default.copy()
+
+
+def write(path,data):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    fd,name=tempfile.mkstemp(prefix=path.name+'.',dir=path.parent)
+    try:
+        os.fchmod(fd,0o600)
+        with os.fdopen(fd,'w') as f:json.dump(data,f,ensure_ascii=False,indent=2);f.write('\n')
+        os.replace(name,path)
+    finally:
+        if os.path.exists(name):os.unlink(name)
+
+
+def config():return DEFAULT|read(CONFIG)
+
+
+def number(value):
+    result=float(value)
+    if not math.isfinite(result):raise ValueError('Gain and measurements must be finite')
+    return result
+
+
+def close(a,b):return math.isclose(number(a),number(b),abs_tol=0.0001,rel_tol=0)
+
+
+def run(args,timeout=5,**kw):
+    return subprocess.run(args,check=True,capture_output=True,text=True,timeout=timeout,**kw)
+
+
+def birth(pid):
+    p=Path('/proc')/str(pid)
+    return {'pid':int(pid),'start':p.joinpath('stat').read_text().rsplit(')',1)[1].split()[19],
+            'exe':Path(os.readlink(p/'exe')).name}
+
+
+def exchange(command):
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(2);s.connect(str(RUNTIME/'EasyEffectsServer'))
+        pid,uid,_=struct.unpack('3i',s.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
+        if uid!=os.getuid() or birth(pid)['exe']!='easyeffects':raise RuntimeError('EasyEffects identity could not be verified')
+        s.sendall((command+'\n').encode());s.shutdown(socket.SHUT_WR)
+        result=[]
+        while data:=s.recv(65536):result.append(data)
+        return b''.join(result).decode().strip(),birth(pid)
+
+
+def get(prop):
+    value,_=exchange('get_property:'+prop)
+    if not value or value.startswith('error'):raise RuntimeError('The current preset has no usable final limiter')
+    return value
+
+
+def pw_dump():return json.loads(run(['pw-dump']).stdout)
+
+
+def props(o):return o.get('info',{}).get('props',{})
+
+
+def node_params(node):
+    result={}
+    for item in node.get('info',{}).get('params',{}).get('Props',[]):
+        arr=item.get('params',[]);result.update(zip(arr[::2],arr[1::2]))
+    return result
+
+
+def playback_apps(data):
+    clients={x['id']:props(x) for x in data if x['type'].endswith(':Client')}
+    apps={}
+    for node in data:
+        p=props(node)
+        if not node['type'].endswith(':Node') or p.get('media.class')!='Stream/Output/Audio':continue
+        if p.get('node.name','').startswith(('effect_output.','ee_','music_loudness_meter_')):continue
+        client=clients.get(int(p.get('client.id',-1)),{})
+        pid=p.get('application.process.id') or client.get('pipewire.sec.pid') or client.get('application.process.id')
+        try:process=birth(pid)
+        except (OSError,TypeError,ValueError):continue
+        # Actual executable identity works for native, PulseAudio and browser subprocess streams.
+        key='exe:'+process['exe']
+        name=str(p.get('application.name') or client.get('application.name') or process['exe'])
+        app=apps.setdefault(key,{'id':key,'name':name,'streams':[]})
+        formats=node['info'].get('params',{}).get('Format',[]) or node['info'].get('params',{}).get('EnumFormat',[])
+        channels=next((int(f['channels']) for f in formats if isinstance(f.get('channels'),int)),0)
+        params=node_params(node)
+        supported=any(x.get('name')=='audioconvert.filter-graph.N' for x in node['info'].get('params',{}).get('PropInfo',[])) and not params.get('audioconvert.filter-graph.disable',False)
+        app['streams'].append({'id':node['id'],'serial':str(p.get('object.serial')),'process':process,'channels':channels,
+            'running':node['info'].get('state')=='running','supported':supported,'params':params,
+            'title':str(p.get('media.name') or name)})
+    return sorted(apps.values(),key=lambda x:x['name'].casefold())
+
+
+def related_process(a,b):
+    if a==b:return True
+    # Firefox's MPRIS owner and audio process can be parent/child processes.
+    for child,parent in ((a,b),(b,a)):
+        pid=child['pid']
+        for _ in range(12):
+            try:
+                fields=Path('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()
+                pid=int(fields[1])
+                if pid<=1:break
+                if pid==parent['pid'] and birth(pid)==parent:return True
+            except (OSError,ValueError):break
+    return False
+
+
+def music_track(app):
+    tracks=[]
+    try:
+        import gi
+        gi.require_version('Gio','2.0')
+        from gi.repository import Gio,GLib
+        bus=Gio.bus_get_sync(Gio.BusType.SESSION,None)
+        def call(name,path,interface,method,args=None):
+            return bus.call_sync(name,path,interface,method,args,None,0,700,None).unpack()[0]
+        names=call('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','ListNames')
+        for name in names:
+            if not name.startswith('org.mpris.MediaPlayer2.'):continue
+            try:
+                pid=call('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','GetConnectionUnixProcessID',GLib.Variant('(s)',(name,)))
+                process=birth(pid)
+                if not any(related_process(process,x['process']) for x in app['streams']):continue
+                values=call(name,'/org/mpris/MediaPlayer2','org.freedesktop.DBus.Properties','GetAll',GLib.Variant('(s)',('org.mpris.MediaPlayer2.Player',)))
+                meta=values.get('Metadata',{});identity=str(meta.get('xesam:url') or meta.get('mpris:trackid') or '')
+                if not identity or identity.endswith('/NoTrack'):continue
+                key=hashlib.sha256(json.dumps([process,identity],sort_keys=True).encode()).hexdigest()
+                tracks.append({'key':key,'title':str(meta.get('xesam:title') or app['name']),'status':values.get('PlaybackStatus')})
+            except Exception:continue
+    except Exception:pass
+    playing=[x for x in tracks if x['status']=='Playing']
+    if len(playing)==1:return playing[0]
+    if len(tracks)==1 and tracks[0]['status']=='Paused':return tracks[0]
+    # Metadata is optional; lifetime is then the app's current streams, not an invented song boundary.
+    identities=sorted((x['serial'],x['process']['pid'],x['process']['start']) for x in app['streams'])
+    return {'key':hashlib.sha256(json.dumps(identities).encode()).hexdigest(),
+            'title':app['name'],'status':'Playing' if any(x['running'] for x in app['streams']) else 'Paused','stream_session':True}
+
+
+def path_exists(edges,start,end):
+    todo=[start];seen=set()
+    while todo:
+        n=todo.pop()
+        if n==end:return True
+        if n in seen:continue
+        seen.add(n);todo.extend(edges.get(n,()))
+    return False
+
+
+def graph_state(data,streams):
+    nodes={x['id']:x for x in data if x['type'].endswith(':Node')}
+    clients={x['id']:props(x) for x in data if x['type'].endswith(':Client')}
+    cookie=next(x['info']['cookie'] for x in data if x['type'].endswith(':Core'))
+    def named(name):
+        found=[x for x in nodes.values() if props(x).get('node.name')==name]
+        if len(found)!=1:raise RuntimeError('The active EasyEffects pipeline is not ready')
+        return found[0]
+    sink=named('easyeffects_sink');limiter=named('ee_soe_limiter');output=named('ee_soe_output_level')
+    edges={}
+    for x in data:
+        if x['type'].endswith(':Link') and x.get('info',{}).get('state') in ('active','paused','init'):
+            i=x['info'];edges.setdefault(i['output-node-id'],set()).add(i['input-node-id'])
+    # The two halves of the known spatial filter share one real PipeWire client.
+    ins=[x for x in nodes.values() if props(x).get('node.name')=='effect_input.spatial-surround']
+    outs=[x for x in nodes.values() if props(x).get('node.name')=='effect_output.spatial-surround']
+    if len(ins)==len(outs)==1 and props(ins[0]).get('client.id')==props(outs[0]).get('client.id'):
+        edges.setdefault(ins[0]['id'],set()).add(outs[0]['id'])
+    if not path_exists(edges,sink['id'],limiter['id']) or not path_exists(edges,limiter['id'],output['id']):
+        raise RuntimeError('The final limiter is not in the active signal path')
+    for ident,node in nodes.items():
+        name=props(node).get('node.name','')
+        if name.startswith('ee_soe_') and ident!=limiter['id'] and name not in ('ee_soe_spectrum','ee_soe_output_level') and path_exists(edges,limiter['id'],ident):
+            raise RuntimeError('Place the limiter after the sound effects to use loudness control')
+    destinations=sorted(str(props(nodes[x]).get('object.serial')) for x in edges.get(output['id'],()) if x in nodes)
+    if not destinations:raise RuntimeError('EasyEffects output is not connected')
+    selected={x['id'] for x in streams}
+    if not selected or any(not path_exists(edges,x,sink['id']) for x in selected):
+        raise RuntimeError('Route the selected app through EasyEffects to use its limiter')
+    foreign=[];foreign_nodes=[]
+    for ident,node in nodes.items():
+        p=props(node)
+        if p.get('media.class') not in ('Stream/Output/Audio','Audio/Source','Audio/Source/Virtual') and p.get('node.name')!='ee_test_signals':continue
+        if node['info'].get('state')!='running' or not path_exists(edges,ident,sink['id']):continue
+        if p.get('node.name')=='effect_output.spatial-surround' and len(ins)==len(outs)==1:continue
+        if ident not in selected:
+            foreign.append(str(p.get('application.name') or p.get('node.name') or 'another application'))
+            foreign_nodes.append({'id':ident,'serial':str(p.get('object.serial')),'kind':p.get('media.class')})
+    return {'cookie':cookie,'limiter_serial':str(props(limiter)['object.serial']),'limiter_id':limiter['id'],
+            'destinations':destinations,'foreign':sorted(set(foreign)),'foreign_nodes':sorted(foreign_nodes,key=lambda x:x['id']),
+            'route_signature':sorted([str(props(nodes[a]).get('object.serial')),str(props(nodes[b]).get('object.serial'))]
+                for a,targets in edges.items() for b in targets if a in nodes and b in nodes
+                and any(path_exists(edges,x,a) for x in selected) and path_exists(edges,b,output['id']))}
+
+
+def inspect(allow_paused=None,data=None):
+    data=pw_dump() if data is None else data
+    app=next((x for x in playback_apps(data) if x['id']==config()['selected_app']),None)
+    if app is None:raise RuntimeError('Start playback, then pick its app below')
+    if any(not x['supported'] or not 1<=x['channels']<=64 for x in app['streams']):
+        raise RuntimeError('This app’s audio stream does not support an independent gain stage')
+    preset,owner=exchange('get_last_loaded_preset:output')
+    bypass,_=exchange('get_global_bypass')
+    if bypass not in ('0','2'):raise RuntimeError('EasyEffects is bypassed')
+    values={p:get('output:limiter:0:'+p) for p in ('inputGain','outputGain','threshold','bypass','oversampling','gainBoost','sidechainType')}
+    if values['bypass']!='false':raise RuntimeError('This preset has its limiter bypassed')
+    if values['sidechainType']!='0':raise RuntimeError('The limiter uses an external sidechain')
+    track=music_track(app)
+    graph=graph_state(data,app['streams'])
+    ceiling=(0.0 if values['gainBoost']=='true' else number(values['threshold']))+number(values['outputGain'])
+    if ceiling>0:raise RuntimeError('The limiter output is above full scale · review its output gain')
+    again,owner_after=exchange('get_last_loaded_preset:output')
+    if again!=preset or owner_after!=owner:raise RuntimeError('The preset changed; try again')
+    return dict(graph,preset=preset,ee=owner,track=track,app=app['id'],app_name=app['name'],streams=app['streams'],
+                gain=number(values['inputGain']),limiter=values,ceiling=ceiling,graph=data)
+
+
+def stream_identity(stream):return {k:stream[k] for k in ('serial','process','channels')}
+
+
+def same_streams(a,b):
+    return a.get('cookie')==b.get('cookie') and a.get('app')==b.get('app') and sorted(
+        (json.dumps(stream_identity(x),sort_keys=True) for x in a.get('streams',[])))==sorted(
+        (json.dumps(stream_identity(x),sort_keys=True) for x in b.get('streams',[])))
+
+
+def same_pipeline(a,b):
+    return all(a.get(k)==b.get(k) for k in ('ee','preset','cookie','limiter_serial'))
+
+
+def same_scope(a,b):return same_pipeline(a,b) and same_streams(a,b) and a['track']['key']==b['track']['key'] and a['destinations']==b['destinations'] and a.get('route_signature')==b.get('route_signature')
+
+
+def compact(snapshot):return {k:v for k,v in snapshot.items() if k!='graph'}
+
+
+def owned(state,snapshot):
+    return bool(state.get('owned')) and state.get('backend')==BACKEND and same_streams(state['observed'],snapshot) and all(
+        x['params'].get(GAIN_KEY) is not None and math.isclose(number(x['params'][GAIN_KEY]),state['multiplier'],rel_tol=1e-5,abs_tol=1e-8)
+        for x in snapshot['streams'])
+
+
+@contextlib.contextmanager
+def lock():
+    with (RUNTIME/'music-loudness-controls.lock').open('a') as f:
+        fcntl.flock(f,fcntl.LOCK_EX);yield
+
+
+def journal(event,state):
+    STORE.mkdir(parents=True,exist_ok=True)
+    with (STORE/'events.jsonl').open('a') as f:
+        os.chmod(f.name,0o600);f.write(json.dumps({'time':time.time(),'event':event,'preset':state.get('observed',{}).get('preset'),
+            'track_key':state.get('observed',{}).get('track',{}).get('key'),'db':state.get('db',0),'base_gain':state.get('base_gain'),'expected_gain':state.get('expected_gain')})+'\n')
+
+
+def cancel_meter(state):
+    meter=state.pop('meter',None)
+    if not meter:return
+    try:
+        observed=birth(meter['identity']['pid'])
+        args=Path('/proc',str(observed['pid']),'cmdline').read_bytes().split(b'\0')
+        if observed==meter['identity'] and observed['exe'] in ('pw-cat','pw-record') and meter['file'].encode() in args:
+            os.kill(observed['pid'],signal.SIGTERM)
+    except (OSError,ValueError):pass
+
+
+def legacy_reset(state,message='Original level restored'):
+    # Cleanup needs no currently playing music or connected output, but must still own this exact gain.
+    cancel_meter(state)
+    restored=False
+    if state.get('owned'):
+        try:
+            preset,owner=exchange('get_last_loaded_preset:output');gain=number(get('output:limiter:0:inputGain'))
+            data=pw_dump()
+            core=next(x['info']['cookie'] for x in data if x['type'].endswith(':Core'))
+            nodes=[x for x in data if x['type'].endswith(':Node') and props(x).get('node.name')=='ee_soe_limiter']
+            same_instance=len(nodes)==1 and str(props(nodes[0]).get('object.serial'))==state['observed']['limiter_serial'] and core==state['observed']['cookie']
+            # EasyEffects removes its plugin nodes when idle but keeps their live settings.
+            # Restore that cached gain too, only in the same process/core/preset with unchanged controls.
+            controls=state['observed'].get('limiter',{})
+            if not nodes and core==state['observed']['cookie'] and controls:
+                same_instance=all(get('output:limiter:0:'+key)==value for key,value in controls.items() if key!='inputGain')
+            if same_instance and owner==state['observed']['ee'] and preset==state['observed']['preset'] and close(gain,state['expected_gain']):
+                exchange('set_property:'+GAIN+':'+format(number(state['base_gain']),'.9g'))
+                if not close(get('output:limiter:0:inputGain'),state['base_gain']):raise RuntimeError('Reset readback did not match')
+                restored=True
+            else:message='Sound changed elsewhere · your current value kept'
+        except (OSError,ValueError,RuntimeError):
+            state['message']='Reset could not be verified; current settings were not replaced';write(SESSION,state);raise
+    state.update(owned=False,db=0.0,measuring=False,operation=None,message=message,restored=restored)
+    write(SESSION,state);journal('reset',state)
+
+
+def current_stream(ident,cookie):
+    data=pw_dump()
+    if next(x['info']['cookie'] for x in data if x['type'].endswith(':Core'))!=cookie:return None
+    return next((s for a in playback_apps(data) for s in a['streams'] if stream_identity(s)==stream_identity(ident)),None)
+
+
+def set_stream(ident,cookie,params):
+    current=current_stream(ident,cookie)
+    if current is None:raise RuntimeError('The selected audio stream changed')
+    run(['pw-cli','set-param',str(current['id']),'Props',json.dumps({'params':params})])
+
+
+def wait_gain(ident,cookie,expected):
+    deadline=time.monotonic()+2
+    while True:
+        current=current_stream(ident,cookie)
+        value=current['params'].get(GAIN_KEY) if current else None
+        if (expected is None and value is None) or (value is not None and expected is not None and math.isclose(number(value),expected,rel_tol=1e-5,abs_tol=1e-8)):return
+        if time.monotonic()>deadline:raise RuntimeError('The app did not confirm its gain change')
+        time.sleep(.04)
+
+
+def gain_graph(multiplier,channels):
+    return json.dumps({'nodes':[{'type':'builtin','name':'music_loudness_gain','label':'linear',
+        'control':{'Mult':multiplier,'Add':0}}],'n_inputs':channels,'n_outputs':channels})
+
+
+def raw_reset(state,message='Original app level restored'):
+    if state.get('owned') and state.get('backend')!=BACKEND:return legacy_reset(state,message)
+    cancel_meter(state)
+    remaining=[];external=False
+    for item in state.get('applied',[]):
+        ident=item['stream']
+        try:
+            current=current_stream(ident,state['observed']['cookie'])
+            if current is None:continue
+            value=current['params'].get(GAIN_KEY)
+            if value is None:continue
+            if not any(math.isclose(number(value),v,rel_tol=1e-5,abs_tol=1e-8) for v in item['accepted']):
+                external=True;continue
+            set_stream(ident,state['observed']['cookie'],[GRAPH_KEY,''])
+            wait_gain(ident,state['observed']['cookie'],None)
+        except Exception:remaining.append(item)
+    state.update(applied=remaining,owned=bool(remaining),db=state.get('db',0) if remaining else 0,
+        measuring=False,operation=None,message='Gain edited elsewhere · your value kept' if external else message)
+    write(SESSION,state);journal('reset',state)
+    if remaining:raise RuntimeError('Could not verify app gain reset; recovery receipt retained')
+
+
+def apply_extra(snapshot,state,db):
+    db=number(db);multiplier=10**(db/20)
+    if not math.isfinite(multiplier) or not 0<multiplier<=10:raise ValueError('The app gain stage supports up to +20 dB')
+    previous=owned(state,snapshot)
+    if not previous:
+        if state.get('owned'):raise RuntimeError('Reset the previous adjustment first')
+        if any(GAIN_KEY in x['params'] or x['params'].get(GRAPH_KEY) for x in snapshot['streams']):
+            raise RuntimeError('This app already has a gain stage without a matching receipt')
+        state={'backend':BACKEND,'observed':compact(snapshot),'owned':False,'db':0,'applied':[]}
+    before=inspect(allow_paused=snapshot['track']['key'])
+    if not same_scope(snapshot,before) or (previous and not owned(state,before)):
+        raise RuntimeError('Audio changed before the adjustment; nothing replaced')
+    if close(db,0):raw_reset(state);return state
+    old_multiplier=state.get('multiplier')
+    state.update(observed=compact(snapshot),multiplier=multiplier,owned=True,db=db,measuring=False,operation=None,
+                 message='Only '+snapshot['app_name']+' · preset unchanged')
+    try:
+        for stream in snapshot['streams']:
+            item=next((x for x in state['applied'] if stream_identity(x['stream'])==stream_identity(stream)),None)
+            if item is None:
+                item={'stream':stream_identity(stream),'accepted':[]};state['applied'].append(item)
+            item['accepted']=[multiplier]+([old_multiplier] if old_multiplier is not None else [])
+            write(SESSION,state) # Exact stream and both transaction values before the write.
+            set_stream(stream,snapshot['cookie'],[GAIN_KEY,multiplier] if previous else [GRAPH_KEY,gain_graph(multiplier,stream['channels'])])
+            wait_gain(stream,snapshot['cookie'],multiplier)
+            item['accepted']=[multiplier];write(SESSION,state)
+        check=inspect(allow_paused=snapshot['track']['key'])
+        if not same_scope(snapshot,check):raise RuntimeError('Audio changed during adjustment')
+    except Exception:
+        raw_reset(state,'Adjustment failed · original app level restored');raise
+    write(SESSION,state);journal('gain',state);return state
+
+
+def ensure_worker():
+    run(['systemctl','--user','start',UNIT],timeout=6)
+
+
+def adjust(step):
+    if not config()['enabled']:raise RuntimeError('Enable Music loudness in Audio settings first')
+    set_auto_match(False)  # Explicit level changes take over from automatic matching.
+    with lock():
+        state=read(SESSION);snapshot=inspect()
+        if snapshot['track']['status']!='Playing':raise RuntimeError('Play the selected app first')
+        if state.get('measuring'):raise RuntimeError('A loudness check is already in progress')
+        if state.get('owned') and (not same_scope(state['observed'],snapshot) or not owned(state,snapshot)):raw_reset(state,'Audio changed');snapshot=inspect();state={}
+        db=state.get('db',0) if owned(state,snapshot) else 0
+        result=apply_extra(snapshot,state,number(db)+number(step))
+    try:
+        if result.get('owned'):ensure_worker()
+    except Exception:
+        cleanup();raise
+    return result
+
+
+def recommendation(lufs,peak,target,ceiling):
+    lufs,peak,target,ceiling=map(number,(lufs,peak,target,ceiling))
+    if peak < -65 or lufs < -60:raise RuntimeError('The section is too quiet to measure reliably')
+    desired=max(0.0,target-lufs)
+    headroom=max(0.0,ceiling-0.5-peak)
+    return round(min(desired,headroom),2), desired>headroom+0.1
+
+
+def auto_recommendation(lufs,peak,target,ceiling,db):
+    lufs,peak,target,ceiling,db=map(number,(lufs,peak,target,ceiling,db))
+    # Do not lift fades/noise, chase sub-LU fluctuations, or build up unlimited gain.
+    if lufs < -40 or peak < -55:raise RuntimeError('Waiting for a clear section of playback')
+    error=target-lufs
+    if abs(error)<1:return db,False
+    delta=max(-1.0,min(1.0,error))
+    if delta>0:
+        delta=min(delta,max(0.0,ceiling-0.5-peak),max(0.0,6.0-db))
+    else:
+        delta=max(delta,min(0.0,-12.0-db))
+    return round(db+delta,2), error>delta+0.1
+
+
+def meter_background(snapshot,allow_silent=False):
+    monitors=snapshot.get('foreign_nodes',[])
+    if snapshot.get('foreign') and (not allow_silent or not monitors or len(monitors)>4 or
+            any(x['kind']!='Stream/Output/Audio' for x in monitors)):
+        raise RuntimeError('Pause other audio to match: '+', '.join(snapshot['foreign']))
+    return monitors if allow_silent else []
+
+
+def meter_scope_matches(before,after,allow_silent=False):
+    return (same_scope(before,after) and close(before['gain'],after['gain']) and
+            before['limiter']==after['limiter'] and after['track']['status']=='Playing' and
+            (before.get('foreign_nodes',[])==after.get('foreign_nodes',[]) and before.get('foreign',[])==after.get('foreign',[])
+             if allow_silent else not after.get('foreign')))
+
+
+def measure(snapshot,seconds=8,operation=None,allow_silent=False):
+    monitors=meter_background(snapshot,allow_silent)
+    positions=['FL','FR','RL','RR','SL','SR','FLC','FRC','FC','RC'][:2+2*len(monitors)]
+    channels=len(positions)
+    name='music_loudness_meter_'+uuid.uuid4().hex
+    with tempfile.TemporaryDirectory(prefix='music-loudness-',dir=RUNTIME) as tmp:
+        wav=Path(tmp)/'section.wav';log=Path(tmp)/'capture.log'
+        properties=json.dumps({'node.name':name,'node.description':'Music loudness measurement','node.autoconnect':False,'node.passive':True,'media.role':'DSP',
+                               'stream.dont-remix':True,'channelmix.disable':True})
+        if operation and (read(SESSION).get('operation')!=operation or not config()['enabled']):raise RuntimeError('Measurement cancelled')
+        with log.open('wb') as output:
+            child=subprocess.Popen(['pw-record','--target','0','--properties',properties,'--rate','48000','--channels',str(channels),
+                '--channel-map',','.join(positions),'--format','f32','--sample-count',str(48000*seconds),str(wav)],stdout=output,stderr=subprocess.STDOUT)
+            try:
+                if operation:
+                    with lock():
+                        state=read(SESSION)
+                        if state.get('operation')!=operation:raise RuntimeError('Measurement cancelled')
+                        state['meter']={'identity':birth(child.pid),'file':str(wav)};write(SESSION,state)
+                end=time.monotonic()+4
+                configured=False
+                while True:
+                    data=pw_dump();nodes=[x for x in data if x['type'].endswith(':Node') and props(x).get('node.name')==name]
+                    ports=[x for x in data if x['type'].endswith(':Port')]
+                    if nodes:
+                        if not configured:
+                            run(['pw-cli','set-param',str(nodes[0]['id']),'PortConfig',json.dumps({'direction':'Input','mode':'dsp',
+                                'format':{'mediaType':'audio','mediaSubtype':'raw','format':'F32','channels':channels,'position':positions}})])
+                            configured=True
+                            continue
+                        dest={props(x).get('audio.channel'):x['id'] for x in ports if str(props(x).get('node.id'))==str(nodes[0]['id']) and props(x).get('port.direction')=='in'}
+                        if all(c in dest for c in positions):break
+                    if time.monotonic()>end:raise RuntimeError('Playback meter ports are unavailable')
+                    time.sleep(.1)
+                current=inspect()
+                if not meter_scope_matches(snapshot,current,allow_silent):raise RuntimeError('Song, audio or preset changed before measurement')
+                source={props(x).get('audio.channel'):x['id'] for x in ports if str(props(x).get('node.id'))==str(current['limiter_id']) and props(x).get('port.direction')=='out'}
+                if not all(c in source for c in ('FL','FR')):raise RuntimeError('The final limiter has no stereo output to measure')
+                for ch in ('FL','FR'):run(['pw-link',str(source[ch]),str(dest[ch])])
+                for i,monitor in enumerate(monitors):
+                    source={props(x).get('audio.channel'):x['id'] for x in ports if str(props(x).get('node.id'))==str(monitor['id']) and props(x).get('port.direction')=='out'}
+                    if not all(c in source for c in ('FL','FR')):raise RuntimeError('Pause other audio: its silent state could not be checked')
+                    for j,ch in enumerate(('FL','FR')):run(['pw-link',str(source[ch]),str(dest[positions[2+2*i+j]])])
+                # Explicit output-port links only. The recording node never auto-connects to a microphone.
+                deadline=time.monotonic()+seconds+6
+                while child.poll() is None:
+                    if operation and read(SESSION).get('operation')!=operation:raise RuntimeError('Measurement cancelled')
+                    if not meter_scope_matches(snapshot,inspect(),allow_silent):raise RuntimeError('Audio changed during measurement; result discarded')
+                    if time.monotonic()>deadline:raise RuntimeError('Playback measurement timed out')
+                    time.sleep(.5)
+                if operation and read(SESSION).get('operation')!=operation:raise RuntimeError('Measurement cancelled')
+                # PipeWire1.6.10 exits1 at --sample-count because this path does not mark playback drained.
+                # Accept that documented path only with an exact, decodable stereo frame count and no error log.
+                metadata=json.loads(run(['ffprobe','-v','error','-select_streams','a:0','-show_streams','-of','json',str(wav)]).stdout)['streams'][0]
+                frames=Fraction(str(metadata['duration_ts']))*Fraction(metadata['time_base'])*48000
+                if child.returncode not in (0,1) or 'error' in log.read_text().lower() or frames!=48000*seconds or metadata['channels']!=channels or int(metadata['sample_rate'])!=48000:
+                    raise RuntimeError('Playback measurement was incomplete; no gain applied')
+            finally:
+                if child.poll() is None:child.terminate();child.wait(timeout=3)
+        after=inspect()
+        if not meter_scope_matches(snapshot,after,allow_silent):
+            raise RuntimeError('Song, preset or gain changed during measurement; result discarded')
+        for i in range(len(monitors)):
+            analysis=run(['ffmpeg','-hide_banner','-nostats','-threads','1','-filter_threads','1','-i',str(wav),'-filter:a',
+                f'pan=stereo|c0=c{2+2*i}|c1=c{3+2*i},astats=metadata=0:reset=0','-f','null','-'],timeout=15)
+            peaks=re.findall(r'Peak level dB:\s*([-+\d.inf]+)',analysis.stderr)
+            if not peaks or any(math.isnan(float(p)) or float(p)>-80 for p in peaks):
+                raise RuntimeError('Pause other audio to match: '+', '.join(snapshot['foreign']))
+        result=run(['ffmpeg','-hide_banner','-nostats','-threads','1','-filter_threads','1','-i',str(wav),'-filter:a','pan=stereo|c0=c0|c1=c1,ebur128=peak=true','-f','null','-'],timeout=15)
+        summary=result.stderr[result.stderr.rfind('Summary:'):]
+        integrated=re.search(r'I:\s*([-+\d.inf]+) LUFS',summary)
+        peak=re.search(r'Peak:\s*([-+\d.inf]+) dBFS',summary)
+        if not integrated or not peak:raise RuntimeError('The playback loudness measurement was incomplete')
+        return {'lufs':number(integrated[1]),'true_peak_dbtp':number(peak[1]),'seconds':seconds,'source':'final limiter stereo output','silent_background':monitors}
+
+
+def match(automatic=False):
+    if not config()['enabled']:raise RuntimeError('Enable Music loudness in Audio settings first')
+    token=uuid.uuid4().hex
+    with lock():
+        if automatic and not config()['auto_match']:raise RuntimeError('Automatic matching cancelled')
+        state=read(SESSION);snapshot=inspect()
+        if snapshot['track']['status']!='Playing':raise RuntimeError('Play the selected app first')
+        if state.get('measuring'):raise RuntimeError('A loudness check is already in progress')
+        if state.get('owned') and (not same_scope(state['observed'],snapshot) or not owned(state,snapshot)):raw_reset(state,'Audio changed');snapshot=inspect();state={}
+        meter_background(snapshot,automatic)
+        state.update(measuring=True,automatic=automatic,operation=token,message='Measuring this section…',measurement_scope=compact(snapshot),started=time.time())
+        write(SESSION,state)
+    try:
+        if not automatic:ensure_worker()
+        measured=measure(snapshot,operation=token,allow_silent=automatic)
+        with lock():
+            state=read(SESSION);now=inspect()
+            if automatic and not config()['auto_match']:raise RuntimeError('Automatic matching cancelled')
+            if state.get('operation')!=token or not meter_scope_matches(snapshot,now,automatic) or (automatic and now.get('foreign_nodes',[])!=measured.get('silent_background',[])):
+                raise RuntimeError('Sound changed; the measured result was not applied')
+            db=state.get('db',0) if owned(state,now) else 0
+            if automatic:
+                db,limited=auto_recommendation(measured['lufs'],measured['true_peak_dbtp'],config()['target_lufs'],snapshot['ceiling'],db)
+            else:
+                extra,limited=recommendation(measured['lufs'],measured['true_peak_dbtp'],config()['target_lufs'],snapshot['ceiling'])
+                db=number(db)+extra
+            state=apply_extra(now,state,db)
+            state.pop('meter',None)
+            message=('Auto match · '+format(db,'+.1f')+' dB' if automatic else
+                     ('Matched measured section' if not limited else 'Boost uses the section’s available headroom'))
+            state.update(automatic=False,measurement=dict(measured,scope=compact(now)),message=message,auto_message=message if automatic else '')
+            write(SESSION,state)
+            return state
+    except Exception:
+        with lock():
+            state=read(SESSION)
+            if state.get('operation')==token:
+                cancel_meter(state);state.update(measuring=False,operation=None,message='Measurement cancelled · current level kept');write(SESSION,state)
+        raise
+
+
+def tick():
+    with lock():
+        state=read(SESSION)
+        if not state.get('owned') and not state.get('measuring'):return False
+        if not config()['enabled']:raw_reset(state);return False
+        scope=state.get('measurement_scope') if state.get('measuring') else state.get('observed')
+        try:snapshot=inspect(allow_paused=scope['track']['key'])
+        except Exception:raw_reset(state,'Boost reset · app or limiter unavailable');return False
+        if state.get('measuring') and (time.time()-state.get('started',0)>35 or not meter_scope_matches(scope,snapshot,state.get('automatic',False))):
+            cancel_meter(state);state.update(measuring=False,operation=None,message='Audio changed · measurement cancelled');write(SESSION,state)
+        if not state.get('owned'):return state.get('measuring',False)
+        old=state['observed']
+        if not same_streams(old,snapshot) or snapshot['track']['key']!=old['track']['key'] or snapshot['destinations']!=old['destinations'] or snapshot['ee']!=old['ee'] or snapshot['app']!=config()['selected_app']:
+            raw_reset(state,'New song, app or output · original app level restored');return False
+        changed_preset=snapshot['preset']!=old['preset'] or snapshot['limiter_serial']!=old['limiter_serial']
+        if changed_preset and not config()['follow_presets']:
+            raw_reset(state,'Preset changed · boost ended');return False
+        if not changed_preset and old.get('route_signature')!=snapshot.get('route_signature'):
+            raw_reset(state,'App routing changed · original level restored');return False
+        if not owned(state,snapshot):
+            raw_reset(state,'App gain changed elsewhere');return False
+        if changed_preset:state['observed']=compact(snapshot);write(SESSION,state)
+        return True
+
+
+def cleanup():
+    with lock():raw_reset(read(SESSION))
+
+
+def set_auto_match(value):
+    with lock():
+        cfg=config()
+        if value and not cfg['enabled']:raise RuntimeError('Enable Music loudness first')
+        cfg['auto_match']=bool(value);write(CONFIG,cfg)
+        state=read(SESSION)
+        if not value and state.get('automatic') and state.get('measuring'):
+            cancel_meter(state)
+            state.update(measuring=False,automatic=False,operation=None,message='Auto match off · current level kept')
+            write(SESSION,state)
+    if value:
+        try:ensure_worker()
+        except Exception:
+            with lock():
+                cfg=config();cfg['auto_match']=False;write(CONFIG,cfg)
+            raise
+
+
+def auto_attempt():
+    """One bounded section check; shared operation receipts arbitrate manual actions."""
+    if not config()['auto_match'] or read(SESSION).get('measuring'):return
+    try:match(automatic=True)
+    except Exception as e:
+        with lock():
+            state=read(SESSION)
+            if config()['auto_match'] and not state.get('measuring'):
+                state['auto_message']='Auto match waiting · '+str(e)
+                write(SESSION,state)
+
+
+def serve():
+    with (RUNTIME/'music-loudness-worker.lock').open('a') as guard:
+        fcntl.flock(guard,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        stopping=False
+        def stop(*args):
+            nonlocal stopping
+            stopping=True
+            cancel_meter(read(SESSION))
+        signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
+        # Allow the starting CLI transaction to finish writing its receipt.
+        time.sleep(.4)
+        next_auto=0.0
+        try:
+            while not stopping:
+                active=tick();cfg=config()
+                automatic=cfg['enabled'] and cfg['auto_match']
+                if not active and not automatic:break
+                if automatic and not stopping and time.monotonic()>=next_auto:
+                    next_auto=time.monotonic()+max(15.0,number(cfg['auto_interval']))
+                    auto_attempt()
+                # Retain the existing ownership guard while gain is applied;
+                # an idle automatic watcher only reads its config every five seconds.
+                delay=.5 if read(SESSION).get('owned') or read(SESSION).get('measuring') else 5.0
+                deadline=time.monotonic()+delay
+                while not stopping and time.monotonic()<deadline:time.sleep(.2)
+        except BaseException:
+            cleanup();raise
+        finally:
+            if stopping:cleanup()
+        # Idle exit already removed its gain in tick(). Do not clean up a new
+        # CLI transaction that arrived as this worker was exiting. The CLI
+        # starts the unit after releasing its transaction lock.
+
+
+def status():
+    cfg=config();state=read(SESSION)
+    result={'enabled':cfg['enabled'],'step_db':cfg['step_db'],'target_lufs':cfg['target_lufs'],'follow_presets':cfg['follow_presets'],
+            'auto_match':cfg['auto_match'],'auto_interval':cfg['auto_interval'],'auto_message':state.get('auto_message',''),
+            'active':False,'ready':False,'match_ready':False,'match_message':'','apps':[],'selected_app':cfg['selected_app'],
+            'db':0,'title':'Pick a playback app','preset':'','message':state.get('message','Ready for music'),'measuring':state.get('measuring',False),'measurement':None}
+    if not cfg['enabled']:result['message']='Off';return result
+    try:
+        data=pw_dump();apps=playback_apps(data)
+        result['apps']=[{'id':a['id'],'name':a['name'],'playing':any(x['running'] for x in a['streams'])} for a in apps]
+        snapshot=inspect(data=data)
+        result.update(ready=snapshot['track']['status']=='Playing',title=snapshot['track']['title'],preset=snapshot['preset'],ceiling=snapshot['ceiling'],app_name=snapshot['app_name'])
+        result['match_ready']=result['ready'] and not snapshot['foreign']
+        result['match_message']='Pause other audio to match: '+', '.join(snapshot['foreign']) if snapshot['foreign'] else 'Measure this app through the current effects'
+        measurement=state.get('measurement')
+        if measurement and measurement.get('scope') and same_scope(measurement['scope'],snapshot):result['measurement']={k:v for k,v in measurement.items() if k!='scope'}
+        if owned(state,snapshot):result.update(active=abs(state.get('db',0))>.00001,db=state.get('db',0))
+        if not state.get('measuring'):result['message']='Only '+snapshot['app_name']+' · preset unchanged'
+    except Exception as e:result['message']=str(e)
+    return result
+
+
+def select_app(value):
+    with lock():
+        if value not in {x['id'] for x in playback_apps(pw_dump())}:raise ValueError('Start the app’s audio once, then pick it from the list')
+        raw_reset(read(SESSION),'App changed · original level restored')
+        cfg=config();cfg['selected_app']=value;write(CONFIG,cfg)
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action',choices=['status','enable','disable','adjust','match','reset','serve','cleanup','target','step','follow-presets','select-app','cleanup-failed','auto-match','auto-interval'])
+    parser.add_argument('value',nargs='?');args=parser.parse_args()
+    if args.action=='serve':serve();return
+    if args.action=='cleanup':cleanup();return
+    if args.action=='cleanup-failed':
+        if os.environ.get('SERVICE_RESULT')!='success':cleanup()
+        return
+    if args.action=='status':print(json.dumps(status(),ensure_ascii=False));return
+    if args.action in ('enable','disable'):
+        cfg=config();cfg['enabled']=args.action=='enable';write(CONFIG,cfg)
+        if not cfg['enabled']:set_auto_match(False);run(['systemctl','--user','stop',UNIT]);cleanup()
+        elif cfg['auto_match']:ensure_worker()
+    elif args.action=='reset':set_auto_match(False);cleanup();run(['systemctl','--user','stop',UNIT])
+    elif args.action=='select-app':select_app(args.value)
+    elif args.action=='adjust':adjust(number(args.value))
+    elif args.action=='match':match()
+    elif args.action=='auto-match':
+        if args.value not in ('true','false'):raise ValueError('Use true or false')
+        set_auto_match(args.value=='true')
+    elif args.action=='auto-interval':
+        value=number(args.value)
+        if not 15<=value<=300:raise ValueError('Choose an interval from 15 to 300 seconds')
+        cfg=config();cfg['auto_interval']=value;write(CONFIG,cfg)
+    elif args.action in ('target','step','follow-presets'):
+        cfg=config()
+        if args.action=='follow-presets':
+            if args.value not in ('true','false'):raise ValueError('Use true or false')
+            cfg['follow_presets']=args.value=='true'
+        else:
+            value=number(args.value)
+            if args.action=='step' and value<=0:raise ValueError('Choose a positive gain step')
+            cfg['target_lufs' if args.action=='target' else 'step_db']=value
+        write(CONFIG,cfg)
+    print(json.dumps(status(),ensure_ascii=False))
+
+
+if __name__=='__main__':
+    try:main()
+    except Exception as e:print('music-loudness: '+str(e),file=sys.stderr);sys.exit(1)

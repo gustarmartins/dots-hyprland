@@ -50,7 +50,13 @@ AndroidQuickToggleButton {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: EasyEffects.toggle()
+                // Only show the hint after the pointer really moves over the icon, so it
+                // doesn't pop up when the sidebar opens under a resting cursor.
+                property bool pointerMoved: false
+                onContainsMouseChanged: if (!containsMouse) pointerMoved = false
+                onPositionChanged: pointerMoved = true
                 StyledToolTip {
+                    extraVisibleCondition: iconMouse.containsMouse && iconMouse.pointerMoved
                     text: EasyEffects.processing ? Translation.tr("Turn effects off") : Translation.tr("Turn effects on")
                 }
             }

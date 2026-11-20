@@ -594,6 +594,7 @@ Singleton {
                     property JsonObject android: JsonObject {
                         property int columns: 7
                         property list<var> toggles: [
+                            { "size": 7, "height": 3, "type": "vrr" },
                             { "size": 2, "type": "network" },
                             { "size": 2, "type": "bluetooth"  },
                             { "size": 1, "type": "idleInhibitor" },

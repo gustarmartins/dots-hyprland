@@ -11,6 +11,7 @@ ColumnLayout {
     objectName: "agentSessions"
     Layout.fillWidth: true
     spacing: 12
+    CodexNotifications {}
     property string helper: Directories.home.replace(/^file:\/\//, "") + "/.local/bin/agent-monitor"
     property string snapshotPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/run/user/" + Quickshell.env("UID")) + "/agent-monitor/snapshot.json"
     property var configuration: ({enabled:false, titles:true})

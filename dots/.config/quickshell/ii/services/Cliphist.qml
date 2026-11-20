@@ -16,6 +16,33 @@ Singleton {
     property bool sloppySearch: Config.options?.search.sloppy ?? false
     property real scoreThreshold: 0.2
     property list<string> entries: []
+    property bool captureEnabled: false
+    property bool refreshPending: false
+
+    // The shell owns capture, so restarting after a compositor crash restores
+    // it even when Hyprland's login-only commands are not run again.
+    function start() {
+        captureEnabled = true
+        textWatcher.running = true
+        imageWatcher.running = true
+        refresh()
+    }
+
+    ClipboardWatcher {
+        id: textWatcher
+        mimeType: "text"
+        cliphistBinary: root.cliphistBinary
+        captureEnabled: root.captureEnabled
+        onStored: root.refresh()
+    }
+    ClipboardWatcher {
+        id: imageWatcher
+        mimeType: "image"
+        cliphistBinary: root.cliphistBinary
+        captureEnabled: root.captureEnabled
+        onStored: root.refresh()
+    }
+
     readonly property var preparedEntries: entries.map(a => ({
         name: Fuzzy.prepare(`${a.replace(/^\s*\S+\s+/, "")}`),
         entry: a
@@ -47,6 +74,11 @@ Singleton {
     }
 
     function refresh() {
+        if (readProc.running) {
+            refreshPending = true
+            return
+        }
+        refreshPending = false
         readProc.buffer = []
         readProc.running = true
     }
@@ -144,6 +176,7 @@ Singleton {
             } else {
                 console.error("[Cliphist] Failed to refresh with code", exitCode, "and status", exitStatus)
             }
+            if (root.refreshPending) Qt.callLater(root.refresh)
         }
     }
 
@@ -152,6 +185,17 @@ Singleton {
 
         function update(): void {
             root.refresh()
+        }
+
+        function status(): string {
+            return JSON.stringify({
+                captureEnabled: root.captureEnabled,
+                textRunning: textWatcher.running,
+                imageRunning: imageWatcher.running,
+                textPid: textWatcher.processId,
+                imagePid: imageWatcher.processId,
+                entryCount: root.entries.length
+            })
         }
     }
 }

@@ -21,6 +21,7 @@ ColumnLayout {
     function cleaned(text) { return text.replace(/\x1b\[[0-9;]*m/g, "").trim(); }
     function args(preview) {
         let result = [helper, "preset", presetName, "--user-only"];
+        result.push("--hintstyle", ["hintfull", "hintslight", "hintmedium", "hintnone"][hinting.currentIndex]);
         if (grayscale.checked) result.push("--subpixel", "none");
         if (preview) result.push("--preview");
         return result;
@@ -42,7 +43,7 @@ ColumnLayout {
         stderr: StdioCollector { id: previewError }
         onExited: code => {
             root.message = root.cleaned(previewOutput.text + "\n" + previewError.text);
-            root.previewReady = code === 0;
+            root.previewReady = code === 0 && preview.command[1] === "preset";
         }
     }
     Process {
@@ -73,7 +74,7 @@ ColumnLayout {
     StyledText { text: "Desktop font profiles"; font.pixelSize: 22; font.weight: Font.Medium }
     StyledText {
         Layout.fillWidth: true
-        text: "Preview checks installed fonts without changing anything. Apply updates your user Fontconfig, GTK, Qt, Kitty and shell settings, and restarts the running shell. System-wide font files are left to fontctl in a terminal."
+        text: "Apply updates desktop fonts plus Firefox and closed Chrome-family profiles. Website fonts and zoom are preserved. Firefox needs a restart; busy Chrome profiles are reported for retry. The shell restarts to load its fonts."
         wrapMode: Text.WordWrap
         color: Appearance.m3colors.m3onSurfaceVariant
         font.pixelSize: 13
@@ -91,7 +92,21 @@ ColumnLayout {
         CheckBox { id: compact; text: "Uniform 10 pt"; enabled: !root.busy && !preview.running }
         CheckBox { id: grayscale; text: "Grayscale rendering"; enabled: !root.busy && !preview.running; onToggled: root.previewReady = false }
     }
+    SettingsComboBox {
+        id: hinting
+        objectName: "fontHinting"
+        Layout.fillWidth: true
+        model: ["Full hinting — crisp grid alignment", "Slight hinting — preserve letter shapes", "Medium hinting", "No hinting"]
+        enabled: !root.busy && !preview.running
+        Accessible.name: "Font hinting"
+        onCurrentIndexChanged: root.previewReady = false
+    }
     RowLayout {
+        SettingsButton {
+            text: "Check applied fonts"
+            enabled: !root.busy && !preview.running
+            onClicked: { root.previewReady = false; preview.command = [root.helper, "status"]; preview.running = true; }
+        }
         SettingsButton {
             objectName: "fontPreview"
             text: preview.running ? "Checking fonts…" : "Preview profile"

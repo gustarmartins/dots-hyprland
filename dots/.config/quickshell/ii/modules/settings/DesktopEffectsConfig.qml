@@ -246,6 +246,11 @@ ColumnLayout {
                     displayName: "Aurora",
                     icon: "auto_awesome",
                     value: "aurora"
+                },
+                {
+                    displayName: "Custom",
+                    icon: "tune",
+                    value: "custom"
                 }
             ].concat(DesktopEffects.savedPresets.map(entry => ({
                 displayName: entry.name,

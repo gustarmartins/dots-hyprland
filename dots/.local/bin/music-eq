@@ -22,7 +22,45 @@ PRESETS = Path(os.environ.get('XDG_DATA_HOME', HOME/'.local/share'))/'easyeffect
 UNIT = 'music-eq.service'
 SESSION = RUNTIME/'music-eq-session.json'
 MANUAL = RUNTIME/'music-eq-manual.json'
-DEFAULT = dict(spotify=True, jukebox=True, artists=True, genres=True, tracks=[], artist_rules={}, genre_rules={}, fallback='', route='')
+DEFAULT = dict(spotify=True, jukebox=True, mpv=True, osu=True, artists=True, genres=True, tracks=[], artist_rules={}, genre_rules={}, fallback='', osu_preset='astra-osu', route='')
+
+
+def osu_stream_active():
+    """Detect whether osu! has an active (running/uncorked) audio stream."""
+    try:
+        res = run('pw-dump', 'Node')
+        if res.returncode == 0:
+            nodes = json.loads(res.stdout)
+            for n in nodes:
+                props = n.get('info', {}).get('props', {})
+                if props.get('media.class') != 'Stream/Output/Audio':
+                    continue
+                name = props.get('node.name', '')
+                app = props.get('application.name', '')
+                binary = props.get('application.process.binary', '')
+                desc = props.get('node.description', '')
+                combined = f"{name} {app} {binary} {desc}".lower()
+                targets = ('osu!', 'osu!.exe', 'osu.appimage', 'sh.ppy.osulazer', 'osulazer')
+                if any(t in combined for t in targets) or name == 'alsa_playback.osu!':
+                    if n.get('info', {}).get('state') == 'running':
+                        return True
+            return False
+    except Exception:
+        pass
+    try:
+        res = run('pactl', 'list', 'sink-inputs')
+        if res.returncode == 0:
+            for inp in res.stdout.split('Sink Input #'):
+                if not inp.strip():
+                    continue
+                inp_lower = inp.lower()
+                if any(t in inp_lower for t in ('osu!', 'osu!.exe', 'osulazer', 'alsa_playback.osu!')):
+                    if 'corked: no' in inp_lower:
+                        return True
+            return False
+    except Exception:
+        pass
+    return False
 
 
 def read(path, default):
@@ -163,14 +201,33 @@ class Watcher:
         self.manager.connect('player-vanished',lambda *a:self.schedule())
         self.pending=0; self.key=None; self.last=None; self.before=None; self.held=False
         self.observed=None; self.manual_id=None
+        self.audio_proc=None; self.audio_listener=None
         self.load_session()
         self.loop=GLib.MainLoop()
         for name in self.manager.props.player_names: self.add(name)
-        GLib.timeout_add_seconds(15,self.tick)
+        GLib.timeout_add_seconds(5,self.tick)
         GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM,self.stop)
         GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT,self.stop)
         GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, self.wake)
+        self.start_audio_listener()
         self.schedule()
+
+    def check_osu_active(self):
+        return osu_stream_active()
+
+    def start_audio_listener(self):
+        import shutil, threading
+        if not shutil.which('pactl'): return
+        def listen():
+            try:
+                proc=subprocess.Popen(['pactl','subscribe'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+                self.audio_proc=proc
+                for line in proc.stdout:
+                    if 'sink-input' in line or 'client' in line:
+                        self.G.idle_add(self.schedule)
+            except Exception: pass
+        t=threading.Thread(target=listen,daemon=True); t.start()
+        self.audio_listener=t
 
     def wake(self):
         self.schedule()
@@ -201,18 +258,20 @@ class Watcher:
         if name == 'spotify' or name.startswith('spotify.'): return 'spotify'
         if not name.startswith(('mpv','jukebox')): return None
         try:
+            from gi.repository import GLib
+            G=getattr(self,'G',GLib)
             pid=self.bus.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus',
-                'GetConnectionUnixProcessID',self.G.Variant('(s)',('org.mpris.MediaPlayer2.'+name,)),None,0,1000,None).unpack()[0]
+                'GetConnectionUnixProcessID',G.Variant('(s)',('org.mpris.MediaPlayer2.'+name,)),None,0,1000,None).unpack()[0]
             args=Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
             if any(a.startswith(b'--input-ipc-server=') and b'jukebox' in a for a in args): return 'jukebox'
         except Exception: pass
-        return None
+        return 'mpv'
 
     def tracks(self,cfg):
         result=[]
         for p in self.manager.props.players:
             source=self.source(p)
-            if not source or not cfg[source]: continue
+            if not source or not cfg.get(source,False): continue
             m=p.props.metadata.unpack()
             artists=m.get('xesam:artist',[])
             if isinstance(artists,str): artists=[artists]
@@ -255,6 +314,9 @@ class Watcher:
         self.observed=exchange('get_last_loaded_preset:output')
 
     def stop(self):
+        if hasattr(self,'audio_proc') and self.audio_proc:
+            try: self.audio_proc.terminate()
+            except Exception: pass
         try:
             with (RUNTIME/'easyeffects-qs.lock').open('w') as lock:
                 fcntl.flock(lock,fcntl.LOCK_EX)
@@ -278,44 +340,7 @@ class Watcher:
         except Exception as e: self.status('Waiting: '+str(e))
         return True
 
-    def update(self):
-        cfg=read(CONFIG,DEFAULT)
-        if run('systemctl','--user','is-active','astra-profiled.service').returncode == 0:
-            self.status('Paused: astra-profiled owns preset selection'); return
-        current=self.observe_manual()  # Before idle/restore: pause must not swallow a click.
-        tracks=self.tracks(cfg)
-        playing=[t for t in tracks if t['playing']]
-        if len(playing)!=1:
-            # A paused player can establish the song even before first playback.
-            if not playing and len(tracks)==1:
-                paused_key=track_key(tracks[0],self.key)
-                if paused_key is not None and paused_key != self.key:
-                    self.key=paused_key
-                    self.held=self.manual_event
-                    self.last=None
-            # A known paused song retains its sound, including live manual edits.
-            paused_same=(not playing and len(tracks)==1 and track_key(tracks[0],self.key) == self.key)
-            if not paused_same: self.restore()
-            self.status('Manual preset held through pause/interruption' if self.held else
-                        ('Waiting for playback' if not playing else 'Paused: multiple players are playing'))
-            return
-        t=playing[0]
-        key=track_key(t,self.key)
-        if key is None or ((not t['title'] or not t['artists']) and not file_preset(t,cfg)):
-            self.status('Waiting for metadata; song override retained'); return
-        changed=key != self.key
-        if changed:
-            self.key=key; self.held=False
-        if self.held:
-            self.status('Manual preset held until next song',track=t,preset=current); return
-        if cfg['route'] and route()!=cfg['route']:
-            self.restore(); self.status('Paused: different audio output'); return
-        if exchange('get_global_bypass') == '1':
-            self.status('Paused: EasyEffects bypassed'); return
-        if not changed and self.last == current:
-            self.status('Automatic preset active',track=t,preset=current); return
-        name,reason=select(t,cfg)
-        if not name: self.status('Unmapped song; keeping current preset',track=t); return
+    def apply_target(self, name, reason, key, current, track=None):
         target=json.loads(preset_path(name).read_text())['output']
         if 'limiter#0' not in target: raise RuntimeError('Preset requires limiter#0')
         if current!=name:
@@ -332,23 +357,103 @@ class Watcher:
         self.key=key
         self.last=name
         self.observed=name
-        self.status('Applied '+name+' — '+reason,track=t,preset=name,reason=reason)
+        extra=dict(track=track) if track else {}
+        self.status('Applied '+name+' — '+reason,preset=name,reason=reason,**extra)
+
+    def update(self):
+        cfg=read(CONFIG,DEFAULT)
+        if run('systemctl','--user','is-active','astra-profiled.service').returncode == 0:
+            self.status('Paused: astra-profiled owns preset selection'); return
+        current=self.observe_manual()  # Before idle/restore: pause must not swallow a click.
+        tracks=self.tracks(cfg)
+        playing=[t for t in tracks if t['playing']]
+        osu_is_active=cfg.get('osu',True) and self.check_osu_active()
+
+        if len(playing)>1:
+            self.restore()
+            self.status('Paused: multiple players are playing')
+            return
+
+        if len(playing)==1:
+            t=playing[0]
+            key=track_key(t,self.key)
+            if key is None or ((not t['title'] or not t['artists']) and not file_preset(t,cfg)):
+                self.status('Waiting for metadata; song override retained'); return
+            changed=key != self.key
+            if changed:
+                self.key=key; self.held=False
+            if self.held:
+                self.status('Manual preset held until next song',track=t,preset=current); return
+            if cfg['route'] and route()!=cfg['route']:
+                self.restore(); self.status('Paused: different audio output'); return
+            if exchange('get_global_bypass') == '1':
+                self.status('Paused: EasyEffects bypassed'); return
+            if not changed and self.last == current:
+                self.status('Automatic preset active',track=t,preset=current); return
+            name,reason=select(t,cfg)
+            if not name: self.status('Unmapped song; keeping current preset',track=t); return
+            self.apply_target(name,reason,key,current,track=t)
+            return
+
+        if osu_is_active:
+            key=['osu','active']
+            changed=self.key != key
+            if changed:
+                self.key=key; self.held=False
+            if self.held:
+                self.status('Manual preset held for osu!',preset=current); return
+            if cfg['route'] and route()!=cfg['route']:
+                self.restore(); self.status('Paused: different audio output'); return
+            if exchange('get_global_bypass') == '1':
+                self.status('Paused: EasyEffects bypassed'); return
+            target_preset=cfg.get('osu_preset') or 'astra-osu'
+            if not changed and self.last == current:
+                self.status('Applied '+target_preset+' — osu! active audio',preset=current,reason='osu! active audio'); return
+            self.apply_target(target_preset,'osu! active audio',key,current)
+            return
+
+        if not playing and len(tracks)==1:
+            paused_key=track_key(tracks[0],self.key)
+            if paused_key is not None and paused_key != self.key:
+                self.key=paused_key
+                self.held=self.manual_event
+                self.last=None
+        paused_same=(not playing and len(tracks)==1 and track_key(tracks[0],self.key) == self.key)
+        if not paused_same:
+            self.restore()
+            if self.key == ['osu','active']:
+                self.key=None; self.held=False
+        self.status('Manual preset held through pause/interruption' if self.held else
+                    'Waiting for playback')
 
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action',choices=['status','enable','disable','run','set','explain'])
+    p.add_argument('action',choices=['status','enable','disable','run','set','set-osu-preset','explain'])
     p.add_argument('values',nargs='*'); a=p.parse_args()
     cfg=read(CONFIG,DEFAULT)
     if a.action=='status':
         state=read(STATE,{})
         print(json.dumps(dict(**state,enabled=run('systemctl','--user','is-enabled',UNIT).returncode==0,
             running=run('systemctl','--user','is-active',UNIT).returncode==0,config=cfg),ensure_ascii=False)); return
+    if a.action=='set-osu-preset':
+        preset=a.values[0]
+        preset_path(preset)
+        cfg['osu_preset']=preset; write(CONFIG,cfg)
+        if run('systemctl','--user','is-active',UNIT).returncode==0:
+            r=run('systemctl','--user','restart',UNIT)
+            if r.returncode: raise RuntimeError(r.stderr)
+        return
     if a.action=='set':
         key,value=a.values
-        if key not in ('spotify','jukebox','artists','genres'): raise ValueError('Unknown switch')
-        if value not in ('true','false'): raise ValueError('Expected true/false')
-        cfg[key]=value=='true'; write(CONFIG,cfg)
+        if key in ('spotify','jukebox','mpv','osu','artists','genres'):
+            if value not in ('true','false'): raise ValueError('Expected true/false')
+            cfg[key]=value=='true'
+        elif key in ('osu_preset','osu-preset'):
+            preset_path(value)
+            cfg['osu_preset']=value
+        else: raise ValueError('Unknown switch')
+        write(CONFIG,cfg)
         if run('systemctl','--user','is-active',UNIT).returncode==0:
             r=run('systemctl','--user','restart',UNIT)
             if r.returncode: raise RuntimeError(r.stderr)

@@ -112,29 +112,51 @@ The wallpaper library is loaded only after Open saved wallpapers & previews. Bac
 
 Super+I → Memory locks delegates to the optional Linux Memory Toolkit helpers
 `noswap` and `oom-notify`. Install those helpers and their user units first.
-The **Locked** tab shows each live protected PID with RSS, swap, group size and
-lock age, largest RSS first. Sort by RSS, swap, name or PID. Amber highlights
+The page opens on **Suggested**, with search, sorting and process actions visible
+immediately. **All** browses or searches processes by name or PID; **Locked**
+shows each live protected PID. Rows show RAM, swap and group size; hover over the
+PID for the group and lock age. Sort by RAM, swap, name or PID. Amber highlights
 RSS at least 1 GiB or 5% of installed RAM, whichever is larger; this is a review
 cue, not an automatic policy. RSS includes shared pages and should not be summed
 as unique RAM use. The available-RAM summary uses the kernel's MemAvailable.
 
 **Suggested** shows up to six unlocked groups in the chosen sort order, with one
-representative PID per group. Consider frequently used apps; size alone is not
-a reason to lock. **Search PID** filters all your processes by PID or name.
-Readings refresh every ten seconds while enabled and open, with a manual Refresh.
-Failed reads disable the process controls instead of reporting stale data as live.
+representative per name and group. Obvious build jobs are deprioritized and
+remain available under All. Consider frequently used apps; size alone is not a
+reason to lock. Typing in the search field opens All automatically.
+Readings refresh every ten seconds while the page is open, with a manual Refresh.
+Failed reads disable live process actions and Apply all; saved-name drafts remain
+editable and are preserved until a successful refresh.
 
-Lock previews show the entire affected group, its RAM/swap usage and available
-RAM. Shared groups, large groups or low available RAM require an explicit risk
-checkbox and **Lock anyway**. That choice permits the operation; it adds no
-memory veto. PID start time, UID, boot, cgroup identity, membership and the old
+Select several names, switches and process groups before choosing **Apply all**.
+These selections only edit a draft. **Discard** drops unapplied choices. Both
+buttons stay visible while scrolling and when navigating to another settings
+page. **Select N** selects the eligible loaded rows, once per group; the count
+shows how many group actions will be staged, including rows below the fold.
+The draft and worker survive page navigation within the settings window.
+
+The **Review** tab and footer button show selected groups, their members and
+warnings without pushing the process list down. Shared groups,
+large groups or low available RAM require one review checkbox for the batch.
+That choice permits the operation; it adds no memory veto. PID start time,
+UID, boot, cgroup identity, membership and the old
 swap limit are checked again before applying. Changed targets require a fresh
 preview. Release restores the saved limit for the group and leaves its apps
 running. Protection configured outside noswap is labelled without offering to
 release someone else's limit. Administrator-owned groups link the workflow back
 to the terminal, where the helper can authenticate.
 
-The explanation describes swap delays, group scope, existing swap, reclaimable
+Applying runs asynchronously. Navigation and draft edits remain available; new
+edits wait for the next Apply all. The submitted group actions cannot be undone
+while they are executing. Results identify each completed or failed action;
+successful actions leave the draft, and failed actions stay available for retry
+or removal. If another client changed saved settings, the batch rejects that
+stale revision without writes. Discard reloads the latest observed saved settings
+so the user can review a new draft. Closing the settings process ends its draft
+and result view; per-group backend receipts remain on disk.
+
+**Options, help and OOM alerts** contains the explanation, automation, reminders and OOM
+alerts. The explanation describes swap delays, group scope, existing swap, reclaimable
 file pages and the tradeoff when RAM runs out. These are swap bans, not mlock
 or a guarantee against slowdowns. **Automation and reminders** keeps independent
 name-following and age-reminder switches. Master off releases locks and stops
@@ -146,8 +168,28 @@ recent history. Off stops each integration's owned background work and hides
 its optional feature controls. Search settings for “noswap”, “RSS”, “PID”,
 “process search”, “OOM”, or “memory kills” to find these destinations.
 
-The process browser requires `noswap dashboard` schema 2 and `noswap inspect`
-from Linux Memory Toolkit. Verify the UI without changing real locks with
+The **Saved** tab adds or removes process names, including names with no running
+PID. Matching is exact and case-sensitive.
+Shared groups are skipped unless that specific saved name has **Allow shared
+group** enabled. The list shows running/protected counts and waiting names.
+Applying a removed name releases locks owned by that rule; it does not stop the app.
+Applying master off releases all recorded locks and retains the list. A manually released
+group stays released across a master toggle until its name is explicitly saved
+again. Changing shared-group permission off releases that rule's broad lock.
+
+For executable names available on PATH, the helper creates a small launcher only
+when `~/.local/bin/NAME` is unused. It never overwrites an existing user command.
+The launcher checks master/name-following state and enters a private no-swap scope
+before the app starts. Off or removed names run normally; Quickshell IPC clients
+bypass scope creation. Absolute executable paths and application-specific launch
+mechanisms can bypass this hook; the saved-name watcher still checks their groups.
+Existing processes are not restarted or migrated. A shared running process needs
+explicit group permission or its next protected launch. Swap bans do not drain
+existing swap, pin file-backed pages, or guarantee immunity to OOM.
+
+The process browser requires `noswap dashboard` schema 2 with `settings` and
+`config_revision`, `noswap inspect`, and `noswap batch` from Linux Memory Toolkit.
+Verify the UI without changing real locks with
 `xvfb-run -a -s '-screen 0 1400x1000x24' dbus-run-session -- python tests/memory_locks_ui.py`.
 
 Super+I → Audio contains the Eden boost master/reset controls; search “Eden” or

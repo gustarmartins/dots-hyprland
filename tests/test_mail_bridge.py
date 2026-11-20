@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Synthetic fixtures only: never read the operator's mailbox or credentials."""
 import importlib.util
+import io
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('bridge', ROOT / 'dots/.local/lib/qs-mail/bridge.py')
@@ -10,7 +12,107 @@ bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 
 
+class Startup(unittest.TestCase):
+    def run_service(self):
+        with patch.object(bridge.sys, 'argv', ['qs-mail', 'run']), \
+             patch.object(bridge.sys, 'stderr', new_callable=io.StringIO) as stderr:
+            with self.assertRaises(SystemExit) as result:
+                bridge.main()
+            return result.exception.code, stderr.getvalue()
+
+    def test_missing_thunderbird_stops_without_restart(self):
+        with patch.object(bridge, 'settings', return_value={'enabled': True}), \
+             patch.object(bridge.shutil, 'which', return_value=None):
+            code, message = self.run_service()
+        self.assertEqual(code, 75)
+        self.assertIn('Thunderbird is not installed', message)
+
+    def test_missing_profile_stops_without_restart(self):
+        with patch.object(bridge, 'settings', return_value={'enabled': True}), \
+             patch.object(bridge.shutil, 'which', return_value='/usr/bin/thunderbird'), \
+             patch.object(bridge, 'profile', side_effect=RuntimeError('no profile')):
+            code, message = self.run_service()
+        self.assertEqual(code, 75)
+        self.assertIn('create a mail profile', message)
+
+    def test_executable_disappears_before_exec(self):
+        with patch.object(bridge, 'settings', return_value={'enabled': True}), \
+             patch.object(bridge.shutil, 'which', return_value='/usr/bin/thunderbird'), \
+             patch.object(bridge, 'profile', return_value=Path('/tmp/profile')), \
+             patch.object(bridge, 'profile_running', return_value=False), \
+             patch.object(bridge.os, 'execvp', side_effect=FileNotFoundError):
+            code, message = self.run_service()
+        self.assertEqual(code, 75)
+        self.assertIn('Thunderbird is not installed', message)
+
+
 class Extraction(unittest.TestCase):
+    def test_rating_program_identity_actions_without_application_in_subject(self):
+        sender = 'Program <notifications@example.invalid>'
+        for subject in [
+            'Quality Assurance Rating Program - Document Verification Step',
+            'Rater project: Identity verification required',
+        ]:
+            self.assertTrue(bridge.career_update(sender, subject), subject)
+        for subject in [
+            'Bank account document verification step',
+            'Your identity verification is complete',
+            'Newsletter: Rating program document verification guide',
+            'Rating program news and events',
+        ]:
+            self.assertFalse(bridge.career_update(sender, subject), subject)
+
+    def test_application_questionnaires_from_generic_platform_sender(self):
+        sender = 'Application platform <notifications@example.invalid>'
+        for subject in [
+            'Candidatura à vaga de Android Developer Pleno - Example Motors',
+            'Candidatura para a vaga de QA não finalizada',
+        ]:
+            self.assertTrue(bridge.career_update(sender, subject, 'Preencha o formulário para continuarmos.'), subject)
+        for subject, body in [
+            ('Como enviar candidatura à vaga de QA', ''),
+            ('Newsletter de carreira', 'Dicas para escrever: candidatura à vaga de QA.'),
+            ('Vagas da semana', 'Candidatura para a vaga de QA.'),
+        ]:
+            self.assertFalse(bridge.career_update(sender, subject, body), subject)
+
+    def test_portuguese_application_receipts_with_generic_senders(self):
+        for subject in [
+            'Inscrição recebida para a vaga Estágio em Testes de Software',
+            'Inscrição recebida para a vaga ANALISTA SUPORTE JR N1',
+            'Obrigado por se candidatar a vaga de Front-end Android Developer Pleno',
+            'Obrigada por candidatar-se à vaga de QA',
+        ]:
+            self.assertTrue(bridge.career_update('Platform <no-reply@example.invalid>', subject), subject)
+        for subject in [
+            'Inscrição recebida para o webinar de tecnologia',
+            'Saia na frente: 10 novas vagas de Programador para se candidatar',
+            'ALS está contratando: Auxiliar Técnico Jr.',
+        ]:
+            self.assertFalse(bridge.career_update('News <news@example.invalid>', subject), subject)
+
+    def test_career_updates_and_quiet_routine_mail(self):
+        for subject, body in [
+            ('Recebemos sua candidatura — Android', ''),
+            ('Next Steps for Your Job Application: QA', ''),
+            ('Security code for your application to Example', ''),
+            ('Interview invitation', ''),
+            ('Atualização do processo seletivo', ''),
+            ('Your application status', 'We will not be moving forward'),
+            ('Re: Android Developer', 'Can we talk on Monday?'),
+            ('A quick update', 'Thank you for applying. We have selected another candidate.'),
+        ]:
+            self.assertTrue(bridge.career_update('Hiring <team@example.invalid>', subject, body), subject)
+        for subject, body in [
+            ('Seu perfil se encaixa perfeitamente com essas 10 vagas', 'Veja sua candidatura'),
+            ('Melhores vagas da semana', 'Application links'),
+            ('Jobs for you', 'Your application could stand out'),
+            ('Your receipt', 'Your payment was received'),
+            ('Gustavo, confirme seu novo dispositivo', 'Security verification'),
+            ('Sale today', 'New products available'),
+        ]:
+            self.assertFalse(bridge.career_update('News <news@example.invalid>', subject, body), subject)
+
     def scan(self, subject, body, typ='text/plain'):
         return bridge.extract(subject, [{'type':typ, 'text':body}])
 

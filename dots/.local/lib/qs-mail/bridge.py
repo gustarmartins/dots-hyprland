@@ -13,17 +13,19 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import struct
 import subprocess
 import sys
 import time
+import unicodedata
 from urllib.parse import urlsplit
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "qs-mail"
 CONFIG = CONFIG_DIR / "config.json"
 RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "qs-mail"
-DEFAULTS = dict(enabled=False, notifications=True, preview=True, codes=True, links=True, accounts=[])
+DEFAULTS = dict(enabled=False, notifications=True, careerOnly=False, preview=True, codes=True, links=True, accounts=[])
 EXTENSION_ID = "qs-mail@dots-hyprland"
 THUNDERBIRD_CLASSES = ("org.mozilla.Thunderbird", "thunderbird", "Thunderbird")
 
@@ -110,7 +112,7 @@ def settings():
     except (OSError, ValueError):
         value = {}
     result = {**DEFAULTS, **value}
-    for key in ("enabled", "notifications", "preview", "codes", "links"):
+    for key in ("enabled", "notifications", "careerOnly", "preview", "codes", "links"):
         result[key] = result[key] is True
     result["accounts"] = [a for a in result.get("accounts", []) if isinstance(a, str)] if isinstance(result.get("accounts"), list) else []
     return result
@@ -157,6 +159,37 @@ class MailHTML(HTMLParser):
 def clean_text(value):
     value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]", "", str(value))
     return "\n".join(line for line in (re.sub(r"[ \t]+", " ", s).strip() for s in value.splitlines()) if line)
+
+
+def career_update(sender, subject, body=""):
+    """Local PT/EN application correspondence filter, not a sender allowlist.
+
+    Receipts, human-verification requests, interviews, assessments, decisions,
+    offers and recruiter replies qualify. General job-board digests do not.
+    Mail text is data only and is never executed or used to change this policy.
+    """
+    def fold(text):
+        return "".join(c for c in unicodedata.normalize("NFKD", clean_text(text).lower())
+                       if not unicodedata.combining(c))
+    subject, body, sender = fold(subject), fold(body)[:65536], fold(sender)
+    direct = r"\b(your (?:job )?application|application (?:received|status|update|for|to)|security code for your application|thank you for applying|thanks for applying|sua candidatura|sua inscricao|inscricao recebida (?:para a|na) vaga|obrigad[oa] por (?:se )?candidatar(?:-se)?|recebemos (?:seu curriculo|sua candidatura)|processo seletivo|entrevista|interview|assessment|technical (?:test|challenge)|teste tecnico|desafio tecnico|job offer|offer letter|proposta de (?:trabalho|contratacao)|reprovad[oa]|aprovad[oa] no processo)\b"
+    if re.search(direct, subject):
+        return True
+    digest = r"\b(job alerts?|jobs? for you|recommended jobs?|new jobs?|vagas? (?:para voce|recomendadas|da semana)|melhores vagas|seu perfil se encaixa|newsletter|match score|dicas de carreira)\b"
+    if re.search(digest, subject):
+        return False
+    if re.match(r"^candidatura (?:a|para a) vaga\b", subject):
+        return True
+    if re.search(r"\b(?:rating|rater) (?:program|project)\b.*\b(?:document|identity) verification\b", subject):
+        return True
+    if re.search(direct, body):
+        return True
+    # Personal recruiter threads often keep only the role in their subject.
+    if re.match(r"^(?:re|res|fw|fwd|enc)\s*:", subject) and re.search(
+            r"\b(android|kotlin|qa|developer|engineer|desenvolvedor|analista de testes|recruit|recrut|candidatura|vaga)\b", subject):
+        return True
+    recruiter = re.search(r"recruit|recrut|talent|careers?|hiring|sele[cç]ao", sender)
+    return bool(recruiter and re.search(r"\b(next steps?|proxim[oa]s? passos?|application|candidatura|interview|entrevista|opportunity|oportunidade)\b", subject))
 
 
 def extract(subject, bodies):
@@ -472,6 +505,9 @@ def native_host():
             key = str(data.get("key", ""))[:1024]
             if key in messages and not data.get("preview"): return
             body, code, links = extract(clean_text(data.get("subject", "")), data.get("bodies", []))
+            if cfg["careerOnly"] and not data.get("preview") and not career_update(
+                    data.get("sender", ""), data.get("subject", ""), body):
+                return
             # Never expose stale OTPs, including in explicit old-message previews.
             if not 0 <= time.time() * 1000 - float(data.get("date", 0)) < 15 * 60000: code = ""
             ref = os.urandom(12).hex()
@@ -560,6 +596,16 @@ def systemctl(*args, check=True):
     return subprocess.run(["systemctl", "--user", *args], check=check, capture_output=True, text=True)
 
 
+def startup_issue():
+    if not shutil.which("thunderbird"):
+        return "Thunderbird is not installed or is not on PATH. Install it, then select Start checking."
+    try:
+        profile()
+    except (OSError, ValueError, RuntimeError, configparser.Error):
+        return "Open Thunderbird once to create a mail profile, then select Start checking."
+    return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description="Quickshell Mail controls")
     parser.add_argument("command", choices=["status", "set", "account", "run", "native", "open", "accounts", "preview", "message", "hide", "toggle"])
@@ -569,17 +615,26 @@ def main():
     if arg.command == "run":
         if not settings()["enabled"]:
             sys.exit(75)
+        issue = startup_issue()
+        if issue:
+            print(issue, file=sys.stderr)
+            sys.exit(75)
         prof = profile()
         # Thunderbird's profile lock rejects a second owner. Never kill/adopt a
         # manually started client: only the systemd cgroup is stopped on disable.
         if profile_running(prof):
             sys.exit(75)
-        os.execvp("thunderbird", ["thunderbird", "-profile", str(prof)])
+        try:
+            os.execvp("thunderbird", ["thunderbird", "-profile", str(prof)])
+        except FileNotFoundError:
+            print("Thunderbird is not installed or is not on PATH. Install it, then select Start checking.", file=sys.stderr)
+            sys.exit(75)
     if arg.command == "status":
         try: state = json.loads((RUNTIME / "state.json").read_text())
         except (OSError, ValueError): state = {}
         try: state["connected"] = bool(send_command(dict(type="ping")).get("ok"))
         except (OSError, ValueError): state["connected"] = False
+        state["issue"] = startup_issue() if settings()["enabled"] and not state["connected"] else ""
         print(json.dumps(dict(config=settings(), state=state, accounts=state.get("accounts") or account_inventory(),
                              running=systemctl("is-active", "qs-mail.service", check=False).returncode == 0)))
         return
@@ -591,7 +646,7 @@ def main():
             cfg = settings(); key, enabled = arg.args[0], arg.args[1] == "true"
             if arg.command == "account":
                 cfg["accounts"] = sorted(set(cfg["accounts"] + [key])) if enabled else [a for a in cfg["accounts"] if a != key]
-            elif key in ("enabled", "notifications", "preview", "codes", "links"): cfg[key] = enabled
+            elif key in ("enabled", "notifications", "careerOnly", "preview", "codes", "links"): cfg[key] = enabled
             else: parser.error("unknown setting")
             atomic_json(CONFIG, cfg)
         if arg.command == "set" and key == "enabled":

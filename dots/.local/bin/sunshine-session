@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Start Sunshine on demand; close it after the last stream disconnects."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import select
+import selectors
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+UNIT = 'app-dev.lizardbyte.app.Sunshine.service'
+RUNTIME = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
+CHILD_RECORD = RUNTIME / 'sunshine-session-child.json'
+DISPLAY_HELPER = Path.home() / '.local/bin/sunshine-display'
+
+
+class StreamEvents:
+    """Consume native Sunshine log events without polling its API or devices."""
+    def __init__(self):
+        self.connected = 0
+        self.pending_ends = 0
+        self.seen_stream = False
+
+    def feed(self, line):
+        match = re.fullmatch(r'\[[^\]\r\n]+\]: (Info|Debug|Error): (.*)', line.strip())
+        if not match:
+            return None
+        level, message = match.groups()
+        if level == 'Info' and message.startswith('Sunshine version:'):
+            self.__init__()  # A tray restart execs Sunshine within the same PID.
+        elif level == 'Info' and message == 'CLIENT CONNECTED':
+            self.connected += 1
+            self.seen_stream = True
+        elif level == 'Info' and (message == 'CLIENT DISCONNECTED' or message.endswith(': Ping Timeout')):
+            self.connected = max(0, self.connected - 1)
+            self.pending_ends += 1
+            if self.connected == 0:
+                return 'last client disconnected'
+        elif level == 'Error' and message == 'Initial Ping Timeout' and self.connected == 0:
+            return 'stream connection timed out'
+        elif level == 'Debug' and message == 'Session ended':
+            if self.pending_ends:
+                self.pending_ends -= 1
+            elif self.seen_stream:
+                self.connected = max(0, self.connected - 1)
+                if self.connected == 0:
+                    return 'last stream ended'
+        return None
+
+
+def identity(pid):
+    proc = Path('/proc') / str(pid)
+    # The command name in /proc/stat may contain spaces and parentheses.
+    start = proc.joinpath('stat').read_text().rsplit(')', 1)[1].split()[19]
+    return {'pid': pid, 'start': start, 'executable': str(proc.joinpath('exe').resolve(strict=True))}
+
+
+def save_child(record, value):
+    with tempfile.NamedTemporaryFile(mode='w', dir=record.parent, delete=False) as stream:
+        tmp = Path(stream.name)
+        json.dump(value, stream)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, record)
+
+
+def cleanup_child(record=CHILD_RECORD):
+    """Only stop the recorded Sunshine child; leave detached applications alone."""
+    if not record.exists():
+        return
+    saved = json.loads(record.read_text())
+    fd = None
+    try:
+        fd = os.pidfd_open(saved['pid'])
+        if identity(saved['pid']) != saved:
+            record.unlink(missing_ok=True)
+            return  # PID was reused; it is no longer our process.
+        signal.pidfd_send_signal(fd, signal.SIGTERM)
+        waiter = select.poll()
+        waiter.register(fd, select.POLLIN)
+        if not waiter.poll(10000):
+            signal.pidfd_send_signal(fd, signal.SIGKILL)
+            if not waiter.poll(2000):
+                raise RuntimeError('Sunshine child did not exit; recovery record retained')
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
+    record.unlink(missing_ok=True)
+
+
+def supervise(command, record=CHILD_RECORD, output=None):
+    if output is None:
+        output = sys.stdout.buffer
+    cleanup_child(record)
+    child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             bufsize=0)
+    try:
+        saved = identity(child.pid)
+    except FileNotFoundError:
+        child.stdout.close()
+        result = child.wait()
+        return result if result >= 0 else 1
+    save_child(record, saved)
+    pidfd = os.pidfd_open(child.pid)
+    signal_read, signal_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+    old_wakeup = signal.set_wakeup_fd(signal_write)
+    old_handlers = {}
+    events = StreamEvents()
+    stopping = False
+    deadline = None
+    pending = b''
+
+    def stop(reason):
+        nonlocal stopping, deadline
+        if stopping:
+            return
+        stopping = True
+        deadline = time.monotonic() + 10
+        print(f'Sunshine on demand: {reason}; shutting down.', file=sys.stderr, flush=True)
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        old_handlers[sig] = signal.signal(sig, lambda *_: stop('stop requested'))
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(pidfd, selectors.EVENT_READ, 'exit')
+            selector.register(signal_read, selectors.EVENT_READ, 'signal')
+            selector.register(child.stdout, selectors.EVENT_READ, 'output')
+            finished = False
+            while not finished:
+                timeout = None if deadline is None else max(0, deadline - time.monotonic())
+                ready = selector.select(timeout)
+                if not ready and deadline is not None:
+                    try:
+                        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    deadline = None
+                for key, _ in ready:
+                    if key.data == 'exit':
+                        finished = True
+                        break
+                    if key.data == 'signal':
+                        try:
+                            os.read(signal_read, 4096)
+                        except BlockingIOError:
+                            pass
+                        continue
+                    chunk = os.read(child.stdout.fileno(), 65536)
+                    if not chunk:
+                        selector.unregister(child.stdout)
+                        continue
+                    output.write(chunk)
+                    output.flush()
+                    pending += chunk
+                    while b'\n' in pending:
+                        line, pending = pending.split(b'\n', 1)
+                        reason = events.feed(line.decode('utf-8', 'replace'))
+                        if reason:
+                            stop(reason)
+                    if len(pending) > 1024 * 1024:
+                        pending = b''  # Bound malformed/oversized log lines.
+        result = child.wait()
+        return 0 if stopping else (result if result >= 0 else 1)
+    finally:
+        # Waiting on pidfd, rather than stdout EOF, also handles detached apps
+        # retaining their inherited output pipe after Sunshine itself exits.
+        if child.poll() is None:
+            stop('supervisor exiting')
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=2)
+        for sig, handler in old_handlers.items():
+            signal.signal(sig, handler)
+        signal.set_wakeup_fd(old_wakeup)
+        os.close(signal_read)
+        os.close(signal_write)
+        os.close(pidfd)
+        child.stdout.close()
+        if record.exists() and json.loads(record.read_text()) == saved:
+            record.unlink()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', nargs='?', default='start',
+                        choices=['start', 'stop', 'status', 'run', 'cleanup'])
+    action = parser.parse_args().action
+    if action == 'run':
+        # INFO is sufficient for disconnect/timeout events, and avoids per-input
+        # debug logging. This command-line override leaves the saved config intact.
+        return supervise(['/usr/bin/sunshine', 'min_log_level=2'])
+    if action == 'cleanup':
+        cleanup_child()
+        return 0
+    if action == 'start':
+        subprocess.run(['systemctl', '--user', 'start', UNIT], check=True)
+        print('Sunshine started on demand. Connect from Moonlight; it stops after disconnect.')
+    elif action == 'stop':
+        subprocess.run(['systemctl', '--user', 'stop', UNIT], check=True)
+        cleanup_child()
+        subprocess.run([str(DISPLAY_HELPER), 'restore'], check=True)
+        print('Sunshine stopped; display restoration completed.')
+    else:
+        subprocess.run(['systemctl', '--user', 'show', UNIT, '-p', 'ActiveState',
+                        '-p', 'UnitFileState', '-p', 'MainPID'], check=True)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(f'Sunshine: {error}', file=sys.stderr)
+        raise SystemExit(1)

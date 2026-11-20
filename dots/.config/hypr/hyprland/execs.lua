@@ -14,10 +14,7 @@ hl.on("hyprland.start", function ()
     -- Audio
     hl.exec_cmd("$HOME/.local/bin/easyeffects-qs start")
 
-    -- Clipboard: history
-    --hl.exec_cmd("wl-paste --watch cliphist store")
-    hl.exec_cmd("wl-paste --type text --watch bash -c '$HOME/.local/bin/cliphist store && qs -c $qsConfig ipc call cliphistService update'")
-    hl.exec_cmd("wl-paste --type image --watch bash -c '$HOME/.local/bin/cliphist store && qs -c $qsConfig ipc call cliphistService update'")
+    -- Quickshell owns clipboard capture and restores it after compositor crashes.
 
     -- Cursor
     hl.exec_cmd("hyprctl setcursor Bibata-Modern-Classic 24")

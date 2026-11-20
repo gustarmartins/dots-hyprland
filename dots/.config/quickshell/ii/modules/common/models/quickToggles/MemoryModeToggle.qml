@@ -31,7 +31,7 @@ QuickToggleModel {
 
     Process {
         id: fetchActiveState
-        running: true
+        running: false
         command: ["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-mode.sh get_state"]
         stdout: StdioCollector {
             onStreamFinished: {
@@ -52,8 +52,9 @@ QuickToggleModel {
     // Steady-state poll keeps the widget honest if state changes out-of-band.
     Timer {
         interval: 3000
-        running: true
+        running: root.pollingEnabled
         repeat: true
+        triggeredOnStart: true
         onTriggered: fetchActiveState.running = true
     }
 

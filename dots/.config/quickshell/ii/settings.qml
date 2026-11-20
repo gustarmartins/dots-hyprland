@@ -151,11 +151,30 @@ ApplicationWindow {
                     BusyIndicator { running: !Config.ready }
                 }
                 RowLayout {
+                    visible: MemoryLockDraft.initialized && (root.currentPage === "memory" || MemoryLockDraft.dirty || MemoryLockDraft.applying)
                     Layout.fillWidth: true
+                    spacing: 10
+                    BusyIndicator { running: MemoryLockDraft.applying || MemoryLockDraft.checking; visible: running; implicitWidth: 24; implicitHeight: 24 }
+                    StyledText { Layout.fillWidth: true; Layout.minimumWidth: 30; text: MemoryLockDraft.applying ? "Applying… New edits stay in the next draft." : MemoryLockDraft.checking ? "Checking selected groups…" : MemoryLockDraft.needsReview && !MemoryLockDraft.acknowledged ? "Review group warnings to apply" : MemoryLockDraft.dirty ? "Changes not applied" : "No pending changes"; wrapMode: Text.WordWrap; font.pixelSize: 12 }
+                    MemoryActionButton {
+                        objectName: "memoryReview"
+                        visible: MemoryLockDraft.operations.length > 0 || MemoryLockDraft.needsReview
+                        text: "Review (" + MemoryLockDraft.operations.length + ")"
+                        onClicked: {
+                            if (root.currentPage !== "memory" || root.searching) root.navigate("memory");
+                            Qt.callLater(() => catalogPage.showMemoryReview());
+                        }
+                    }
+                    MemoryActionButton { objectName: "memoryDiscard"; text: "Discard"; enabled: !MemoryLockDraft.applying && MemoryLockDraft.dirty; onClicked: MemoryLockDraft.discard() }
+                    MemoryActionButton { objectName: "memoryApplyAll"; text: MemoryLockDraft.applying ? "Applying…" : "Apply all"; prominent: true; enabled: MemoryLockDraft.canApply; onClicked: MemoryLockDraft.applyAll() }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: root.currentPage !== "memory" || root.searching || !!Config.writeError || Config.writesPaused
                     spacing: 10
                     StyledText {
                         Layout.fillWidth: true
-                        text: Config.writeError ? Config.writeError : Config.writesPaused ? "Applying desktop fonts…" : root.currentPage === "design" && !root.searching ? designPage.effectsDirty ? "Unapplied GPU / animation edits" : designPage.effectsStatus + " · Color and shell controls save immediately." : root.feedback
+                        text: root.currentPage === "memory" ? "Memory-lock edits apply together with Apply all. Browsing never changes locks." : Config.writeError ? Config.writeError : Config.writesPaused ? "Applying desktop fonts…" : root.currentPage === "design" && !root.searching ? designPage.effectsDirty ? "Unapplied GPU / animation edits" : designPage.effectsStatus + " · Color and shell controls save immediately." : root.feedback
                         wrapMode: Text.WordWrap
                         font.pixelSize: 11
                         color: Appearance.m3colors.m3onSurfaceVariant

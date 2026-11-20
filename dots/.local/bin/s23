@@ -228,11 +228,11 @@ case "$MODE" in
             cmd display set-brightness $FLOAT 2>/dev/null || true
             settings put system screen_brightness $INT 2>/dev/null || true
             settings put system screen_brightness_mode 0 2>/dev/null || true
-            settings put system refresh_rate_mode 0 2>/dev/null || true
+            settings put secure refresh_rate_mode 2 2>/dev/null || true
             settings put system screen_extra_brightness 1 2>/dev/null || true
             input keyevent KEYCODE_WAKEUP 2>/dev/null || true
         "
-        echo "[✓] Display brightness set to $VAL ($INT/255, float: $FLOAT) with 60Hz fixed!"
+        echo "[✓] Display brightness set to $VAL ($INT/255, float: $FLOAT) with 120Hz fixed!"
         ;;
 
     otg)

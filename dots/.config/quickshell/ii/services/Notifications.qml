@@ -25,6 +25,7 @@ Singleton {
             "text": action.text,
         })) ?? []
         property var mailData: MailActions.parse(notification?.hints["x-qs-mail"])
+        property string codexRoute: root.codexRoute(notification?.hints["x-mekki-codex"])
         property bool popup: false
         property bool isTransient: notification?.hints.transient ?? false
         property string appIcon: notification?.appIcon ?? ""
@@ -60,6 +61,7 @@ Singleton {
             "summary": notif.summary,
             "time": notif.time,
             "urgency": notif.urgency,
+            "codexRoute": notif.codexRoute,
         }
     }
     function notifToString(notif) {
@@ -312,12 +314,25 @@ Singleton {
     }
 
     function visibleActions(notif) {
+        if (notif?.codexRoute) return root.codexSettings.enabled ? [{identifier:"default",text:Translation.tr("Open session")}] : [];
         if (notif?.mailData) return MailActions.actions(notif.mailData, Mail.config, Date.now() - notif.time);
-        return notif?.actions ?? [];
+        // The default action may have an empty label (for example, kitty).
+        // Keep it actionable without rendering an empty button.
+        return (notif?.actions ?? []).map(action => Object.assign({}, action, {
+            text: String(action.text ?? "").trim() || Translation.tr(action.identifier === "default" ? "Open" : "Action"),
+        }));
     }
 
     function attemptInvokeAction(id, notifIdentifier) {
         const notif = root.list.find(notif => notif.notificationId === id);
+        if (notif?.codexRoute) {
+            if (root.codexSettings.enabled && notifIdentifier === "default") {
+                root.sessionOpening(id);
+                const task = codexOpenComponent.createObject(root, {notificationId:id, route:notif.codexRoute});
+                Qt.callLater(() => task.running = true);
+            }
+            return;
+        }
         if (notif?.mailData) {
             if (!visibleActions(notif).some(a => a.identifier === notifIdentifier)) return;
             if (notifIdentifier === "qs-mail-code") Quickshell.clipboardText = notif.mailData.code;
@@ -398,6 +413,7 @@ Singleton {
                         summary: notif.summary ?? "",
                         time: notif.time,
                         urgency: notif.urgency,
+                        codexRoute: root.codexRoute(notif.codexRoute),
                     });
                 });
                 root.idOffset = root.list.reduce((maxId, notif) => Math.max(maxId, notif.notificationId), 0);
@@ -418,6 +434,39 @@ Singleton {
                 console.warn("[Notifications] Could not read history:", error);
                 root.historyWritable = false;
                 root.finishLoading();
+            }
+        }
+    }
+
+    function codexRoute(value) { return typeof value === "string" && /^[a-f0-9]{32}$/.test(value) ? value : ""; }
+    property var codexSettings: ({enabled:false})
+    signal sessionOpened(id: int)
+    signal sessionOpening(id: int)
+    FileView {
+        path: (Quickshell.env("XDG_CONFIG_HOME") || Quickshell.env("HOME") + "/.config") + "/codex-notify/config.json"
+        watchChanges: true
+        onFileChanged: reload()
+        onLoaded: { try { root.codexSettings = JSON.parse(text()); } catch (_) { root.codexSettings = {enabled:false}; } }
+        onLoadFailed: root.codexSettings = {enabled:false}
+    }
+    Component {
+        id: codexOpenComponent
+        Process {
+            id: task
+            required property int notificationId
+            required property string route
+            command: [Quickshell.env("HOME") + "/.local/bin/codex-notify", "open", route]
+            stdout: StdioCollector { id: result }
+            onExited: (code, status) => {
+                if (code === 0) {
+                    root.sessionOpened(task.notificationId);
+                    root.discardNotification(task.notificationId);
+                } else {
+                    let message = Translation.tr("The session could not be opened.");
+                    try { message = JSON.parse(result.text).error || message; } catch (_) {}
+                    Quickshell.execDetached(["notify-send", "--app-name=Codex", "--icon=dialog-warning", Translation.tr("Could not open session"), message]);
+                }
+                task.destroy();
             }
         }
     }

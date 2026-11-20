@@ -3,6 +3,7 @@ import qs.modules.common
 import qs.modules.common.widgets
 import qs.services
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell.Widgets
@@ -157,7 +158,7 @@ Slider {
                         function onHighlightColorChanged() { wavyFill.requestPaint(); }
                     }
                     FrameAnimation {
-                        running: root.animateWave
+                        running: root.animateWave && root.visible && (root.Window.window?.visible ?? false)
                         onTriggered: {
                             wavyFill.requestPaint()
                         }

@@ -2,6 +2,8 @@
 -- AOC 27G2: 8 bpc, RGB stripes, DP 1080p144, FreeSync 48-144 Hz.
 -- ARZOPA: HDMI 1080p144 at 332.77 MHz; 10-bpc RGB would exceed its
 -- advertised 360 MHz TMDS limit. Its advertised VRR is unusable in this lab.
+local ok, policies = pcall(dofile, os.getenv("HOME") .. "/.config/hypr/vrr-policies.lua")
+policies = ok and policies or {monitors={}}
 local function profile(output, position, vrr)
     return {
         output = output,
@@ -11,14 +13,18 @@ local function profile(output, position, vrr)
         transform = 0,
         bitdepth = 8,
         cm = "srgb",
-        vrr = vrr,
+        vrr = policies.monitors[output] and policies.monitors[output].policy or vrr,
     }
 end
 
 local monitors = {
-    aoc = profile("desc:AOC 27G2G4 0x00000A71", "0x0", 1),
+    -- Follow the global VRR policy so the shell's Off/fullscreen choice works.
+    aoc = profile("desc:AOC 27G2G4 0x00000A71", "0x0", -1),
     arzopa = profile("HDMI-A-1", "1920x500", 0),
 }
+-- Prevent Hyprland auto-HDR/WCG from engaging on this 8-bit HDMI link.
+monitors.arzopa.supports_hdr = -1
+monitors.arzopa.supports_wide_color = -1
 -- Recovery uses the same values, changing only the selector.
 monitors.aoc_recovery = {}
 for key, value in pairs(monitors.aoc) do
@@ -27,4 +33,12 @@ end
 monitors.aoc_recovery.output = "DP-1"
 hl.monitor(monitors.aoc)
 hl.monitor(monitors.arzopa)
+for output, entry in pairs(policies.monitors) do
+    if output ~= monitors.aoc.output and output ~= monitors.arzopa.output and entry.profile then
+        local saved = {}
+        for k,v in pairs(entry.profile) do saved[k]=v end
+        saved.vrr = entry.policy
+        hl.monitor(saved)
+    end
+end
 return monitors

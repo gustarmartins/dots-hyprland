@@ -2,6 +2,7 @@ import QtQuick
 import "../TileGrid.js" as TileGrid
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import qs.services
 import qs.modules.common
 import qs.modules.common.models.quickToggles
@@ -23,6 +24,13 @@ GroupButton {
     signal tileResized(int index, int width, int height)
     signal tileMoved(int index, real x, real y)
     property QuickToggleModel toggleModel
+    Binding {
+        target: root.toggleModel
+        property: "pollingEnabled"
+        when: root.toggleModel !== null
+        value: root.visible && (root.Window.window?.visible ?? false)
+        restoreMode: Binding.RestoreBindingOrValue
+    }
     property string name: toggleModel?.name ?? ""
     readonly property string compactName: ({notifications: "Inbox", idleInhibitor: "Keep awake", onScreenKeyboard: "Keyboard", colorPicker: "Pick color", screenSnip: "Capture", antiFlashbang: "Anti-flash", tripleBuffer: "Buffer", darkMode: "Theme", directScanout: "Scanout", powerProfile: "Power", musicRecognition: "Identify", memoryCompact: "Compact", zramRecompress: "Recompress", zramWriteback: "Writeback", dropCaches: "Caches"})[buttonData.type] ?? name
     property string statusText: toggleModel?.hasStatusText ? (toggleModel?.statusText || (toggled ? Translation.tr("Active") : Translation.tr("Inactive"))) : ""

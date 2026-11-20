@@ -1,0 +1,10 @@
+[Unit]
+Description=Temporary gain for the selected playback app
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/music-loudness serve
+ExecStopPost=%h/.local/bin/music-loudness cleanup-failed
+KillMode=mixed
+TimeoutStopSec=10
+Restart=no

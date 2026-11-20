@@ -14,6 +14,8 @@ Rectangle {
     signal edited(string path)
     property string error: ""
     readonly property var value: read(setting.path)
+    readonly property string valueSuffix: setting.unit ? (Catalog.timeUnits[setting.unit] || setting.unit) : (setting.suffix || "")
+    readonly property string accessibleTitle: setting.title + (valueSuffix ? ", " + valueSuffix : "")
     readonly property bool available: (setting.when || []).every(pair => read(pair[0]) === pair[1])
     readonly property bool compactEditor: ["toggle", "number", "choice", "monitor"].includes(setting.kind)
     objectName: "setting:" + setting.path
@@ -80,7 +82,7 @@ Rectangle {
             Loader {
                 id: editor
                 Layout.fillWidth: !root.compactEditor || layout.width < 630
-                Layout.preferredWidth: root.compactEditor ? Math.min(250, layout.width) : layout.width
+                Layout.preferredWidth: root.compactEditor ? Math.min(root.valueSuffix ? 300 : 250, layout.width) : layout.width
                 enabled: root.available && root.writable && Config.ready
                 opacity: enabled ? 1 : 0.45
                 sourceComponent: root.setting.kind === "toggle" ? toggleEditor
@@ -126,24 +128,30 @@ Rectangle {
                 root.commit(Math.max(root.setting.min, Math.min(root.setting.max,
                     Number(root.value) * factor + delta)) / factor);
             }
-            SettingsButton { text: "−"; implicitWidth: 38; Accessible.name: "Decrease " + root.setting.title; onClicked: parent.increment(-root.setting.step) }
+            SettingsButton { text: "−"; implicitWidth: 38; Accessible.name: "Decrease " + root.accessibleTitle; onClicked: parent.increment(-root.setting.step) }
             SettingsField {
                 objectName: "number:" + root.setting.path
                 Layout.fillWidth: true
                 horizontalAlignment: TextInput.AlignHCenter
                 text: String(Math.round(Number(root.value) * parent.factor * 1000) / 1000)
                 selectByMouse: true
-                Accessible.name: root.setting.title
+                Accessible.name: root.accessibleTitle
                 validator: DoubleValidator { bottom: root.setting.min; top: root.setting.max; decimals: 3; locale: "C" }
-                onEditingFinished: {
+                function commitText() {
+                    if (!Config.ready || !root.writable || !root.available) return;
                     const n = Number(text);
                     if (!text.trim() || !Number.isFinite(n) || n < root.setting.min || n > root.setting.max)
-                        root.error = "Enter a value from " + root.setting.min + " to " + root.setting.max + ".";
+                        root.error = "Enter a value from " + root.setting.min + " to " + root.setting.max + (root.valueSuffix ? " " + root.valueSuffix : "") + ".";
                     else root.commit(n / parent.factor);
                 }
+                onEditingFinished: commitText()
+                // Qt does not emit editingFinished for validator-rejected text.
+                // Report that invalid value on blur instead of silently leaving
+                // the field different from the saved setting.
+                onActiveFocusChanged: if (!activeFocus) commitText()
             }
-            StyledText { visible: !!root.setting.suffix; text: root.setting.suffix || ""; font.pixelSize: 12 }
-            SettingsButton { text: "+"; implicitWidth: 38; Accessible.name: "Increase " + root.setting.title; onClicked: parent.increment(root.setting.step) }
+            StyledText { objectName: "unit:" + root.setting.path; visible: root.valueSuffix.length > 0; text: root.valueSuffix; font.pixelSize: 12 }
+            SettingsButton { text: "+"; implicitWidth: 38; Accessible.name: "Increase " + root.accessibleTitle; onClicked: parent.increment(root.setting.step) }
         }
     }
     Component {

@@ -1,11 +1,13 @@
 groups=(illogical-impulse)
 pkgname=illogical-impulse-python
 pkgver=1.1
-pkgrel=5
+pkgrel=6
 pkgdesc='Illogical Impulse Python Dependencies'
 arch=(any)
 license=(None)
 depends=(
+  # Session-bus recovery must work before the optional shell venv is activated.
+  python-dbus-fast
   clang
   uv
   gtk4

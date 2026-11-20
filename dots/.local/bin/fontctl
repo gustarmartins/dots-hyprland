@@ -2,7 +2,7 @@
 # kate: mode syntax Bash;
 # fontctl — Unified font and rendering configuration for Linux desktops
 # Updates fontconfig, GTK2/3/4, KDE/Qt, GSettings, illogical-impulse,
-# Kitty, and Firefox in a single command.
+# Kitty, Firefox and Chromium-family profiles in a single command.
 #
 # Usage:
 #   fontctl set [OPTIONS]        Set font and/or rendering across all targets
@@ -11,7 +11,7 @@
 #   fontctl fix-rendering        Apply rendering fixes without changing fonts
 #   fontctl help                 Show usage information
 #
-# Dependencies: jq, xmlstarlet, gsettings, sed
+# Dependencies: jq, xmlstarlet, gsettings, sed, python3, flock
 
 set -euo pipefail
 
@@ -29,12 +29,12 @@ II_CONFIG="$HOME/.config/illogical-impulse/config.json"
 KITTY_CONF="$HOME/.config/kitty/kitty.conf"
 BACKUP_DIR="$HOME/.config/fontctl/backups"
 QS_CONFIG_NAME="${FONTCTL_QS_CONFIG:-ii}"
+BROWSER_HELPER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fontctl-browser"
 
 # ── Colors ─────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
@@ -51,7 +51,7 @@ die() { log_err "$@"; exit 1; }
 
 check_deps() {
     local missing=()
-    for cmd in jq xmlstarlet gsettings sed fc-match; do
+    for cmd in jq xmlstarlet gsettings sed fc-match python3 flock; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if (( ${#missing[@]} )); then
@@ -60,36 +60,16 @@ check_deps() {
 }
 
 # ── Firefox Profile Detection ──────────────────────────────────────────────────
-find_firefox_userjs() {
-    local ff_dir="$HOME/.mozilla/firefox"
-    [[ -d "$ff_dir" ]] || return 1
-    
-    # Find the default profile from profiles.ini
-    local profile_rel
-    profile_rel=$(awk -F= '
-        /^\[Profile/   { path=""; def=0 }
-        /^Path=/       { path=$2 }
-        /^Default=1/   { def=1 }
-        def && path    { print path; exit }
-    ' "$ff_dir/profiles.ini" 2>/dev/null)
-    
-    if [[ -n "$profile_rel" ]]; then
-        echo "$ff_dir/$profile_rel/user.js"
-        return 0
-    fi
-    
-    # Fallback: find first profile directory with user.js
-    local found
-    found=$(find "$ff_dir" -maxdepth 2 -name "user.js" -print -quit 2>/dev/null)
-    [[ -n "$found" ]] && echo "$found" || return 1
-}
+# Browser profile discovery, atomic writes and private backups are owned by
+# the companion helper. It supports legacy, XDG and sandboxed profile roots.
 
 # ── Backup System ──────────────────────────────────────────────────────────────
 create_backup() {
     local ts
-    ts=$(date +%Y%m%d_%H%M%S)
+    ts=$(date +%Y%m%d_%H%M%S_%N)
     local bak_dir="$BACKUP_DIR/$ts"
     mkdir -p "$bak_dir"
+    chmod 700 "$bak_dir"
     
     local files=(
         "$FONTCONFIG_USER"
@@ -102,13 +82,11 @@ create_backup() {
         "$II_CONFIG"
         "$KITTY_CONF"
     )
-    local ff_userjs
-    ff_userjs=$(find_firefox_userjs 2>/dev/null) && files+=("$ff_userjs")
     
     local count=0
     for f in "${files[@]}"; do
         if [[ -f "$f" ]]; then
-            local rel="${f#$HOME/}"
+            local rel="${f#"$HOME"/}"
             mkdir -p "$bak_dir/$(dirname "$rel")"
             cp "$f" "$bak_dir/$rel"
             count=$((count+1))
@@ -135,6 +113,9 @@ create_backup() {
 # 1. Fontconfig (user)
 update_fontconfig() {
     local ui_font="$1" hintstyle="$2" subpixel="$3" lcdfilter="$4"
+    local hinting=true
+    [[ "$hintstyle" == hintnone ]] && hinting=false
+    mkdir -p "$(dirname "$FONTCONFIG_USER")"
     
     cat > "$FONTCONFIG_USER" << XMLEOF
 <?xml version='1.0'?>
@@ -143,7 +124,7 @@ update_fontconfig() {
  <!-- Managed by fontctl. Do not edit manually. -->
  <match target="font">
   <edit mode="assign" name="antialias"><bool>true</bool></edit>
-  <edit mode="assign" name="hinting"><bool>true</bool></edit>
+  <edit mode="assign" name="hinting"><bool>${hinting}</bool></edit>
   <edit mode="assign" name="hintstyle"><const>${hintstyle}</const></edit>
   <edit mode="assign" name="rgba"><const>${subpixel}</const></edit>
   <edit mode="assign" name="lcdfilter"><const>${lcdfilter}</const></edit>
@@ -270,58 +251,66 @@ XML
     rm -rf "$tmpdir"
 }
 
-# 3. GTK3 settings.ini
-update_gtk3() {
-    local ui_font="$1" ui_size="$2" hintstyle="$3" subpixel="$4" dpi="$5"
-    local file="$GTK3_SETTINGS"
-    [[ -f "$file" ]] || return 0
-    
-    sed -i \
-        -e "s/^gtk-font-name=.*/gtk-font-name=${ui_font},  ${ui_size}/" \
-        -e "s/^gtk-xft-hintstyle=.*/gtk-xft-hintstyle=${hintstyle}/" \
-        -e "s/^gtk-xft-antialias=.*/gtk-xft-antialias=1/" \
-        -e "s/^gtk-xft-hinting=.*/gtk-xft-hinting=1/" \
-        -e "s/^gtk-xft-rgba=.*/gtk-xft-rgba=${subpixel}/" \
-        "$file"
-    
-    if [[ -n "$dpi" ]]; then
-        sed -i "s/^gtk-xft-dpi=.*/gtk-xft-dpi=${dpi}/" "$file"
-    fi
-    
-    log_ok "GTK3: ${ui_font} ${ui_size}pt, ${hintstyle}"
+# Add missing keys as well as replacing existing ones. Keep unrelated settings
+# and comments; sed-only replacement used to silently miss absent properties.
+set_config_keys() {
+    python3 - "$@" <<'PYINI'
+from pathlib import Path
+import os, sys, tempfile
+path, section, *pairs = sys.argv[1:]
+path = Path(path).resolve()
+values = dict(zip(pairs[::2], pairs[1::2]))
+lines = path.read_text().splitlines() if path.exists() else []
+out, current, seen_section = [], '', not section
+for line in lines:
+    if line.strip().startswith('[') and line.strip().endswith(']'):
+        if current == section:
+            out.extend(f'{key}={value}' for key, value in values.items())
+            values.clear()
+        current = line.strip()[1:-1]
+        seen_section |= current == section
+    key = line.split('=', 1)[0].strip() if '=' in line else None
+    if current == section and key in values:
+        out.append(f'{key}={values.pop(key)}')
+    else:
+        out.append(line)
+if values:
+    if section and (current != section or not seen_section):
+        out.append('[' + section + ']')
+    out.extend(f'{key}={value}' for key, value in values.items())
+path.parent.mkdir(parents=True, exist_ok=True)
+text = '\n'.join(out) + '\n'
+if not path.exists() or path.read_text() != text:
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix='.fontctl-')
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(text)
+    if path.exists(): os.chmod(name, path.stat().st_mode & 0o777)
+    os.replace(name, path)
+PYINI
 }
 
-# 4. GTK4 settings.ini
-update_gtk4() {
-    local ui_font="$1" ui_size="$2" dpi="$3"
-    local file="$GTK4_SETTINGS"
-    [[ -f "$file" ]] || return 0
-    
-    sed -i \
-        -e "s/^gtk-font-name=.*/gtk-font-name=${ui_font},  ${ui_size}/" \
-        "$file"
-    
-    if [[ -n "$dpi" ]]; then
-        sed -i "s/^gtk-xft-dpi=.*/gtk-xft-dpi=${dpi}/" "$file"
-    fi
-    
-    log_ok "GTK4: ${ui_font} ${ui_size}pt"
+# 3/4. GTK3 and GTK4 use the same supported Xft properties.
+update_gtk_settings() {
+    local file="$1" ui_font="$2" ui_size="$3" hintstyle="$4" subpixel="$5" dpi="$6"
+    local hinting=1 extra=()
+    [[ "$hintstyle" == hintnone ]] && hinting=0
+    [[ -n "$dpi" ]] && extra=(gtk-xft-dpi "$dpi")
+    set_config_keys "$file" Settings \
+        gtk-font-name "${ui_font} ${ui_size}" gtk-xft-hintstyle "$hintstyle" \
+        gtk-xft-antialias 1 gtk-xft-hinting "$hinting" gtk-xft-rgba "$subpixel" "${extra[@]}"
+    log_ok "$(basename "$(dirname "$file")"): ${ui_font} ${ui_size}pt, ${hintstyle}, ${subpixel}"
 }
 
-# 5. GTK2 .gtkrc-2.0
+update_gtk3() { update_gtk_settings "$GTK3_SETTINGS" "$@"; }
+update_gtk4() { update_gtk_settings "$GTK4_SETTINGS" "$@"; }
+
+# 5. GTK2 keeps its quoted font and enum syntax.
 update_gtk2() {
-    local ui_font="$1" ui_size="$2" hintstyle="$3" subpixel="$4"
-    local file="$GTK2_SETTINGS"
-    [[ -f "$file" ]] || return 0
-    
-    sed -i \
-        -e "s/^gtk-font-name=.*/gtk-font-name=\"${ui_font},  ${ui_size}\"/" \
-        -e "s/^gtk-xft-hintstyle=.*/gtk-xft-hintstyle=\"${hintstyle}\"/" \
-        -e "s/^gtk-xft-antialias=.*/gtk-xft-antialias=1/" \
-        -e "s/^gtk-xft-hinting=.*/gtk-xft-hinting=1/" \
-        -e "s/^gtk-xft-rgba=.*/gtk-xft-rgba=\"${subpixel}\"/" \
-        "$file"
-    
+    local ui_font="$1" ui_size="$2" hintstyle="$3" subpixel="$4" hinting=1
+    [[ "$hintstyle" == hintnone ]] && hinting=0
+    set_config_keys "$GTK2_SETTINGS" "" \
+        gtk-font-name "\"${ui_font} ${ui_size}\"" gtk-xft-hintstyle "\"${hintstyle}\"" \
+        gtk-xft-antialias 1 gtk-xft-hinting "$hinting" gtk-xft-rgba "\"${subpixel}\""
     log_ok "GTK2: ${ui_font} ${ui_size}pt, ${hintstyle}"
 }
 
@@ -338,23 +327,10 @@ update_kdeglobals() {
     local title_entry="${title_font},${title_size},-1,5,700,0,0,0,0,0,0,0,0,0,0,1,Bold,0,0"
     local small_entry="${ui_font},10,-1,5,455,0,0,0,0,0,0,0,0,0,0,1,Regular,0,0"
     
-    sed -i \
-        -e "/^\[General\]/,/^\[/{
-            s/^font=.*/font=${ui_entry}/
-            s/^menuFont=.*/menuFont=${ui_entry}/
-            s/^toolBarFont=.*/toolBarFont=${ui_entry}/
-            s/^fixed=.*/fixed=${mono_entry}/
-            s/^smallestReadableFont=.*/smallestReadableFont=${small_entry}/
-            s/^XftHintStyle=.*/XftHintStyle=${hintstyle}/
-            s/^XftAntialias=.*/XftAntialias=true/
-            s/^XftSubPixel=.*/XftSubPixel=${subpixel}/
-        }" \
-        "$file"
-    
-    # Update WM active font (title bar)
-    sed -i "/^\[WM\]/,/^\[/{
-        s/^activeFont=.*/activeFont=${title_entry}/
-    }" "$file"
+    set_config_keys "$file" General font "$ui_entry" menuFont "$ui_entry" \
+        toolBarFont "$ui_entry" fixed "$mono_entry" smallestReadableFont "$small_entry" \
+        XftHintStyle "$hintstyle" XftAntialias true XftSubPixel "$subpixel"
+    set_config_keys "$file" WM activeFont "$title_entry"
     
     log_ok "KDE globals: ${ui_font} ${ui_size}pt, mono=${mono_font} ${mono_size}pt, ${hintstyle}"
 }
@@ -460,15 +436,21 @@ update_kitty() {
     log_ok "Kitty: ${mono_font} ${mono_size}pt"
 }
 
-# 11. Firefox user.js
-update_firefox() {
-    local subpixel="$1" ff_userjs force=false
-    ff_userjs=$(find_firefox_userjs 2>/dev/null) || { log_warn "Firefox profile not found"; return 0; }
-    [[ "$subpixel" == rgb || "$subpixel" == bgr ]] && force=true
-    touch "$ff_userjs"
-    sed -i '/^[[:space:]]*user_pref("gfx.webrender.quality.force-subpixel-aa-where-possible",/d' "$ff_userjs"
-    printf '\nuser_pref("gfx.webrender.quality.force-subpixel-aa-where-possible", %s);\n' "$force" >> "$ff_userjs"
-    log_ok "Firefox: subpixel force=$force (takes effect after Firefox restart)"
+# 11. Browser defaults and rendering, across all discovered profiles.
+update_browsers() {
+    local ui_font="$1" mono_font="$2" subpixel="$3" rendering_only="${4:-false}"
+    local args=()
+    [[ "$rendering_only" == true ]] && args+=(--rendering-only)
+    [[ -f "$BROWSER_HELPER" ]] || die "Missing browser companion: $BROWSER_HELPER"
+    python3 "$BROWSER_HELPER" apply --ui "$ui_font" --mono "$mono_font" \
+        --serif "$(fontconfig_family serif)" --subpixel "$subpixel" "${args[@]}"
+}
+
+cmd_sync_browsers() {
+    local rgba
+    rgba=$(fc-match -f '%{rgba}' sans-serif)
+    case "$rgba" in 1) rgba=rgb ;; 2) rgba=bgr ;; *) rgba=none ;; esac
+    update_browsers "$(fontconfig_family sans-serif)" "$(fontconfig_family monospace)" "$rgba"
 }
 
 # ── Post-Apply Hooks ───────────────────────────────────────────────────────────
@@ -522,7 +504,7 @@ post_apply() {
     
     # Hint about Firefox
     if pgrep -x firefox &>/dev/null; then
-        log_dim "Restart Firefox to apply subpixel AA changes"
+        log_dim "Firefox reads user.js on restart; open sessions were not restarted."
     fi
     
     echo ""
@@ -547,7 +529,7 @@ cmd_status() {
         0*) fc_hint="hintnone" ;; 1*) fc_hint="hintslight" ;; 2*) fc_hint="hintmedium" ;; 3*) fc_hint="hintfull" ;;
     esac
     case "$fc_rgba" in
-        0*) fc_rgba="unknown" ;; 1*) fc_rgba="rgb" ;; 2*) fc_rgba="bgr" ;; 3*) fc_rgba="vrgb" ;; 4*) fc_rgba="vbgr" ;;
+        0*) fc_rgba="unknown" ;; 1*) fc_rgba="rgb" ;; 2*) fc_rgba="bgr" ;; 3*) fc_rgba="vrgb" ;; 4*) fc_rgba="vbgr" ;; 5*) fc_rgba="none" ;;
     esac
     printf "%-24s %-26s %-14s %-10s\n" "fontconfig (match)" "$fc_family" "$fc_hint" "$fc_rgba"
     printf "%-24s %-26s %-14s %-10s\n" "fontconfig (mono match)" "$fc_mono_family" "—" "—"
@@ -585,9 +567,11 @@ cmd_status() {
     
     # 4. GTK4
     if [[ -f "$GTK4_SETTINGS" ]]; then
-        local gtk4_font
+        local gtk4_font gtk4_hint gtk4_rgba
         gtk4_font=$(grep "^gtk-font-name=" "$GTK4_SETTINGS" 2>/dev/null | cut -d= -f2)
-        printf "%-24s %-26s %-14s %-10s\n" "GTK4" "$gtk4_font" "—" "—"
+        gtk4_hint=$(sed -n 's/^gtk-xft-hintstyle=//p' "$GTK4_SETTINGS")
+        gtk4_rgba=$(sed -n 's/^gtk-xft-rgba=//p' "$GTK4_SETTINGS")
+        printf "%-24s %-26s %-14s %-10s\n" "GTK4" "$gtk4_font" "${gtk4_hint:-default}" "${gtk4_rgba:-default}"
     fi
     
     # 5. GTK2
@@ -647,18 +631,12 @@ cmd_status() {
         printf "%-24s %-26s %-14s %-10s\n" "Kitty" "${kitty_font} ${kitty_size}pt" "—" "—"
     fi
     
-    # 11. Firefox
-    local ff_userjs
-    ff_userjs=$(find_firefox_userjs 2>/dev/null)
-    if [[ -n "$ff_userjs" && -f "$ff_userjs" ]]; then
-        local ff_subpix="no"
-        grep -q "force-subpixel-aa-where-possible.*true" "$ff_userjs" 2>/dev/null && ff_subpix="forced"
-        printf "%-24s %-26s %-14s %-10s\n" "Firefox" "—" "—" "subpx=$ff_subpix"
-        local ff_family
-        ff_family=$(sed -n 's/^user_pref("font.name.sans-serif.x-western", "\(.*\)");/\1/p' "${ff_userjs%user.js}prefs.js" 2>/dev/null | tail -1)
-        if [[ -n "$ff_family" ]]; then
-            log_dim "Firefox saved local font: ${ff_family} -> $(fontconfig_family "$ff_family")"
-        fi
+    # Saved preferences are not proof of the renderer in an open browser.
+    echo ""
+    if [[ -f "$BROWSER_HELPER" ]]; then
+        python3 "$BROWSER_HELPER" status
+    else
+        log_warn "Browser companion missing: $BROWSER_HELPER"
     fi
     
     echo ""
@@ -718,7 +696,7 @@ cmd_set() {
         current_mono=$(gsettings get org.gnome.desktop.interface monospace-font-name 2>/dev/null | tr -d "'")
         ui_size=$(awk '{print $NF}' <<< "$current_ui")
         mono_size=$(awk '{print $NF}' <<< "$current_mono")
-        ui_font=$(sed -E 's/[[:space:]]+[0-9]+([.][0-9]+)?$//' <<< "$current_ui")
+        ui_font=$(sed -E 's/[[:space:]]+[0-9]+([.][0-9]+)?$//; s/[[:space:],]+$//' <<< "$current_ui")
         mono_font=$(sed -E 's/[[:space:]]+[0-9]+([.][0-9]+)?$//' <<< "$current_mono")
         title_font=$(jq -r '.appearance.fonts.title // empty' "$II_CONFIG" 2>/dev/null)
         numbers_font=$(jq -r '.appearance.fonts.numbers // empty' "$II_CONFIG" 2>/dev/null)
@@ -798,7 +776,7 @@ cmd_set() {
     fi
     verify_fontconfig_selection "$ui_font" "$mono_font"
     update_gtk3 "$ui_font" "$ui_size" "$hintstyle" "$subpixel" "$dpi"
-    update_gtk4 "$ui_font" "$ui_size" "$dpi"
+    update_gtk4 "$ui_font" "$ui_size" "$hintstyle" "$subpixel" "$dpi"
     update_gtk2 "$ui_font" "$ui_size" "$hintstyle" "$subpixel"
     update_kdeglobals "$ui_font" "$ui_size" "$mono_font" "$mono_size" "$title_font" "$title_size" "$hintstyle" "$subpixel"
     update_trolltech "$ui_font" "$ui_size"
@@ -808,7 +786,8 @@ cmd_set() {
         update_kitty "$mono_font" "$kitty_size"
     fi
     
-    update_firefox "$subpixel"
+    local browser_failed=false
+    update_browsers "$ui_font" "$mono_font" "$subpixel" "$rendering_only" || browser_failed=true
 
     local qs_was_running=false qs_pid=""
     qs_pid=$(qs_instance_pid 2>/dev/null || true)
@@ -823,6 +802,10 @@ cmd_set() {
     update_ii_config "$ui_font" "$mono_font" "$title_font" "$numbers_font" "$reading_font" "$expressive_font" "${qs_sizes[@]}"
 
     post_apply "$qs_was_running"
+    if [[ "$browser_failed" == true ]]; then
+        log_warn "Desktop updated; some browser profiles were deferred or failed. Close busy browsers and run fontctl sync-browsers."
+        return 1
+    fi
 }
 
 # ── Preset Command ─────────────────────────────────────────────────────────────
@@ -1003,6 +986,7 @@ cmd_help() {
     fontctl status                 Show current configuration across all targets  
     fontctl preset <name|list|catalog>     Apply a named font preset
     fontctl fix-rendering          Apply rendering fixes without changing fonts
+    fontctl sync-browsers          Apply current fonts/rendering to all browser profiles
     fontctl help                   Show this help
 
   SET OPTIONS
@@ -1035,7 +1019,15 @@ cmd_help() {
     8.  GSettings (dconf)
     9.  ~/.config/illogical-impulse/config.json
     10. ~/.config/kitty/kitty.conf
-    11. Firefox user.js (subpixel AA)
+    11. Firefox user.js in legacy, XDG and sandboxed profiles
+    12. Closed Chrome/Chromium/Brave/Edge/Vivaldi profile Preferences
+
+  Browser defaults follow the selected sans/mono families; serif stays serif.
+  Website fonts, icons, zoom, sizes and language-specific fallbacks are preserved.
+  Firefox reads user.js on restart. Busy Chromium profiles are deferred with an
+  error; close them and run sync-browsers. No browser is killed or restarted.
+  Rendering uses Fontconfig/GTK and normal WebRender AA (not forced layering),
+  plus sRGB text blending supported by Firefox 150+. Kitty uses grayscale AA.
 
   Quickshell is restarted when running; Hyprland is intentionally not reloaded.
 
@@ -1076,12 +1068,21 @@ main() {
     
     local cmd="${1:-help}"
     shift || true
+    if [[ "$cmd" == set || "$cmd" == preset || "$cmd" == fix-rendering || "$cmd" == sync-browsers ]]; then
+        # Catalog/preview must remain read-only, including their lock directory.
+        if [[ " $* " != *" --preview "* && " $* " != " catalog " && " $* " != " list " ]]; then
+            mkdir -p "$HOME/.config/fontctl"
+            exec 9>"$HOME/.config/fontctl/apply.lock"
+            flock -n 9 || die "Another fontctl apply is running"
+        fi
+    fi
     
     case "$cmd" in
         set)            cmd_set "$@" ;;
         status)         cmd_status ;;
         preset)         cmd_preset "$@" ;;
         fix-rendering)  cmd_fix_rendering "$@" ;;
+        sync-browsers)  cmd_sync_browsers "$@" ;;
         help|--help|-h) cmd_help ;;
         *)              die "Unknown command: $cmd (try 'fontctl help')" ;;
     esac

@@ -22,6 +22,61 @@ Preview makes no settings changes and does not restart anything. Applying follow
 the existing backup and desktop update flow, including restarting Quickshell if
 it is running. No profile is applied merely by installing the collection.
 `--user-only` still applies user settings and restarts a running Quickshell.
+It also updates browser defaults using the `fontctl-browser` companion, which
+must be installed beside `fontctl`. `fontctl sync-browsers` reapplies the current
+Fontconfig families to browsers without restarting the shell.
+
+## Browser and rendering coverage
+
+Firefox profiles are discovered under `~/.mozilla/firefox`, the XDG configuration
+directory, Flatpak and Snap. Relative and absolute `profiles.ini` entries and
+secondary profiles are included. A managed block in each `user.js` selects the
+Western/Unicode sans and monospace defaults and allows websites to use their own
+fonts. Serif remains the system serif family. Existing sizes, zoom, non-Latin
+choices, security preferences and unrelated user.js content are retained.
+Firefox reads these changes on its next start; `prefs.js` is never edited while
+Firefox owns it. `fontctl status` distinguishes startup settings from last-saved
+preferences and reports running profiles. It does not claim live rendering proof.
+
+Chrome, Chromium, Brave, Edge and Vivaldi profiles receive standard/sans/serif/fixed
+defaults in `Preferences`, for both Common (`Zyyy`) and Latin (`Latn`) scripts.
+Chromium 156 otherwise rendered the Latin sample as Arial despite a saved Fira
+Sans Common preference. This includes common Flatpak/Snap locations. Website
+fonts, non-Latin families, sizes, zoom, accounts and extensions are retained.
+Only the known legacy Roboto assignment to math/cursive/fantasy is removed.
+Busy Chromium profiles are **not written**: close that browser and run
+`fontctl sync-browsers`. An incomplete apply returns a failure instead of claiming
+success. New profiles are discovered on the next apply; there is no watcher.
+
+Browser changes have private, timestamped backups under
+`~/.config/fontctl/backups/*-browsers/`, with absolute source paths mirrored inside
+each backup. A `.created` marker records a newly created file. Restore only the
+files you intend to roll back, with the affected browser closed.
+
+Fontconfig and GTK carry hinting, RGB/grayscale AA and LCD filtering. GTK keys
+are created when missing, including GTK4, and `hintnone` disables hinting.
+Firefox uses normal WebRender subpixel eligibility instead of forcing extra
+layers. Grayscale disables WebRender subpixel AA. Firefox 150+ also receives
+sRGB glyph preblending (`gfx.font_rendering.freetype.gamma=0`, contrast `100`),
+addressing Linux dark-text color fringing described in
+[Mozilla bug 1910291](https://bugzilla.mozilla.org/show_bug.cgi?id=1910291).
+This is text blending, not a display gamma or color-profile change.
+
+Website webfonts and explicit families remain under page control, as described
+by [Mozilla](https://support.mozilla.org/en-US/kb/change-fonts-and-colors-websites-use)
+and [Chrome's font settings API](https://developer.chrome.com/docs/extensions/reference/api/fontSettings).
+No universal CSS overrides or browser security changes are installed. Kitty and
+Qt Quick do not promise the same RGB LCD rendering as a browser. Physical
+appearance still needs checking on the intended screen.
+
+Super+I → Desktop font profiles exposes hinting, grayscale rendering and a
+"Check applied fonts" readout. A sensible native-scale 1080p starting point is
+`fontctl preset humanist --kitty-size 12`: Fira Sans 11 pt, Hack 12 pt, full
+hinting and RGB. Browser CSS sizes remain independent of desktop point sizes.
+
+Run `python3 tests/test_fontctl_browsers.py` for isolated profile discovery,
+content preservation, rendering-only behavior, active-profile protection,
+backup/idempotence and GTK missing-key regressions.
 
 All profiles retain the existing full-hinting/RGB default. Use `--subpixel none`
 for grayscale. Each profile has deliberate sizes; append `-10pt` to any font

@@ -70,6 +70,11 @@ try:
     runtime_state = (runtime / 'qs-mail/state.json').read_text()
     assert '123456' not in runtime_state and 'example.invalid' not in runtime_state
     send(data); time.sleep(.2); assert len(state()['list']) == 1, 'duplicate mail delivered'
+    cfg['careerOnly'] = True; set_config(cfg); receive()
+    send({**data, 'key':'routine-mail', 'subject':'Your shopping receipt'})
+    time.sleep(.2); assert len(state()['list']) == 1, 'routine mail bypassed career filter'
+    send({**data, 'key':'application-mail', 'subject':'Recebemos sua candidatura — QA'})
+    until(lambda: len(state()['list']) == 2)
     cfg['codes'] = False; set_config(cfg); receive()
     assert 'qs-mail-code' not in [a['identifier'] for a in state()['list'][0]['actions']]
     cfg['accounts'] = []; set_config(cfg); receive()

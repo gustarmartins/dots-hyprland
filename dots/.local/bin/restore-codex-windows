@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Attach live Codex tmux sessions; Eglantine goes tiled on connected ARZOPA.
+
+Uses the focused Kitty instance. Never starts agents or resumes their goals.
+Run again after compositor recovery; existing session tabs are reused.
+"""
+import json
+import os
+import subprocess
+import time
+
+
+def run(*args):
+    return subprocess.check_output(args, text=True, timeout=10).strip()
+
+
+def main():
+    instances = json.loads(run('hyprctl', 'instances', '-j'))
+    matches = [i for i in instances if i['wl_socket'] == os.environ.get('WAYLAND_DISPLAY', '').split('/')[-1]]
+    if len(matches) != 1:
+        raise SystemExit('Cannot identify the current Hyprland display.')
+    os.environ['HYPRLAND_INSTANCE_SIGNATURE'] = matches[0]['instance']
+    monitors = json.loads(run('hyprctl', '-j', 'monitors'))
+    arzopa = next((m for m in monitors if 'ARZOPA' in (m.get('model', '') + m.get('description', '')).upper()), None)
+    active = json.loads(run('hyprctl', '-j', 'activewindow'))
+    clients = json.loads(run('hyprctl', '-j', 'clients'))
+    host = active if active.get('class') == 'kitty' else next((c for c in clients if c['class'] == 'kitty'), None)
+    if not host:
+        raise SystemExit('Open a Kitty window on the desired main display first.')
+    remote = ['kitty', '@', '--to', f"unix:@kitty-{host['pid']}.sock"]
+
+    def windows():
+        return json.loads(run(*remote, 'ls'))
+
+    current = windows()
+    primary = next((w for w in current if w['wm_class'] != 'codex-eglantine' and w.get('last_focused')), None)
+    primary = primary or next(w for w in current if w['wm_class'] != 'codex-eglantine')
+    main_tab = primary['tabs'][0]['id']
+    secondary = next((w for w in current if w['wm_class'] == 'codex-eglantine'), None)
+    egl_tab = secondary['tabs'][0]['id'] if secondary else None
+    existing = {t['title'] for w in current for t in w['tabs']}
+    processes = {}
+    for line in run('ps', '-eo', 'pid=,ppid=,comm=').splitlines():
+        pid, parent, command = line.split(None, 2)
+        processes[int(pid)] = (int(parent), command)
+
+    def contains_codex(pid):
+        pending = [pid]
+        seen = set()
+        while pending:
+            p = pending.pop()
+            if p in seen:
+                continue
+            seen.add(p)
+            if processes.get(p, (0, ''))[1] == 'codex':
+                return True
+            pending.extend(child for child, info in processes.items() if info[0] == p)
+        return False
+
+    sessions = set()
+    for row in run('tmux', 'list-panes', '-a', '-F', '#{session_name}\t#{pane_pid}').splitlines():
+        name, pid = row.rsplit('\t', 1)
+        if contains_codex(int(pid)):
+            sessions.add(name)
+    for name in sorted(sessions):
+        if name in existing:
+            continue
+        eglantine = name.lower().startswith('eglantine') and arzopa is not None
+        if eglantine and egl_tab is None:
+            run(*remote, 'launch', '--type=os-window', '--os-window-class=codex-eglantine',
+                '--os-window-title=Eglantine Codex', '--tab-title=' + name, '--keep-focus',
+                'tmux', 'attach-session', '-t', '=' + name)
+            secondary = next(w for w in windows() if w['wm_class'] == 'codex-eglantine')
+            egl_tab = secondary['tabs'][0]['id']
+        else:
+            run(*remote, 'launch', '--type=tab', '--match=id:' + str(egl_tab if eglantine else main_tab),
+                '--tab-title=' + name, '--keep-focus', 'tmux', 'attach-session', '-t', '=' + name)
+        print('Attached', name, 'on', 'ARZOPA' if eglantine else 'main Kitty')
+    if egl_tab is not None and arzopa:
+        # Let the existing geometry restoration finish before enforcing tiling.
+        time.sleep(3.2)
+        clients = json.loads(run('hyprctl', '-j', 'clients'))
+        for client in clients:
+            if client['pid'] == host['pid'] and client['class'] == 'codex-eglantine':
+                selector = json.dumps('address:' + client['address'])
+                workspace = json.dumps(str(arzopa['activeWorkspace']['id']))
+                run('hyprctl', 'dispatch', f'hl.dsp.window.move({{window={selector}, workspace={workspace}, follow=false}})')
+                run('hyprctl', 'dispatch', f'hl.dsp.window.float({{window={selector}, action="disable"}})')
+        clients = json.loads(run('hyprctl', '-j', 'clients'))
+        placed = [c for c in clients if c['pid'] == host['pid'] and c['class'] == 'codex-eglantine']
+        assert placed and all(c['monitor'] == arzopa['id'] and not c['floating'] for c in placed), 'ARZOPA placement did not verify'
+        print('Verified: Eglantine tiled on', arzopa['name'])
+
+
+if __name__ == '__main__':
+    main()

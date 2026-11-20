@@ -1,0 +1,549 @@
+#!/usr/bin/env python3
+"""Full Codex notifications and click-time, identity-checked terminal routing.
+
+No daemon, transcript reads, prompt submission, or terminal text injection.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import html
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+
+UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
+TOKEN = re.compile(r"[0-9a-f]{32}\Z")
+STATE = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "codex-notify"
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "codex-notify/config.json"
+DEFAULT = {"enabled": False, "focus": True, "reopen": True}
+SELF = str(Path(__file__).resolve())
+
+
+def read_json(path):
+    with path.open() as f:
+        data = f.read(2 * 1024 * 1024 + 1)
+    if len(data) > 2 * 1024 * 1024:
+        raise ValueError("Oversized notification metadata")
+    return json.loads(data)
+
+
+def atomic(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".update-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def settings():
+    try:
+        return dict(DEFAULT, **read_json(CONFIG))
+    except FileNotFoundError:
+        return dict(DEFAULT)
+
+
+def home_path(value=None):
+    selected = value or os.environ.get("CODEX_HOME")
+    default_home = Path.home() / ".local/state/codex-handoff/default-home"
+    if not selected and default_home.is_file():
+        selected = default_home.read_text().strip()
+    home = Path(selected or Path.home() / ".codex").expanduser()
+    if not home.is_absolute() or not home.is_dir() or home.stat().st_uid != os.getuid():
+        raise ValueError("Codex account directory is unavailable")
+    return home.resolve()
+
+
+def metadata(home, ident):
+    if not UUID.fullmatch(ident):
+        raise ValueError("Invalid Codex session ID")
+    path = home / "state_5.sqlite"
+    with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute("SELECT id,cwd,name,model,reasoning_effort,archived,rollout_path,agent_path FROM threads WHERE id=?", (ident,)).fetchone()
+    if not row:
+        raise ValueError("The original Codex session is unavailable")
+    return dict(row)
+
+
+def token_for(home, ident):
+    return hashlib.sha256((str(home) + "\0" + ident).encode()).hexdigest()[:32]
+
+
+def route_path(token):
+    if not TOKEN.fullmatch(token):
+        raise ValueError("Invalid notification reference")
+    return STATE / "routes" / (token + ".json")
+
+
+def register(home, ident):
+    row = metadata(home, ident)
+    token = token_for(home, ident)
+    atomic(route_path(token), json.dumps({"version": 1, "home": str(home), "id": ident}))
+    return token, row
+
+
+def load_route(token):
+    path = route_path(token)
+    if path.is_symlink() or path.stat().st_uid != os.getuid():
+        raise ValueError("Notification reference ownership changed")
+    route = read_json(path)
+    home = home_path(route["home"])
+    if route.get("version") != 1 or token_for(home, route["id"]) != token:
+        raise ValueError("Notification reference changed")
+    return home, metadata(home, route["id"])
+
+
+def configure(enable, home):
+    """Edit only the two owned TOML keys, preserving comments and other values."""
+    import tomlkit
+    cfg = settings()
+    if not enable and cfg.get("installation"):
+        home = home_path(cfg["installation"]["home"])
+    path = home / "config.toml"
+    original = path.read_text()
+    doc = tomlkit.parse(original)
+    command = [str(Path.home() / ".local/bin/codex-notify"), "emit"]
+    if enable:
+        prior = cfg.get("installation")
+        if prior and prior["home"] != str(home):
+            raise ValueError("Disable the existing account integration before changing its account directory")
+        if not prior:
+            if doc.get("notify") == command:
+                raise ValueError("The hook is already installed without its restoration record; preserving the configuration")
+            prior = {"home": str(home), "notify": doc.get("notify"), "notifications": doc.get("tui", {}).get("notifications")}
+            cfg["installation"] = prior
+        elif doc.get("notify") not in (command, prior["notify"]):
+            raise ValueError("The Codex notification command changed; preserving it")
+        doc["notify"] = command
+        tui = doc.setdefault("tui", tomlkit.table())
+        previous = prior["notifications"]
+        tui["notifications"] = [event for event in previous if event != "agent-turn-complete"] if isinstance(previous, list) else ["approval-requested"] if previous is not False else False
+    else:
+        prior = cfg.get("installation")
+        if prior:
+            if doc.get("notify") != command:
+                raise ValueError("The Codex notification command changed; preserving it")
+            if prior["notify"] is None:
+                del doc["notify"]
+            else:
+                doc["notify"] = prior["notify"]
+            expected = [e for e in prior["notifications"] if e != "agent-turn-complete"] if isinstance(prior["notifications"], list) else ["approval-requested"] if prior["notifications"] is not False else False
+            if doc.get("tui", {}).get("notifications") == expected:
+                if prior["notifications"] is None:
+                    del doc["tui"]["notifications"]
+                else:
+                    doc["tui"]["notifications"] = prior["notifications"]
+            cfg.pop("installation", None)
+    updated = tomlkit.dumps(doc)
+    tomllib.loads(updated)
+    # A backup contains private config and is never part of the repository.
+    backup = STATE / "config-before.toml"
+    if not backup.exists():
+        atomic(backup, original)
+    if path.read_text() != original:
+        raise ValueError("Codex configuration changed during installation; retry")
+    # Save restoration values before installing the hook; activate after commit.
+    pending = dict(cfg, enabled=settings()["enabled"])
+    atomic(CONFIG, json.dumps(pending, indent=2) + "\n")
+    atomic(path, updated)
+    cfg["enabled"] = enable
+    atomic(CONFIG, json.dumps(cfg, indent=2) + "\n")
+    return cfg
+
+
+def command(argv, timeout=2):
+    p = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+    if p.returncode:
+        raise ValueError((p.stderr.strip() or "Terminal command failed")[:240])
+    return p.stdout
+
+
+def process(pid):
+    p = Path("/proc") / str(pid)
+    try:
+        if p.stat().st_uid != os.getuid():
+            return None
+        fields = (p / "stat").read_text().rsplit(")", 1)[1].split()
+        if fields[0] == "Z":
+            return None
+        return {"pid": pid, "ppid": int(fields[1]), "start": int(fields[19]), "comm": (p / "comm").read_text().strip(),
+                "pgrp":int(fields[2]), "tty":int(fields[4]), "tpgid":int(fields[5])}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def ancestors(pid, rows):
+    seen = set()
+    while pid in rows and pid not in seen:
+        seen.add(pid)
+        yield pid
+        pid = rows[pid]["ppid"]
+
+
+def terminal_chain(pid, rows):
+    for parent in ancestors(pid, rows):
+        yield parent
+        if rows[parent]["comm"] == "kitty":
+            break
+
+
+def nearest_window(pid, rows, windows):
+    for parent in terminal_chain(pid, rows):
+        matches = [window for window in windows if window["pid"] == parent]
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+    return None
+
+
+def has_terminal(writer, rows):
+    if writer.get("tty", 0):
+        return True
+    # A local no-daemon TUI may spawn its backend without a controlling tty.
+    parent = rows.get(writer["ppid"], {})
+    return parent.get("comm") == "codex" and bool(parent.get("tty")) and parent.get("pgrp") == parent.get("tpgid")
+
+
+def writer_ids(pid, home):
+    ids = set()
+    try:
+        for fd in (Path("/proc") / str(pid) / "fd").iterdir():
+            with contextlib.suppress(OSError):
+                target = Path(os.readlink(fd))
+                if target.parent != home / "thread-writer-locks" or target.suffix != ".lock" or not UUID.fullmatch(target.stem):
+                    continue
+                info = (fd.parent.parent / "fdinfo" / fd.name).read_text()
+                if any(line.startswith("lock:") and "WRITE" in line for line in info.splitlines()):
+                    ids.add(target.stem)
+    except OSError:
+        pass
+    return ids
+
+
+def inventory(home, ident):
+    rows = {}
+    for p in Path("/proc").iterdir():
+        if p.name.isdecimal() and (row := process(int(p.name))):
+            rows[row["pid"]] = row
+    writers = []
+    for row in rows.values():
+        if row["comm"] == "codex":
+            held = writer_ids(row["pid"], home)
+            if ident in held:
+                writers.append(dict(row, exclusive=len(held) == 1))
+    sockets = {str(Path(os.environ.get("TMUX_TMPDIR", "/tmp")) / ("tmux-" + str(os.getuid())) / "default")}
+    # Only inspect the selected writer's ancestry for tmux routing hints.
+    for writer in writers:
+        for pid in ancestors(writer["pid"], rows):
+            with contextlib.suppress(OSError):
+                for entry in (Path("/proc") / str(pid) / "environ").read_bytes().split(b"\0"):
+                    if entry.startswith(b"TMUX="):
+                        sockets.add(os.fsdecode(entry[5:]).rsplit(",", 2)[0])
+    panes, clients = [], []
+    for endpoint in sorted(sockets):
+        try:
+            path = Path(endpoint)
+            if not path.is_socket() or path.stat().st_uid != os.getuid():
+                continue
+            for line in command(["tmux", "-S", endpoint, "list-panes", "-a", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}"]).splitlines():
+                session, window, pane, pid = line.split("\t")
+                panes.append({"socket": endpoint, "session": session, "window": window, "pane": pane, "pid": int(pid)})
+            for line in command(["tmux", "-S", endpoint, "list-clients", "-F", "#{client_pid}\t#{session_id}"]).splitlines():
+                pid, session = line.split("\t")
+                clients.append({"socket": endpoint, "session": session, "pid": int(pid)})
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            continue
+    viewers = []
+    with contextlib.suppress(FileNotFoundError, KeyError):
+        saved = read_json(STATE / (token_for(home, ident) + ".viewer.json"))
+        current = rows.get(saved["pid"])
+        if current and current["start"] == saved["start"]:
+            args = (Path("/proc") / str(current["pid"]) / "cmdline").read_bytes().split(b"\0")
+            if os.fsencode(SELF) in args and b"await" in args and os.fsencode(token_for(home, ident)) in args:
+                viewers.append(current)
+    # Query only terminal processes in the selected session's verified chains.
+    candidate_pids = {p for w in writers if w["exclusive"] and has_terminal(w, rows) for p in terminal_chain(w["pid"], rows)}
+    candidate_pids.update(p for v in viewers for p in terminal_chain(v["pid"], rows))
+    matched_panes = [p for p in panes if p["pid"] in candidate_pids]
+    for pane in matched_panes:
+        for client in clients:
+            if client["socket"] == pane["socket"] and client["session"] == pane["session"]:
+                candidate_pids.update(terminal_chain(client["pid"], rows))
+    windows = []
+    for pid in sorted(candidate_pids):
+        if rows[pid]["comm"] != "kitty":
+            continue
+        endpoint = "unix:@kitty-" + str(pid) + ".sock"
+        try:
+            for oswindow in json.loads(command(["kitten", "@", "--to", endpoint, "ls"])):
+                for tab in oswindow.get("tabs", []):
+                    for w in tab.get("windows", []):
+                        windows.append({"socket": endpoint, "id": w["id"], "pid": w["pid"]})
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            continue
+    return {"rows": rows, "writers": writers, "windows": windows, "panes": panes, "clients": clients, "viewers": viewers}
+
+
+def server_endpoint(writer, home):
+    """Only a listener advertised by this actual app-server, with matching peer PID."""
+    try:
+        argv = [os.fsdecode(a) for a in (Path("/proc") / str(writer["pid"]) / "cmdline").read_bytes().split(b"\0") if a]
+        if "app-server" not in argv:
+            return None
+        endpoint = next((argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--listen"), "")
+        if endpoint.startswith("unix://") and endpoint[7:]:
+            candidates = [Path(endpoint[7:])]
+        else:
+            candidates = [home / "app-server-control/app-server-control.sock"]
+        for path in candidates:
+            if not path.is_absolute() or not path.is_socket() or path.stat().st_uid != os.getuid():
+                continue
+            import struct
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(.5)
+                client.connect(str(path))
+                pid, uid, _ = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                if pid == writer["pid"] and uid == os.getuid():
+                    return "unix://" + str(path)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def plan(row, snap, cfg):
+    """Pure planner: no title, old PID, resume argv, or tmux name guesses."""
+    rows = snap["rows"]
+    routes = []
+    for viewer in snap.get("viewers", []):
+        gui = nearest_window(viewer["pid"], rows, snap["windows"])
+        if gui:
+            if not cfg["focus"]:
+                raise ValueError("Focusing existing terminals is disabled")
+            return {"kind": "focus", "window": gui, "viewer": viewer}
+    for writer in snap["writers"]:
+        if not writer["exclusive"] or not has_terminal(writer, rows):
+            continue
+        chain = set(ancestors(writer["pid"], rows))
+        pane = next((p for p in snap["panes"] if p["pid"] in chain), None)
+        if pane:
+            attached = [c for c in snap["clients"] if c["socket"] == pane["socket"] and c["session"] == pane["session"]]
+            gui = [w for c in attached if (w := nearest_window(c["pid"], rows, snap["windows"]))]
+            if gui:
+                routes.append({"kind": "focus", "window": gui[0], "pane": pane, "writer": writer})
+            else:
+                routes.append({"kind": "attach-tmux", "pane": pane, "writer": writer})
+        else:
+            gui = nearest_window(writer["pid"], rows, snap["windows"])
+            if gui:
+                routes.append({"kind": "focus", "window": gui, "writer": writer})
+    if len(routes) > 1:
+        raise ValueError("Multiple live writers match this session; no terminal was changed")
+    if routes:
+        if routes[0]["kind"] == "focus" and not cfg["focus"]:
+            raise ValueError("Focusing existing terminals is disabled")
+        if routes[0]["kind"] == "attach-tmux" and not cfg["reopen"]:
+            raise ValueError("Opening terminal windows is disabled")
+        return routes[0]
+    if snap["writers"]:
+        if not cfg["reopen"]:
+            raise ValueError("Opening terminal windows is disabled")
+        if len(snap["writers"]) != 1:
+            raise ValueError("Multiple live writers match this session; no terminal was changed")
+        return {"kind": "await-background", "writer": snap["writers"][0]}
+    if not cfg["reopen"]:
+        raise ValueError("Reopening sessions is disabled")
+    if row["archived"] or row.get("agent_path") not in (None, "", "/root"):
+        raise ValueError("This session is archived or belongs to a subagent")
+    if not Path(row["rollout_path"]).is_file():
+        raise ValueError("The saved Codex transcript is unavailable")
+    if not Path(row["cwd"]).is_dir():
+        raise ValueError("The original workspace is unavailable")
+    return {"kind": "resume"}
+
+
+def clean_env(home):
+    env = os.environ.copy()
+    for key in ("TMUX", "TMUX_PANE", "KITTY_WINDOW_ID", "KITTY_LISTEN_ON", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_FEDERATION_RULE_ID"):
+        env.pop(key, None)
+    env.update(CODEX_HOME=str(home), CODEX_ACCOUNT_HOME=str(home))
+    return env
+
+
+def resume_argv(row):
+    result = ["/usr/bin/codex", "--no-daemon", "resume", row["id"], "-C", row["cwd"]]
+    if row.get("model"):
+        result += ["-m", row["model"]]
+    if row.get("reasoning_effort"):
+        result += ["-c", "model_reasoning_effort=" + json.dumps(row["reasoning_effort"])]
+    return result
+
+
+def open_notification(token, dry_run=False):
+    cfg = settings()
+    if not cfg["enabled"]:
+        raise ValueError("Codex notification navigation is disabled")
+    home, row = load_route(token)
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (STATE / (token + ".lock")).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        snap = inventory(home, row["id"])
+        action = plan(row, snap, cfg)
+        if action["kind"] == "await-background":
+            if endpoint := server_endpoint(action["writer"], home):
+                action.update(kind="attach-server", endpoint=endpoint)
+        if dry_run:
+            return {"action": action["kind"], "id": row["id"]}
+        if writer := action.get("writer"):
+            current = process(writer["pid"])
+            held = writer_ids(writer["pid"], home)
+            expected = row["id"] in held if action["kind"] in ("await-background", "attach-server") else held == {row["id"]}
+            if not current or current["start"] != writer["start"] or not expected:
+                raise ValueError("The terminal session changed; click again")
+        if viewer := action.get("viewer"):
+            if process(viewer["pid"]) != viewer:
+                raise ValueError("The pending session window changed; click again")
+        if pane := action.get("pane"):
+            command(["tmux", "-S", pane["socket"], "select-window", "-t", pane["window"]])
+            command(["tmux", "-S", pane["socket"], "select-pane", "-t", pane["pane"]])
+        if action["kind"] == "focus":
+            window = action["window"]
+            command(["kitten", "@", "--to", window["socket"], "focus-window", "--match", "id:" + str(window["id"])])
+        else:
+            pending = STATE / (token + ".pending.json")
+            with contextlib.suppress(FileNotFoundError):
+                prior = read_json(pending)
+                current = process(prior["pid"])
+                if current and current["start"] == prior["start"] and time.time() - prior["time"] < 20:
+                    return {"action": "opening", "id": row["id"]}
+            argv = ["kitty", "--title", row.get("name") or "Codex", "--directory", row["cwd"] if Path(row["cwd"]).is_dir() else str(Path.home())]
+            if action["kind"] == "attach-tmux":
+                pane = action["pane"]
+                argv += ["tmux", "-S", pane["socket"], "attach-session", "-t", pane["session"]]
+            elif action["kind"] == "attach-server":
+                argv += ["/usr/bin/codex", "resume", row["id"], "--remote", action["endpoint"], "-C", row["cwd"]]
+            elif action["kind"] == "await-background":
+                argv += [str(Path.home() / ".local/bin/codex-notify"), "await", token]
+            else:
+                argv += [str(Path.home() / ".local/bin/codex-notify"), "resume", token]
+            child = subprocess.Popen(argv, env=clean_env(home), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            if current := process(child.pid):
+                atomic(pending, json.dumps({"pid": child.pid, "start": current["start"], "time": time.time()}))
+        return {"action": action["kind"], "id": row["id"]}
+
+
+def format_message(message):
+    """Render CommonMark into the desktop notification body's HTML subset."""
+    from markdown_it import MarkdownIt
+    parser = MarkdownIt("commonmark", {"html": False, "breaks": True})
+    # Notification previews should show image captions without fetching assets.
+    def image_caption(tokens, index, options, env):
+        return html.escape(tokens[index].content)
+    parser.renderer.rules["image"] = image_caption
+    # StyledText supports preformatted text; strip the syntax language wrapper.
+    def fence(tokens, index, options, env):
+        return "<pre>" + html.escape(tokens[index].content.rstrip("\n")) + "</pre>"
+    parser.renderer.rules["fence"] = fence
+    parser.renderer.rules["code_block"] = fence
+    parser.renderer.rules["code_inline"] = lambda tokens, index, options, env: "<font face=\"monospace\">" + html.escape(tokens[index].content) + "</font>"
+    # Rendering separators aren't content. Keep newlines only inside pre blocks.
+    rendered = parser.render(message)
+    return re.sub(r"(<pre>[\s\S]*?</pre>)|\n", lambda m: m[1] or "", rendered)
+
+
+def emit(raw):
+    cfg = settings()
+    previous = cfg.get("installation", {}).get("notify")
+    if previous:
+        # A broken previous notifier must not suppress the session notification.
+        with contextlib.suppress(OSError):
+            subprocess.Popen([*previous, raw], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    if not cfg["enabled"]:
+        return {"sent": False}
+    event = json.loads(raw)
+    if event.get("type") != "agent-turn-complete":
+        return {"sent": False}
+    token, row = register(home_path(), event["thread-id"])
+    # Full assistant text, never input messages or credentials. Body markup is escaped.
+    message = str(event.get("last-assistant-message") or "Turn complete")
+    if len(message) > 512 * 1024:
+        raise ValueError("Notification exceeds the desktop message limit")
+    import dbus
+    bus = dbus.SessionBus()
+    iface = dbus.Interface(bus.get_object("org.freedesktop.Notifications", "/org/freedesktop/Notifications"), "org.freedesktop.Notifications")
+    ident = iface.Notify("Codex", 0, "utilities-terminal", row.get("name") or "Codex", format_message(message),
+                         dbus.Array(["default", "Open session"], signature="s"),
+                         dbus.Dictionary({"x-mekki-codex": token, "desktop-entry": "codex", "urgency": dbus.Byte(1)}, signature="sv"), -1)
+    return {"sent": True, "notification_id": int(ident)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=["status", "on", "off", "set", "emit", "open", "plan", "resume", "await"])
+    parser.add_argument("arguments", nargs="*")
+    args = parser.parse_args()
+    try:
+        if args.action == "status":
+            result = settings()
+            result.pop("installation", None)
+        elif args.action in ("on", "off"):
+            result = configure(args.action == "on", home_path())
+            result = {k: result[k] for k in DEFAULT}
+        elif args.action == "set":
+            key, value = args.arguments
+            if key not in ("focus", "reopen") or value not in ("on", "off"):
+                raise ValueError("Choose focus/reopen and on/off")
+            result = settings()
+            result[key] = value == "on"
+            atomic(CONFIG, json.dumps(result, indent=2) + "\n")
+            result = {k: result[k] for k in DEFAULT}
+        elif args.action == "emit":
+            result = emit(args.arguments[0] if args.arguments else sys.stdin.read(1024 * 1024))
+        elif args.action in ("open", "plan"):
+            result = open_notification(args.arguments[0], dry_run=args.action == "plan")
+        else:
+            token = args.arguments[0]
+            home, row = load_route(token)
+            if not settings()["enabled"]:
+                raise ValueError("Codex notification navigation is disabled")
+            if args.action == "await":
+                # This is an owner-opened terminal, waiting on a kernel lock,
+                # not a background polling service. Closing it cancels the wait.
+                current = process(os.getpid())
+                atomic(STATE / (token + ".viewer.json"), json.dumps(current))
+                print("Codex is still running in the background.\nThis window will open the saved session when it stops.\nClose this window to cancel; the running task will continue.", flush=True)
+                lock_path = home / "thread-writer-locks" / (row["id"] + ".lock")
+                with lock_path.open("rb") as writer_lock:
+                    fcntl.flock(writer_lock, fcntl.LOCK_SH)
+                if not settings()["enabled"]:
+                    raise ValueError("Codex notification navigation was disabled")
+            # Recheck after Kitty starts: never replace an existing writer.
+            if plan(row, inventory(home, row["id"]), settings())["kind"] != "resume":
+                raise ValueError("The session is already running; use its notification again")
+            gate = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "codex-clean/launch.lock"
+            if gate.exists():
+                guard = os.open(gate, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                fcntl.flock(guard, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            os.chdir(row["cwd"])
+            os.execve("/usr/bin/codex", resume_argv(row), clean_env(home))
+        print(json.dumps(result))
+        return 0
+    except Exception as error:
+        print(json.dumps({"error": str(error)[:300]}))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

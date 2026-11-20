@@ -24,13 +24,14 @@ ShellRoot {
 
     // Stuff for every panel family
     ReloadPopup {}
+    SessionBusRecovery {}
 
     Component.onCompleted: {
         MaterialThemeLoader.reapplyTheme()
         Hyprsunset.load()
         FirstRunExperience.load()
         ConflictKiller.load()
-        Cliphist.refresh()
+        Cliphist.start()
         Wallpapers.load()
         WallpaperDiscovery.rotationOwner = true
         Updates.load()
@@ -63,6 +64,12 @@ ShellRoot {
         component: WaffleFamily {}
     }
 
+
+    // Keep the process and its StatusNotifierWatcher alive across UI reloads.
+    IpcHandler {
+        target: "shellControl"
+        function reload(): void { Quickshell.reload(false) }
+    }
 
     // Shortcuts
     IpcHandler {

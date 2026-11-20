@@ -1,6 +1,7 @@
 // Audited against Config.qml and runtime consumers. Run tests/settings_catalog.py
 // when Config.qml changes: every key must be exposed, managed, or retired.
 .pragma library
+var timeUnits = {"ms": "milliseconds", "s": "seconds", "min": "minutes"};
 var pages = [
   {
     "id": "design",
@@ -74,7 +75,7 @@ var pages = [
     "id": "audio",
     "title": "Audio & night light",
     "icon": "volume_up",
-    "description": "Volume protection, music recognition and evening color."
+    "description": "Music loudness, quiet songs, gain, spatial audio, volume protection and evening color."
   },
   {
     "id": "general",
@@ -192,7 +193,7 @@ var entries = [
     {"path": "background.discovery.theme", "page": "wallpaper", "section": "Wallpaper discovery", "title": "Discovery mood", "kind": "choice", "description": "The source mix used by Discover and automatic rotation.", "choices": [{"value": "mix", "label": "Mix"}, {"value": "mario", "label": "Mario"}, {"value": "lis", "label": "Lis"}, {"value": "tomb", "label": "Tomb"}, {"value": "painted", "label": "Painted"}, {"value": "worlds", "label": "Worlds"}]},
     {"path": "background.discovery.includeKonachan", "page": "wallpaper", "section": "Wallpaper discovery", "title": "Include Konachan anime in the mix", "kind": "toggle"},
     {"path": "background.discovery.rotate", "page": "wallpaper", "section": "Wallpaper discovery", "title": "Rotate wallpapers automatically", "kind": "toggle", "description": "Starts wallpaper downloads at the selected interval."},
-    {"path": "background.discovery.intervalMinutes", "page": "wallpaper", "section": "Wallpaper discovery", "title": "Rotation interval (minutes)", "kind": "number", "description": "Automatic discovery uses at least 15 minutes between wallpapers.", "min": 15, "max": 1440, "step": 15, "scale": 1},
+    {"path": "background.discovery.intervalMinutes", "page": "wallpaper", "section": "Wallpaper discovery", "title": "Wallpaper rotation interval", "kind": "number", "description": "Automatic discovery uses at least 15 minutes between wallpapers.", "min": 15, "max": 1440, "step": 15, "scale": 1, "unit": "min"},
     {"path": "background.discovery.prefetchCount", "page": "wallpaper", "section": "Offline & preview queue", "title": "Prefetch batch size", "kind": "number", "description": "Download this many originals for preview without changing the wallpaper or colors.", "min": 1, "max": 24, "step": 1, "scale": 1},
     {"path": "background.discovery.prefetchAhead", "page": "wallpaper", "section": "Offline & preview queue", "title": "Keep the offline queue filled", "kind": "toggle", "description": "While automatic rotation is enabled, refill the queue in the background when fewer than two images remain. Rotation uses these saved originals first."},
     {"path": "background.discovery.storageLimitMiB", "page": "wallpaper", "section": "Saved wallpaper storage", "title": "Wallpaper storage limit (MiB)", "kind": "number", "description": "Oldest unkept downloads are removed when space is needed. Current and kept wallpapers are protected; new downloads pause if they fill the limit.", "min": 64, "max": 32768, "step": 64, "scale": 1},
@@ -208,7 +209,7 @@ var entries = [
     {"path": "bar.autoHide.hoverRegionWidth", "page": "bar", "section": "Auto-hide", "title": "Hover Region Width", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
     {"path": "bar.autoHide.pushWindows", "page": "bar", "section": "Auto-hide", "title": "Push Windows", "kind": "toggle"},
     {"path": "bar.autoHide.showWhenPressingSuper.enable", "page": "bar", "section": "Auto-hide", "title": "Enable", "kind": "toggle"},
-    {"path": "bar.autoHide.showWhenPressingSuper.delay", "page": "bar", "section": "Auto-hide", "title": "Delay", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
+    {"path": "bar.autoHide.showWhenPressingSuper.delay", "page": "bar", "section": "Auto-hide", "title": "Show bar delay", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1, "unit": "ms", "description": "How long to hold Super before the hidden bar appears."},
     {"path": "bar.bottom", "page": "bar", "section": "Bar layout", "title": "Place horizontal bar at bottom", "kind": "toggle", "description": "Disable to place it at the top. Vertical layout has its own orientation."},
     {"path": "bar.cornerStyle", "page": "bar", "section": "Bar layout", "title": "Corner Style", "kind": "choice", "min": 0, "max": 10000, "step": 1, "scale": 1, "choices": [{"value": 0, "label": "Hug screen"}, {"value": 1, "label": "Floating"}, {"value": 2, "label": "Rectangle"}]},
     {"path": "bar.floatStyleShadow", "page": "bar", "section": "Bar layout", "title": "Float Style Shadow", "kind": "toggle"},
@@ -219,9 +220,9 @@ var entries = [
     {"path": "bar.vertical", "page": "bar", "section": "Bar layout", "title": "Use a vertical bar", "kind": "toggle", "description": "Switch between horizontal and vertical layout."},
     {"path": "bar.resources.alwaysShowSwap", "page": "bar", "section": "Resource warnings", "title": "Always show swap usage", "kind": "toggle", "description": "Otherwise the indicator follows its normal visibility rules."},
     {"path": "bar.resources.alwaysShowCpu", "page": "bar", "section": "Resource warnings", "title": "Always show CPU usage", "kind": "toggle", "description": "Otherwise the indicator follows its normal visibility rules."},
-    {"path": "bar.resources.memoryWarningThreshold", "page": "bar", "section": "Resource warnings", "title": "Memory Warning Threshold", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1},
-    {"path": "bar.resources.swapWarningThreshold", "page": "bar", "section": "Resource warnings", "title": "Swap Warning Threshold", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1},
-    {"path": "bar.resources.cpuWarningThreshold", "page": "bar", "section": "Resource warnings", "title": "Cpu Warning Threshold", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1},
+    {"path": "bar.resources.memoryWarningThreshold", "page": "bar", "section": "Resource warnings", "title": "Memory usage warning", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1, "suffix": "%", "description": "Highlight when used RAM reaches this percentage. Reclaimable memory is counted as available."},
+    {"path": "bar.resources.swapWarningThreshold", "page": "bar", "section": "Resource warnings", "title": "Swap usage warning", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1, "suffix": "%", "description": "Highlight when used swap reaches this percentage across all swap devices. This is a usage cue, not a memory-pressure measurement."},
+    {"path": "bar.resources.cpuWarningThreshold", "page": "bar", "section": "Resource warnings", "title": "CPU usage warning", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1, "suffix": "%", "description": "Highlight when total CPU utilization reaches this percentage across all logical CPUs."},
     {"path": "bar.screenList", "page": "bar", "section": "Bar layout", "title": "Show bar on these outputs", "kind": "lines", "description": "One output name per line. Empty uses every connected output."},
     {"path": "bar.utilButtons.showScreenSnip", "page": "bar", "section": "Utility buttons", "title": "Screen snip", "kind": "toggle"},
     {"path": "bar.utilButtons.showColorPicker", "page": "bar", "section": "Utility buttons", "title": "Color picker", "kind": "toggle"},
@@ -240,7 +241,7 @@ var entries = [
     {"path": "bar.weather.enableGPS", "page": "bar", "section": "Bar weather", "title": "Locate weather automatically", "kind": "toggle", "description": "Disable to use the city entered below."},
     {"path": "bar.weather.city", "page": "bar", "section": "Bar weather", "title": "Weather city", "kind": "text", "description": "Used when automatic location is off.", "when": [["bar.weather.enableGPS", false]]},
     {"path": "bar.weather.useUSCS", "page": "bar", "section": "Bar weather", "title": "Use Fahrenheit and US units", "kind": "toggle", "description": "Applies to the shared weather service."},
-    {"path": "bar.weather.fetchInterval", "page": "bar", "section": "Bar weather", "title": "Polling interval (m)", "kind": "number", "min": 5.0, "max": 50.0, "step": 1, "scale": 1},
+    {"path": "bar.weather.fetchInterval", "page": "bar", "section": "Bar weather", "title": "Weather refresh interval", "kind": "number", "min": 5.0, "max": 50.0, "step": 1, "scale": 1, "unit": "min", "description": "Time between network weather requests. 15 minutes keeps the weather useful without polling every few minutes."},
     {"path": "bar.indicators.notifications.showUnreadCount", "page": "notifications", "section": "On-screen feedback", "title": "Unread indicator: show count", "kind": "toggle"},
     {"path": "bar.tooltips.clickToShow", "page": "bar", "section": "Bar tooltips", "title": "Click to show", "kind": "toggle"},
     {"path": "battery.low", "page": "session", "section": "Battery warnings & suspend", "title": "Low warning", "kind": "number", "min": 0, "max": 101, "step": 1, "scale": 1},
@@ -268,7 +269,7 @@ var entries = [
     {"path": "dock.pinnedApps", "page": "workspaces", "section": "Application dock", "title": "Pinned dock applications", "kind": "lines", "description": "One desktop application ID per line, in display order."},
     {"path": "dock.ignoredAppRegexes", "page": "workspaces", "section": "Application dock", "title": "Ignored App Regexes", "kind": "lines"},
     {"path": "interactions.scrolling.fasterTouchpadScroll", "page": "advanced", "section": "Scrolling & edge input", "title": "Faster Touchpad Scroll", "kind": "toggle"},
-    {"path": "interactions.scrolling.mouseScrollDeltaThreshold", "page": "advanced", "section": "Scrolling & edge input", "title": "Mouse Scroll Delta Threshold", "kind": "number", "min": 1, "max": 1200, "step": 1, "scale": 1},
+    {"path": "interactions.scrolling.mouseScrollDeltaThreshold", "page": "advanced", "section": "Scrolling & edge input", "title": "Mouse wheel step threshold", "kind": "number", "min": 1, "max": 1200, "step": 1, "scale": 1, "suffix": "units", "description": "Wheel angle-delta units used to distinguish a mouse notch from touchpad scrolling. A standard notch is 120 units."},
     {"path": "interactions.scrolling.mouseScrollFactor", "page": "advanced", "section": "Scrolling & edge input", "title": "Mouse Scroll Factor", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
     {"path": "interactions.scrolling.touchpadScrollFactor", "page": "advanced", "section": "Scrolling & edge input", "title": "Touchpad Scroll Factor", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
     {"path": "interactions.deadPixelWorkaround.enable", "page": "advanced", "section": "Scrolling & edge input", "title": "Enable", "kind": "toggle"},
@@ -293,10 +294,10 @@ var entries = [
     {"path": "lock.materialShapeChars", "page": "session", "section": "Lock screen", "title": "Material Shape Chars", "kind": "toggle"},
     {"path": "media.filterDuplicatePlayers", "page": "audio", "section": "Media players", "title": "Filter Duplicate Players", "kind": "toggle"},
     {"path": "networking.userAgent", "page": "advanced", "section": "Other preferences", "title": "Service user agent", "kind": "text", "description": "Header sent by services that require a browser-like user agent."},
-    {"path": "notifications.timeout", "page": "notifications", "section": "Notification popups", "title": "Default popup duration (ms)", "kind": "number", "description": "Used when the application does not provide its own timeout.", "min": 1000.0, "max": 60000.0, "step": 1, "scale": 1},
+    {"path": "notifications.timeout", "page": "notifications", "section": "Notification popups", "title": "Default popup duration", "kind": "number", "description": "Used when the application does not provide its own timeout.", "min": 1000.0, "max": 60000.0, "step": 1, "scale": 1, "unit": "ms"},
     {"path": "notifications.monitor.enable", "page": "notifications", "section": "Notification popups", "title": "Use one notification output", "kind": "toggle", "description": "Choose a connected output below. Otherwise popups can appear on all outputs."},
     {"path": "notifications.monitor.name", "page": "notifications", "section": "Notification popups", "title": "Notification output", "kind": "monitor", "description": "Use the output name shown by your display, for example DP-1.", "when": [["notifications.monitor.enable", true]]},
-    {"path": "osd.timeout", "page": "notifications", "section": "On-screen feedback", "title": "Volume & brightness overlay duration (ms)", "kind": "number", "description": "How long on-screen feedback remains visible.", "min": 100.0, "max": 3000.0, "step": 1, "scale": 1},
+    {"path": "osd.timeout", "page": "notifications", "section": "On-screen feedback", "title": "Volume & brightness overlay duration", "kind": "number", "description": "How long on-screen feedback remains visible.", "min": 100.0, "max": 3000.0, "step": 1, "scale": 1, "unit": "ms"},
     {"path": "osk.layout", "page": "control", "section": "On-screen keyboard", "title": "Current keyboard layout", "kind": "info", "description": "Follows the active Hyprland keyboard layout."},
     {"path": "osk.pinnedOnStartup", "page": "control", "section": "On-screen keyboard", "title": "Pinned On Startup", "kind": "toggle"},
     {"path": "overlay.openingZoomAnimation", "page": "capture", "section": "Floating overlays", "title": "Enable opening zoom animation", "kind": "toggle"},
@@ -322,16 +323,16 @@ var entries = [
     {"path": "regionSelector.circle.strokeWidth", "page": "capture", "section": "Screenshot selection", "title": "Stroke width", "kind": "number", "min": 1.0, "max": 20.0, "step": 1, "scale": 1},
     {"path": "regionSelector.circle.padding", "page": "capture", "section": "Screenshot selection", "title": "Padding", "kind": "number", "min": 0.0, "max": 100.0, "step": 1, "scale": 1},
     {"path": "regionSelector.annotation.useSatty", "page": "capture", "section": "Screenshot selection", "title": "Use Satty for annotations", "kind": "toggle", "description": "Requires Satty to be installed; otherwise use the default editor."},
-    {"path": "resources.updateInterval", "page": "bar", "section": "Resource monitoring", "title": "Resource sample interval (ms)", "kind": "number", "description": "The collector enforces a minimum of 250 ms. Smaller values increase polling work.", "min": 250, "max": 60000, "step": 250, "scale": 1},
-    {"path": "resources.historyLength", "page": "bar", "section": "Resource monitoring", "title": "Resource history samples", "kind": "number", "description": "How many recent samples the resource graphs retain.", "min": 2, "max": 600, "step": 1, "scale": 1},
+    {"path": "resources.updateInterval", "page": "bar", "section": "Resource monitoring", "title": "Resource sample interval", "kind": "number", "description": "Refresh CPU, memory, swap, GPU and pressure readings. 1000 ms suits a responsive desktop; the minimum is 250 ms.", "min": 250, "max": 60000, "step": 250, "scale": 1, "unit": "ms"},
+    {"path": "resources.historyLength", "page": "bar", "section": "Resource monitoring", "title": "Resource history samples", "kind": "number", "description": "Samples retained per resource graph. 60 samples at 1000 ms cover about one minute.", "min": 2, "max": 600, "step": 1, "scale": 1, "suffix": "samples"},
     {"path": "tray.monochromeIcons", "page": "bar", "section": "System tray", "title": "Monochrome Icons", "kind": "toggle"},
     {"path": "tray.showItemId", "page": "bar", "section": "System tray", "title": "Show Item Id", "kind": "toggle"},
     {"path": "tray.invertPinnedItems", "page": "bar", "section": "System tray", "title": "Invert Pinned Items", "kind": "toggle"},
     {"path": "tray.pinnedItems", "page": "bar", "section": "System tray", "title": "Pinned Items", "kind": "lines"},
     {"path": "tray.filterPassive", "page": "bar", "section": "System tray", "title": "Filter Passive", "kind": "toggle"},
-    {"path": "musicRecognition.timeout", "page": "audio", "section": "Music recognition", "title": "Total duration timeout (s)", "kind": "number", "min": 10.0, "max": 100.0, "step": 1, "scale": 1},
-    {"path": "musicRecognition.interval", "page": "audio", "section": "Music recognition", "title": "Polling interval (s)", "kind": "number", "min": 2.0, "max": 10.0, "step": 1, "scale": 1},
-    {"path": "search.nonAppResultDelay", "page": "launcher", "section": "Launcher search", "title": "Non App Result Delay", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
+    {"path": "musicRecognition.timeout", "page": "audio", "section": "Music recognition", "title": "Music recognition time limit", "kind": "number", "min": 10.0, "max": 100.0, "step": 1, "scale": 1, "unit": "s"},
+    {"path": "musicRecognition.interval", "page": "audio", "section": "Music recognition", "title": "Music recognition check interval", "kind": "number", "min": 2.0, "max": 10.0, "step": 1, "scale": 1, "unit": "s"},
+    {"path": "search.nonAppResultDelay", "page": "launcher", "section": "Launcher search", "title": "Non-app search delay", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1, "unit": "ms", "description": "Wait after typing before loading non-app search results."},
     {"path": "search.engineBaseUrl", "page": "launcher", "section": "Launcher search", "title": "Engine Base Url", "kind": "text"},
     {"path": "search.excludedSites", "page": "launcher", "section": "Launcher search", "title": "Excluded Sites", "kind": "lines"},
     {"path": "search.sloppy", "page": "launcher", "section": "Launcher search", "title": "Use Levenshtein distance-based algorithm instead of fuzzy", "kind": "toggle"},
@@ -347,7 +348,7 @@ var entries = [
     {"path": "search.imageSearch.useCircleSelection", "page": "capture", "section": "Save & search images", "title": "Use Circle Selection", "kind": "toggle"},
     {"path": "sidebar.keepRightSidebarLoaded", "page": "control", "section": "Panel loading", "title": "Keep control center ready", "kind": "toggle", "description": "Keeps its content loaded while closed, trading memory for faster opening."},
     {"path": "sidebar.translator.enable", "page": "services", "section": "Translator", "title": "Show translator in left sidebar", "kind": "toggle", "description": "Translation uses the language settings below."},
-    {"path": "sidebar.translator.delay", "page": "services", "section": "Translator", "title": "Translation typing delay (ms)", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1, "description": "Wait after typing before sending a translation request."},
+    {"path": "sidebar.translator.delay", "page": "services", "section": "Translator", "title": "Translation typing delay", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1, "description": "Wait after typing before sending a translation request.", "unit": "ms"},
     {"path": "sidebar.ai.textFadeIn", "page": "services", "section": "Sidebar assistant", "title": "Text Fade In", "kind": "toggle"},
     {"path": "sidebar.booru.limit", "page": "services", "section": "Image providers", "title": "Limit", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
     {"path": "sidebar.booru.zerochan.username", "page": "services", "section": "Image providers", "title": "Username", "kind": "text"},
@@ -375,19 +376,19 @@ var entries = [
     {"path": "time.shortDateFormat", "page": "general", "section": "Time & date", "title": "Short Date Format", "kind": "text"},
     {"path": "time.dateWithYearFormat", "page": "general", "section": "Time & date", "title": "Date With Year Format", "kind": "text"},
     {"path": "time.dateFormat", "page": "general", "section": "Time & date", "title": "Date Format", "kind": "text"},
-    {"path": "time.pomodoro.breakTime", "page": "general", "section": "Focus timer", "title": "Break Time", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
+    {"path": "time.pomodoro.breakTime", "page": "general", "section": "Focus timer", "title": "Short break duration", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1, "unit": "s"},
     {"path": "time.pomodoro.cyclesBeforeLongBreak", "page": "general", "section": "Focus timer", "title": "Cycles Before Long Break", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
-    {"path": "time.pomodoro.focus", "page": "general", "section": "Focus timer", "title": "Focus", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
-    {"path": "time.pomodoro.longBreak", "page": "general", "section": "Focus timer", "title": "Long Break", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
+    {"path": "time.pomodoro.focus", "page": "general", "section": "Focus timer", "title": "Focus session duration", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1, "unit": "s"},
+    {"path": "time.pomodoro.longBreak", "page": "general", "section": "Focus timer", "title": "Long break duration", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1, "unit": "s"},
     {"path": "time.secondPrecision", "page": "general", "section": "Time & date", "title": "Second precision", "kind": "toggle"},
-    {"path": "updates.enableCheck", "page": "advanced", "section": "Update indicators", "title": "Enable update checks", "kind": "toggle"},
-    {"path": "updates.checkInterval", "page": "advanced", "section": "Update indicators", "title": "Check Interval", "kind": "number", "min": 1, "max": 100000, "step": 1, "scale": 1},
-    {"path": "updates.adviseUpdateThreshold", "page": "advanced", "section": "Update indicators", "title": "Advise Update Threshold", "kind": "number", "min": 1, "max": 100000, "step": 1, "scale": 1},
-    {"path": "updates.stronglyAdviseUpdateThreshold", "page": "advanced", "section": "Update indicators", "title": "Strongly Advise Update Threshold", "kind": "number", "min": 1, "max": 100000, "step": 1, "scale": 1},
+    {"path": "updates.enableCheck", "page": "advanced", "section": "Update indicators", "title": "Enable update checks", "kind": "toggle", "description": "Check Arch repository updates for the Waffle bar indicator. Does not install updates; the ii layout has no update indicator."},
+    {"path": "updates.checkInterval", "page": "advanced", "section": "Update indicators", "title": "Update check interval", "kind": "number", "min": 1, "max": 100000, "step": 1, "scale": 1, "unit": "min", "description": "Time between repository checks. More frequent checks do not make the interface faster."},
+    {"path": "updates.adviseUpdateThreshold", "page": "advanced", "section": "Update indicators", "title": "Suggest updates above", "kind": "number", "min": 1, "max": 100000, "step": 1, "scale": 1, "suffix": "packages", "description": "Show the Waffle update indicator when more than this many repository packages have updates."},
+    {"path": "updates.stronglyAdviseUpdateThreshold", "page": "advanced", "section": "Update indicators", "title": "Strong update warning above", "kind": "number", "min": 1, "max": 100000, "step": 1, "scale": 1, "suffix": "packages", "description": "Use the warning color above this package count. The count does not measure update urgency or security severity."},
     {"path": "wallpaperSelector.useSystemFileDialog", "page": "wallpaper", "section": "Wallpaper picker", "title": "Use the system wallpaper dialog", "kind": "toggle", "description": "Choose between the shell picker and the platform file dialog."},
     {"path": "windows.showTitlebar", "page": "advanced", "section": "Shell window decorations", "title": "Show Titlebar", "kind": "toggle"},
     {"path": "windows.centerTitle", "page": "advanced", "section": "Shell window decorations", "title": "Center Title", "kind": "toggle"},
-    {"path": "hacks.arbitraryRaceConditionDelay", "page": "advanced", "section": "Other preferences", "title": "Arbitrary Race Condition Delay", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1},
+    {"path": "hacks.arbitraryRaceConditionDelay", "page": "advanced", "section": "Other preferences", "title": "Deferred shell action delay", "kind": "number", "min": 0, "max": 10000, "step": 1, "scale": 1, "unit": "ms", "description": "Debounce clipboard and theme refreshes, and settle dragged overview windows. 100 ms avoids a noticeable one-second wait."},
     {"path": "workSafety.enable.wallpaper", "page": "advanced", "section": "Contextual privacy", "title": "Hide sussy/anime wallpapers", "kind": "toggle"},
     {"path": "workSafety.enable.clipboard", "page": "advanced", "section": "Contextual privacy", "title": "Hide clipboard images copied from sussy sources", "kind": "toggle"},
     {"path": "workSafety.triggerCondition.networkNameKeywords", "page": "advanced", "section": "Contextual privacy", "title": "Network Name Keywords", "kind": "lines"},
@@ -422,7 +423,7 @@ var managed = {
 function canonicalPage(id) { return ["effects", "fonts"].indexOf(id) >= 0 ? "design" : id; }
 function page(id) { id = canonicalPage(id); return pages.find(function(p) { return p.id === id; }) || pages[0]; }
 function matches(entry, query) {
-    var haystack = [entry.title, entry.description || "", entry.section || "", entry.path || "", page(entry.page).title].join(" ").toLowerCase();
+    var haystack = [entry.title, entry.description || "", entry.section || "", entry.path || "", entry.unit || "", timeUnits[entry.unit] || "", page(entry.page).title].join(" ").toLowerCase();
     return query.trim().toLowerCase().split(/\s+/).every(function(word) { return haystack.indexOf(word) >= 0; });
 }
 function sections(pageId, query) {
@@ -443,18 +444,21 @@ function sections(pageId, query) {
 }
 
 var destinations = [
+    {page:"control", title:"VRR by monitor", description:"display variable refresh rate FreeSync Adaptive Sync per monitor Off Always fullscreen games video global policy GPU actual state flicker"},
     {page:"agents", title:"AI sessions and workloads", description:"Codex agent session thread ID PID CPU RAM RSS swap virtual memory child process tmux Haven SSH terminal Kitty monitor"},
+    {page:"agents", title:"Codex session notifications", description:"Codex notification full response expand ellipsis dots open focus terminal Kitty tmux detached resume reopen session master off"},
     {page:"storage", title:"Disk space alerts & build cleanup", description:"storage disk disks NVMe SSD SATA HDD Btrfs btrfs-stat capacity free space full warning forecast Gradle compiler caches trash cleanup preview master off"},
     {page:"cryod", title:"CryoD desktop integration", description:"memory foreground focus mode cpu priority gpu latency boost visible windows monitor workload protection session bridge master off app application launcher groups freeze freezer allow deny preference consent"},
     {page:"company", title:"PC reconnection alerts", description:"remote Windows PC SSH online reconnect connection monitor polling desktop notification watcher arm stop"},
     {page:"company", title:"Company password reset alerts", description:"Imak Microsoft 365 Entra SSPR password reset recovery registration audit logs notifications master toggle"},
     {page:"memory", title:"OOM kill notifications", description:"memory pressure kernel systemd-oomd PID killed LMKD log notifications alerts history"},
     {page:"audio", title:"Eden volume boost widget", description:"Mario Kart MK8DX double-click +12 dB game only loudness current preset reset"},
-    {page:"memory", title:"Memory locks, RSS & process search", description:"noswap swap RAM RSS resident memory large usage sort PID process name search suggested lock unlock release group tree protection reminders locked paging"},
+    {page:"audio", title:"Music loudness controls", description:"quiet songs gain boost volume plus minus limiter EasyEffects match LUFS target step reset master off app picker Firefox browser selected application auto match loudness automatic normalization normalisation interval"},
+    {page:"memory", title:"Memory locks, RSS & process search", description:"noswap swap RAM RSS resident memory large usage sort PID process name search suggested lock unlock release group tree protection reminders locked paging saved names future launches startup automatic matching shared group permissions mpv qs easyeffects pipewire wireplumber draft batch apply all discard selection"},
     {page:"mail", title:"Mail accounts and smart actions", description:"Thunderbird email notifications 2FA OTP verification codes links add accounts master toggle"},
     {page:"design", title:"Color mode, palette & desktop effects", description:"Matugen Monet Material light dark palette accent saved looks, blur, glow, borders, opacity, transparency, springs, animation, workspace motion and presets"},
     {page:"fonts", title:"Desktop font profiles", description:"fontctl presets, typefaces, font preview, compact 10 pt, system fonts, Kitty fonts"},
-    {page:"audio", title:"Automatic music EQ", description:"James Control Spotify Jukebox song artist genre automatic EasyEffects presets music EQ on off"},
+    {page:"audio", title:"Automatic music EQ", description:"James Control Spotify Jukebox mpv osu osu!lazer game audio song artist genre automatic EasyEffects presets music EQ on off"},
     {page:"audio", title:"Spatial audio for mpv", description:"Dolby Atmos binaural surround headphones multichannel m4a mpv F8 spatial switch on off"},
     {page:"audio", title:"EasyEffects presets", description:"Equalizer, music, audio processing, output preset and EasyEffects"},
     {page:"wallpaper", title:"Wallpaper discovery", description:"Choose wallpaper, download, discover, offline queue, rotation, restore, saved library"}

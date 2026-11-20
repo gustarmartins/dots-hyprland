@@ -11,6 +11,8 @@ QtObject {
     property bool hasStatusText: true
     property bool available: true
     property bool toggled: false
+    // Views can retain the model while hidden without retaining its polling.
+    property bool pollingEnabled: true
 
     // Interactions
     required property var mainAction

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run under dbus-run-session; exercise the actual notification service."""
-import json, os, pathlib, subprocess, tempfile, time
+import json, os, pathlib, subprocess, tempfile, time, sqlite3, contextlib
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
@@ -11,7 +11,11 @@ runtime=pathlib.Path(tempfile.mkdtemp(prefix="qs-notify-"))
 history=run/"history.json"
 saved=[dict(notificationId=40,actions=[],appIcon="dialog-information",appName="Saved",body="preserved",image="image://qsimage/73/1",summary="expired image",time=1,urgency="1"),dict(notificationId=41,actions=[],appIcon="dialog-information",appName="Saved",body="keep this",image="file:///tmp/durable-history.png",summary="durable image",time=2,urgency="1")]
 history.write_text(json.dumps(saved))
-env=os.environ.copy();env.update(QT_QPA_PLATFORM="offscreen",XDG_RUNTIME_DIR=str(runtime),TEST_HISTORY=str(history))
+private=run/"home";private.mkdir()
+account=private/".codex";account.mkdir()
+configuration=private/"config/codex-notify";configuration.mkdir(parents=True)
+(configuration/"config.json").write_text('{"enabled":true}')
+env=os.environ.copy();env.update(QT_QPA_PLATFORM="offscreen",QT_QPA_PLATFORMTHEME="",XDG_RUNTIME_DIR=str(runtime),TEST_HISTORY=str(history),HOME=str(private),XDG_CONFIG_HOME=str(private/"config"),XDG_STATE_HOME=str(private/"state"),CODEX_HOME=str(account))
 for key in ["DISPLAY","WAYLAND_DISPLAY"]:env.pop(key,None)
 fixture=BASE/"notification-fixture/shell.qml"
 checks=[]; process=None; log=None; logs=[]
@@ -85,6 +89,22 @@ try:
  until(lambda:bool(actions));check("notification action reaches sender",(native,"accept") in actions)
  check("action dismisses record",not state()["list"])
  n=notify("missing action",0);call("action",record(n)["id"],"obsolete");check("obsolete action is safe",not state()["list"])
+ # The official Codex JSON hook carries the full body and a durable account-specific route.
+ tid="20000000-1111-2222-3333-444444444444"
+ with contextlib.closing(sqlite3.connect(account/"state_5.sqlite")) as db:
+  db.execute("CREATE TABLE threads(id,cwd,name,model,reasoning_effort,archived,rollout_path,agent_path)")
+  db.execute("INSERT INTO threads VALUES(?,?,?,?,?,?,?,?)",(tid,str(private),"Full response fixture","fixture","high",0,str(history),"/root"));db.commit()
+ body="Full response <literal> & preserved.\n"*70
+ event=json.dumps({"type":"agent-turn-complete","thread-id":tid,"last-assistant-message":body,"input-messages":["never display this private prompt"]})
+ helper=BASE.parent/"dots/.local/bin/codex-notify"
+ emitted=json.loads(subprocess.check_output([str(helper),"emit",event],env=env,text=True))
+ routed=record(emitted["notification_id"])
+ check("Codex hook sends full escaped response without private inputs",len(routed["body"])>2000 and "&lt;literal&gt;" in routed["body"] and "private prompt" not in routed["body"])
+ token=routed["codexRoute"]
+ check("Codex notification has visible session action",len(token)==32 and routed["actions"]==[{"identifier":"default","text":"Open session"}])
+ call("reload");until(lambda:state()["ready"] and any(n["codexRoute"]==token and n["nativeId"]==-1 for n in state()["list"]))
+ check("Codex session action survives native sender exit and shell reload",any(n["codexRoute"]==token and n["actions"] for n in state()["list"]))
+ call("clear")
  # A burst shorter than one flush interval should not serialize every event.
  writes=[];last=history.stat().st_mtime_ns
  for i in range(40):

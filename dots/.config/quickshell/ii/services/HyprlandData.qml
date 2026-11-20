@@ -15,9 +15,37 @@ Singleton {
     id: root
     // Keep the compatibility snapshots used by existing widgets, while the
     // native service owns discovery, object lifetimes and IPC connections.
-    readonly property var windowList: Hyprland.toplevels.values
-        .map(toplevel => toplevel?.lastIpcObject)
-        .filter(win => win?.address && win.size?.length === 2);
+    readonly property var nativeToplevels: Hyprland.toplevels.values
+    property var windowList: []
+    // Native refreshes publish each window separately. Re-reading every full
+    // QVariantMap from a binding for each publication made one N-window reply
+    // rebuild the entire compatibility model N times, including all consumers.
+    // Observe changes without converting the maps; publish once after the batch.
+    onNativeToplevelsChanged: windowSnapshotTimer.restart()
+    Variants {
+        model: root.nativeToplevels
+        Scope {
+            required property var modelData
+            Connections {
+                target: modelData
+                function onLastIpcObjectChanged() { windowSnapshotTimer.restart(); }
+            }
+        }
+    }
+    function refreshWindowSnapshot() {
+        root.windowList = root.nativeToplevels.map(toplevel => {
+            const win = toplevel?.lastIpcObject;
+            if (!win?.address || win.size?.length !== 2) return null;
+            // Title events update the native title directly. They do not need
+            // another full clients request just to copy a spinner into JSON.
+            return Object.assign({}, win, {title: toplevel.title});
+        }).filter(win => win !== null);
+    }
+    Timer {
+        id: windowSnapshotTimer
+        interval: 0
+        onTriggered: root.refreshWindowSnapshot()
+    }
     readonly property var addresses: windowList.map(win => win.address)
     readonly property var windowByAddress: windowList.reduce((map, win) => { map[win.address] = win; return map; }, {})
     readonly property var workspaces: Hyprland.workspaces.values
@@ -51,6 +79,7 @@ Singleton {
         function status(): string {
             return JSON.stringify({
                 eventAgeMs: root.lastEventAt ? Date.now() - root.lastEventAt : -1,
+                snapshotWindowCount: root.windowList.length,
                 focusedWorkspace: Hyprland.focusedWorkspace?.id ?? -1,
                 monitors: Hyprland.monitors.values.map(mon => ({
                     name: mon.name, workspace: mon.activeWorkspace?.id ?? -1,
@@ -155,7 +184,7 @@ Singleton {
     Timer {
         id: titleRefreshThrottle
         interval: 250
-        onTriggered: root.updateWindowList()
+        onTriggered: root.refreshWindowSnapshot()
     }
 
     property bool layersPending: false

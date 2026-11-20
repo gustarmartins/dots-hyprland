@@ -156,6 +156,7 @@ Item {
             }
 
             EdenBoostWidget { Layout.fillWidth: true; visible: EdenAudioBoost.enabled && !root.showingNotifications && !root.showingWidgets && !root.editMode }
+            MusicLoudnessWidget { Layout.fillWidth: true; visible: MusicLoudness.enabled && !root.showingNotifications && !root.showingWidgets && !root.editMode }
 
             Loader {
                 id: slidersLoader

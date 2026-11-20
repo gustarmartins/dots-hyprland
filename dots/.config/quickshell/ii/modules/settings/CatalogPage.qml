@@ -6,6 +6,7 @@ import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
 import "SettingsCatalog.js" as Catalog
+import qs.modules.ii.sidebarRight.quickToggles
 
 ScrollView {
     id: root
@@ -15,6 +16,12 @@ ScrollView {
     signal edited(string path)
     signal navigate(string page)
     readonly property var groups: Catalog.sections(query.trim() ? "" : pageId, query)
+    function showMemoryReview() {
+        if (pageId === "memory" && extra.item) {
+            extra.item.showReview();
+            contentItem.contentY = 0;
+        }
+    }
     onPageIdChanged: Qt.callLater(() => { if (contentItem) contentItem.contentY = 0; })
     onQueryChanged: Qt.callLater(() => { if (contentItem) contentItem.contentY = 0; })
     contentWidth: availableWidth
@@ -29,8 +36,8 @@ ScrollView {
             Layout.fillWidth: true
             Layout.leftMargin: 20
             Layout.rightMargin: 20
-            active: !root.query.trim() && ["agents", "fonts", "wallpaper", "audio", "mail", "memory", "company", "cryod", "storage"].includes(root.pageId)
-            sourceComponent: root.pageId === "agents" ? agentPage : root.pageId === "storage" ? storagePage : root.pageId === "cryod" ? cryodPage : root.pageId === "company" ? companyPage : root.pageId === "memory" ? memoryPage : root.pageId === "mail" ? mailPage : root.pageId === "fonts" ? fontPage : root.pageId === "audio" ? audioPage : wallpaperPage
+            active: !root.query.trim() && ["control", "agents", "fonts", "wallpaper", "audio", "mail", "memory", "company", "cryod", "storage"].includes(root.pageId)
+            sourceComponent: root.pageId === "control" ? vrrPage : root.pageId === "agents" ? agentPage : root.pageId === "storage" ? storagePage : root.pageId === "cryod" ? cryodPage : root.pageId === "company" ? companyPage : root.pageId === "memory" ? memoryPage : root.pageId === "mail" ? mailPage : root.pageId === "fonts" ? fontPage : root.pageId === "audio" ? audioPage : wallpaperPage
         }
         Repeater {
             model: root.query.trim() ? Catalog.destinations.filter(e => Catalog.matches(e, root.query)) : []
@@ -75,6 +82,7 @@ ScrollView {
     }
     Timer { id: colorTimer; interval: 500; onTriggered: { Config.flushPendingWrites(); Quickshell.execDetached([Directories.wallpaperSwitchScriptPath, "--noswitch"]); } }
     Component { id: agentPage; AgentSessions {} }
+    Component { id: vrrPage; VrrPanel { implicitHeight: 226 } }
     Component { id: storagePage; StorageActions {} }
     Component { id: cryodPage; CryoDSettings {} }
     Component { id: companyPage; CompanyTools {} }

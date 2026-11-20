@@ -35,7 +35,7 @@ QuickToggleModel {
 
     Process {
         id: fetchActiveState
-        running: true
+        running: false
         command: ["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec zram-algo-mode.sh status"]
         stdout: StdioCollector {
             onStreamFinished: {
@@ -54,8 +54,9 @@ QuickToggleModel {
 
     Timer {
         interval: 3000
-        running: true
+        running: root.pollingEnabled
         repeat: true
+        triggeredOnStart: true
         onTriggered: fetchActiveState.running = true
     }
 

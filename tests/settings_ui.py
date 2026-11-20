@@ -15,6 +15,8 @@ import tempfile
 import time
 
 REPO = Path(__file__).resolve().parents[1]
+# Test the engine directly; user launch wrappers may enter shared service scopes.
+QS = os.environ.get('QS_TEST_BINARY', '/usr/bin/qs')
 OUT = Path(tempfile.mkdtemp(prefix='settings-ui-'))
 RUNTIME = OUT / 'runtime'
 RUNTIME.mkdir(mode=0o700)
@@ -146,13 +148,15 @@ for key in ['WAYLAND_DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE']:
 env.update(HOME=str(OUT), XDG_CONFIG_HOME=str(OUT / 'config'),
            XDG_DATA_HOME=str(OUT / 'data'), XDG_CACHE_HOME=str(OUT / 'cache'),
            XDG_STATE_HOME=str(OUT / 'state'), XDG_RUNTIME_DIR=str(RUNTIME),
-           QT_QPA_PLATFORM='xcb', QT_QUICK_BACKEND='software')
+           QT_QPA_PLATFORM='xcb', QT_QUICK_BACKEND='software',
+           QT_NO_XDG_DESKTOP_PORTAL='1', NO_AT_BRIDGE='1', XDG_CURRENT_DESKTOP='test')
 # Keep D-Bus-activated optional services inside the same disposable environment.
 assert '/run/user/' + str(os.getuid()) + '/bus' not in env.get('DBUS_SESSION_BUS_ADDRESS', ''), 'Use dbus-run-session'
 env.update(WAYLAND_DISPLAY='', HYPRLAND_INSTANCE_SIGNATURE='')
 subprocess.run(['dbus-update-activation-environment', 'HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME',
                 'XDG_CACHE_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'WAYLAND_DISPLAY',
-                'HYPRLAND_INSTANCE_SIGNATURE', 'DISPLAY', 'QT_QPA_PLATFORM'], env=env, check=True)
+                'HYPRLAND_INSTANCE_SIGNATURE', 'DISPLAY', 'QT_QPA_PLATFORM',
+                'QT_NO_XDG_DESKTOP_PORTAL', 'NO_AT_BRIDGE', 'XDG_CURRENT_DESKTOP'], env=env, check=True)
 entry = OUT / 'config/quickshell/ii/settings.qml'
 # UI inspection is injected into the disposable copy, never the production app.
 probe = r'''
@@ -174,7 +178,7 @@ probe = r'''
         function locate(name: string): string {
             const node = root.testFind(name); if (!node) return "null";
             const at = node.mapToItem(null, node.width / 2, node.height / 2);
-            return JSON.stringify({x:at.x,y:at.y,width:node.width,height:node.height,enabled:node.enabled,checked:node.checked ?? null,text:node.text ?? ""});
+            return JSON.stringify({x:at.x,y:at.y,width:node.width,height:node.height,visible:node.visible,enabled:node.enabled,checked:node.checked ?? null,text:node.text ?? "",accessibleName:node.Accessible.name ?? "",error:node.error ?? ""});
         }
         function text(name: string, value: string): void { const node=root.testFind(name); if (node) node.text=value; }
         function reveal(name: string): void {
@@ -197,12 +201,12 @@ probe = r'''
 source = entry.read_text()
 entry.write_text(source[:source.rfind('}')] + probe + '\n}\n')
 log = (OUT / 'settings.log').open('w')
-process = subprocess.Popen(['qs', '-p', str(entry)], env=env, stdout=log, stderr=subprocess.STDOUT)
+process = subprocess.Popen([QS, '-p', str(entry)], env=env, stdout=log, stderr=subprocess.STDOUT)
 print('ARTIFACTS', OUT, flush=True)
 
 
 def call(target, *args):
-    return subprocess.check_output(['qs', '-p', str(entry), 'ipc', 'call', target, *args],
+    return subprocess.check_output([QS, '-p', str(entry), 'ipc', 'call', target, *args],
                                    env=env, text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
 
 
@@ -258,7 +262,7 @@ def screenshot(name):
 
 
 try:
-    until(lambda: json.loads(call('settings', 'status'))['ready'])
+    until(lambda: json.loads(call('settings', 'status'))['ready'], timeout=60)
     time.sleep(.3)
     assert json.loads(call('settings','status'))['page']=='design'
     assert json.loads(call('settings','status'))['pages'][0]=='design'
@@ -310,6 +314,31 @@ try:
     assert config.read_bytes() == initial_bytes, 'Opening pages wrote configuration'
     assert json.loads(config.read_text()) == baseline
     assert json.loads(mail_config.read_text()) == mail_initial, 'Browsing changed mail settings'
+    unit_fields = {
+        'background.discovery.intervalMinutes':'minutes',
+        'bar.autoHide.showWhenPressingSuper.delay':'milliseconds', 'bar.weather.fetchInterval':'minutes',
+        'notifications.timeout':'milliseconds', 'osd.timeout':'milliseconds', 'resources.updateInterval':'milliseconds',
+        'musicRecognition.timeout':'seconds', 'musicRecognition.interval':'seconds',
+        'search.nonAppResultDelay':'milliseconds', 'sidebar.translator.delay':'milliseconds',
+        'time.pomodoro.breakTime':'seconds', 'time.pomodoro.focus':'seconds', 'time.pomodoro.longBreak':'seconds',
+        'updates.checkInterval':'minutes', 'hacks.arbitraryRaceConditionDelay':'milliseconds',
+    }
+    for path, unit in unit_fields.items():
+        select(path)
+        label=json.loads(call('test','locate','unit:'+path))
+        number=json.loads(call('test','locate','number:'+path))
+        assert label['visible'] and label['text']==unit and label['width'] > 0, (path,label)
+        assert unit in number['accessibleName'], (path,number)
+        assert float(number['text'])==float(json.loads(call('test','value',path))), 'Unit changed the displayed scale: '+path
+    assert config.read_bytes()==initial_bytes, 'Viewing time units changed stored settings'
+    call('settings','search','milliseconds')
+    until(lambda: json.loads(call('test','locate','setting:resources.updateInterval')))
+    select('resources.updateInterval')
+    call('test','resize','700','600'); time.sleep(.2)
+    unit=json.loads(call('test','locate','unit:resources.updateInterval'))
+    assert unit['x']-unit['width']/2 >= 0 and unit['x']+unit['width']/2 <= 700, unit
+    screenshot('units-compact')
+    call('test','resize','1180','800')
     call('settings', 'open', 'wallpaper')
     assert json.loads(call('test','locate','wallpaperHistoryGrid')) is None
     assert json.loads(call('test','locate','setting:background.discovery.rotate'))
@@ -337,6 +366,7 @@ try:
     type_text('number:resources.updateInterval', '0')
     time.sleep(.2)
     assert read('resources.updateInterval') == 2500, 'Invalid number was saved'
+    assert 'milliseconds' in json.loads(call('test','locate','setting:resources.updateInterval'))['error']
     select('apps.terminal')
     type_text('text:apps.terminal', 'fixture-terminal --flag')
     until(lambda: read('apps.terminal') == 'fixture-terminal --flag')
@@ -374,7 +404,7 @@ try:
     time.sleep(.3)
     screenshot('compact')
     assert not any(x in (OUT / 'settings.log').read_text() for x in ['ReferenceError:', 'TypeError:', 'Unable to assign', 'Binding loop', 'Failed to load configuration'])
-    print('PASS: Design-first color/preset hierarchy, collapsed details, draft/reset/Apply, mode routing, lazy wallpaper library, all pages/read-only browsing, toggle and text persistence, numeric/JSON validation, tile editing, font preview/apply reload, unrelated-value preservation, compact rendering', flush=True)
+    print('PASS: Design-first color/preset hierarchy, collapsed details, draft/reset/Apply, mode routing, lazy wallpaper library, all pages/read-only browsing, 15 explicit time units/accessibility/search/unchanged scales, toggle and text persistence, numeric/JSON validation with units, tile editing, font preview/apply reload, unrelated-value preservation, compact rendering', flush=True)
 finally:
     process.terminate()
     try:

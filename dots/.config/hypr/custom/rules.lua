@@ -23,11 +23,52 @@ rule({
 --     rule({ match = { class = "^(antigravity)$", title = "^(" .. title .. ")$" }, float = true })
 -- end
 
-rule({ match = { class = "^(osu!)$" }, content = "game", idle_inhibit = "always" })
-rule({ match = { class = "^(osu!\\.exe)$" }, immediate = true, content = "game", idle_inhibit = "always", no_vrr = true })
+rule({ match = { class = "^(osu!)$" }, content = "game", idle_inhibit = "always", no_blur = true, no_shadow = true, no_anim = true, opaque = true })
+rule({ match = { class = "^(osu!\\.exe)$" }, immediate = true, content = "game", idle_inhibit = "always", no_vrr = true, no_blur = true, no_shadow = true, no_anim = true, opaque = true })
 rule({ match = { class = "^(osu!\\.exe)$" }, fullscreen = true })
 rule({ match = { tag = "tearing" }, immediate = true, no_vrr = true })
-rule({ match = { class = "^(dev.eden_emu.eden|eden|Eden)$" }, content = "game", idle_inhibit = "always" })
+rule({
+    name = "mekki_gamemode_tag",
+    match = { tag = "gamemode" },
+    content = "game",
+    idle_inhibit = "always",
+    no_blur = true,
+    no_shadow = true,
+    no_anim = true,
+    opaque = true,
+})
+rule({ match = { class = "^(dev\\.eden_emu\\.eden|eden|Eden)$" }, content = "game", idle_inhibit = "always", no_blur = true, no_shadow = true, no_anim = true, opaque = true })
+-- Content is a static rule: match the main window before a game title is loaded.
+rule({
+    name = "mekki_eglantine_game_content",
+    match = { class = "^(dev\\.eglantine\\.eglantine|Eglantine|eglantine)$" },
+    content = "game",
+    idle_inhibit = "always",
+    no_blur = true,
+    no_shadow = true,
+    no_anim = true,
+    opaque = true,
+})
+
+local game_classes_file = io.open(os.getenv("HOME") .. "/.config/hypr/custom/game_classes.txt", "r")
+if game_classes_file then
+    for line in game_classes_file:lines() do
+        local cls = line:match("^%s*(.-)%s*$")
+        if cls ~= "" and not cls:match("^#") then
+            local escaped = cls:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?\\])", "\\%1")
+            rule({
+                match = { class = "^" .. escaped .. "$" },
+                content = "game",
+                idle_inhibit = "always",
+                no_blur = true,
+                no_shadow = true,
+                no_anim = true,
+                opaque = true,
+            })
+        end
+    end
+    game_classes_file:close()
+end
 -- rule({ match = { class = "^(google-chrome-unstable)$" }, immediate = true })
 
 -- Preserve the inherited JetBrains transient-window focus workaround.
@@ -50,4 +91,17 @@ hl.layer_rule({
     name = "mekki_native_glass",
     match = { namespace = "^quickshell:(popup|sidebarLeft|sidebarRight|onScreenDisplay)$" },
     ignore_alpha = 0.01,
+})
+
+-- MKW presentation: avoid desktop decoration work on the game surface.
+rule({
+    name = "mekki_mkw_presentation",
+    match = { class = "^Eglantine$", title = ".*Mario Kart World.*" },
+    content = "game",
+    idle_inhibit = "fullscreen",
+    no_blur = true,
+    no_shadow = true,
+    no_anim = true,
+    rounding = 0,
+    border_size = 0,
 })

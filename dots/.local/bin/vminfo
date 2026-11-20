@@ -26,7 +26,8 @@ Manager keys:
   /             Search by PID, user, UID, name, or command line
   i             Inspect the cursor process
   f / u / x     Force-swap / unswap / signal checked processes
-  m / Esc       Leave manager and restore the prior pause state
+  p / o         Park checked processes / resume a parked group
+  m             Leave manager and restore the prior pause state
 """
 import sys
 import os
@@ -41,6 +42,9 @@ import fcntl
 import fnmatch
 import pwd
 import shlex
+import json
+import math
+import stat
 
 def keyboard_input(prompt=''):
     """Read a keyboard line, excluding terminal events and bracketed paste."""
@@ -355,6 +359,51 @@ def get_psi():
     except Exception:
         pass
     return psi
+
+
+def get_cryod_status():
+    """Read bounded native telemetry; missing or stale data never means Off."""
+    unknown = {'state': 'unavailable', 'detail': 'no current status', 'healthy': False}
+    try:
+        fd = os.open('/run/cryod/status.json',
+                     os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                    or info.st_mode & 0o022 or info.st_size > 256 * 1024):
+                return unknown
+            content = stream.read(256 * 1024 + 1)
+        if len(content) > 256 * 1024:
+            return unknown
+        document = json.loads(content)
+        native = document['native']
+        age = time.time() - float(document['timestamp'])
+        if not math.isfinite(age) or age < -2 or age > 15:
+            return {'state': 'stale', 'detail': 'waiting for fresh status', 'healthy': False}
+        pid = native['owner_pid']
+        if type(pid) is not int or pid <= 0:
+            return unknown
+        identity = read_process_identity(pid)
+        if not identity or identity['uid'] != 0:
+            return {'state': 'unavailable', 'detail': 'owner exited', 'healthy': False}
+        if type(native['effects_enabled']) is not bool or type(native['guard_stale']) is not bool:
+            return unknown
+        version = str(native['version'])
+        if not re.fullmatch(r'[A-Za-z0-9.+_-]{1,48}', version):
+            return unknown
+        reason = str(native['reason'])
+        if not re.fullmatch(r'[a-z0-9_-]{1,96}', reason):
+            return unknown
+        detail = {'shortage-without-stall': 'low RAM; no sustained stalls'}.get(
+            reason, reason.replace('-', ' ').replace('_', ' '))
+        ready = not native['guard_stale'] and native.get('guard_inventory_ready') is True
+        return {'state': 'running' if native['effects_enabled'] else 'observing',
+                'version': version, 'detail': detail if ready else 'guard waiting',
+                'healthy': ready,
+                'freeze': native.get('workload_freezer', {}).get('automatic_enabled'),
+                'cpu': native.get('background_cpu', {}).get('enabled')}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return unknown
 
 
 def _read_zram_stats_unlocked():
@@ -1197,7 +1246,8 @@ def manager_footer_rows(manager, width, count, filter_label):
         ('i', 'inspect', BCYAN), ('1-4', 'view', DIM), ('v', filter_label, DIM),
         ('t', 'CPU ' + _cpu_mode, BCYAN),
         ('+/-', count, DIM), ('f', 'swap', BMAGENTA), ('u', 'unswap', BGREEN),
-        ('x', 'signal', BRED), ('m/Esc', 'exit', DIM),
+        ('p', 'park', DIM), ('o', 'resume', DIM),
+        ('x', 'signal', BRED), ('m', 'exit', DIM),
     ], width)
     if manager.notice:
         rows.append(f" {BYELLOW}{manager.notice}{RESET}")
@@ -1471,6 +1521,19 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     fields = [('10/60/300', f"{color}{s10:.2f}/{s60:.2f}/{s300:.2f}%{RESET}"),
               ('full10', f'{f10:.2f}%')]
     for row in compact_fields('PSI', fields, tw):
+        emit(row)
+
+    # Native telemetry only: this dashboard does not create a policy owner.
+    cryod = get_cryod_status()
+    color = BGREEN if cryod['healthy'] else BYELLOW
+    fields = [('', f"{color}{cryod['state']}{RESET}"),
+              ('', cryod.get('version', '')), ('', cryod['detail'])]
+    if not is_tiny and cryod.get('version'):
+        def enabled_label(value):
+            return 'on' if value is True else 'off' if value is False else '?'
+        fields.extend([('auto-freeze', enabled_label(cryod.get('freeze'))),
+                       ('app CPU', enabled_label(cryod.get('cpu')))])
+    for row in compact_fields('CryoD', [(k, v) for k, v in fields if v], tw):
         emit(row)
 
     # ── Memory Breakdown ────────────────────────────────────────────
@@ -1786,9 +1849,6 @@ def parse_terminal_input(data, in_paste=False, text=False):
             }
             if sequence in csi_keys:
                 keys.append(csi_keys[sequence])
-            elif re.fullmatch(rb'\x1b\[<(64|65);\d+;\d+M', sequence):
-                keys.append('WHEEL_UP' if sequence.startswith(b'\033[<64;')
-                            else 'WHEEL_DOWN')
             pos = end + 1
         elif introducer == ord('O'):
             # SS3 cursor/function-key form, e.g. ESC O A.
@@ -1898,12 +1958,8 @@ class RawTerminal:
             chunks.append(chunk)
 
         if not chunks:
-            if (self.input_buffer == b'\033' and
-                    self.input_buffer_since is not None and
-                    time.monotonic() - self.input_buffer_since >= 0.08):
-                # Keep the prefix to consume a delayed terminal packet safely.
-                self.input_buffer_since = None
-                return ['ESC']
+            # A delayed mouse report may begin with a lone Escape. Never turn
+            # its prefix into a manager-exit command; m leaves manager mode.
             return []
 
         data = self.input_buffer + b''.join(chunks)
@@ -2113,7 +2169,7 @@ def return_to_dashboard(term):
 
 def run_swap_action(op, processes, view_idx, proc_limit, term,
                     preselected=None, expected_identities=None):
-    """Hand confirmed PID/start/UID selections to the existing memory helper."""
+    """Hand selected PID/start/UID selections to the existing memory helper."""
     exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), op)
     term.suspend()
     try:
@@ -2124,14 +2180,19 @@ def run_swap_action(op, processes, view_idx, proc_limit, term,
             return
         print_process_selection(selected)
         print('[!] Applications can stall while their pages move between RAM and swap.')
-        if keyboard_input('Confirm [y/N]: ').strip().casefold() not in {'y', 'yes'}:
-            print('Cancelled.')
-            return
+        # Owner 2026-11-16: execute the selected action without a yes/no step.
+        # if keyboard_input('Confirm [y/N]: ').strip().casefold() not in {'y', 'yes'}:
+        #     print('Cancelled.')
+        #     return
         identities = action_identities(selected, expected_identities)
         if not identities:
             print('[-] No selected process passed identity checks.')
             return
         command = ['sudo', '--', exe, '--yes']
+        if op == 'forceswap':
+            command += ['--on-error', 'skip']
+        elif op == 'unswap':
+            command.append('--_force-resolved')
         if any(identity['uid'] != os.getuid() for identity in identities.values()):
             command.append('--system-wide')
         command += resolved_arguments(identities)
@@ -2220,9 +2281,10 @@ def run_signal_action(processes, view_idx, proc_limit, term,
         sig = normalize_signal(keyboard_input('signal [TERM]: '))
         print_process_selection(selected)
         print(f'[!] Sending {signal_name(sig)} to {len(selected)} selected PID(s).')
-        if keyboard_input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
-            print("Cancelled.")
-            return
+        # Owner 2026-11-16: execute the selected action without a yes/no step.
+        # if keyboard_input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
+        #     print("Cancelled.")
+        #     return
         identities = action_identities(selected, expected_identities)
         if not identities:
             print('[-] No selected process passed identity checks.')
@@ -2262,9 +2324,10 @@ def run_zram_action(kind, term):
                 return
             command = ["sudo", "/usr/local/bin/memory-tool-apply", "writeback", mode]
         print(f"[>] {' '.join(command)}")
-        if keyboard_input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
-            print("Cancelled.")
-            return
+        # Owner 2026-11-16: execute the selected action without a yes/no step.
+        # if keyboard_input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
+        #     print("Cancelled.")
+        #     return
         result = subprocess.run(command, text=True, capture_output=True)
         output = (result.stdout + result.stderr).strip()
         if output:
@@ -2340,6 +2403,37 @@ def run_process_inspector(proc, term, expected_identity=None):
         return_to_dashboard(term)
 
 
+def run_park_action(term, selected=None, expected_identities=None):
+    """Compact UI; process ownership and recovery live in apppark."""
+    term.suspend()
+    try:
+        exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'apppark')
+        if selected is None:
+            subprocess.run(['sudo', '--', exe, 'list'], check=True)
+            receipt = keyboard_input('Resume ID (empty cancels): ').strip()
+            if receipt:
+                subprocess.run(['sudo', '--', exe, 'resume', receipt])
+            return
+        identities = action_identities(selected, expected_identities)
+        if not identities:
+            return
+        print_process_selection(selected)
+        mode = keyboard_input('Park with descendants [disk/ram, empty cancels]: ').strip().lower()
+        if mode not in {'disk', 'ram'}:
+            return
+        # Choosing a mode is the existing explicit confirmation step.
+        result = subprocess.run(['sudo', '--', exe, 'park', '--yes', '--tree',
+                                 '--mode', mode] + resolved_arguments(identities))
+        if result.returncode:
+            print('Park did not complete; see result above.')
+    except (EOFError, KeyboardInterrupt):
+        print('Cancelled.')
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f'[-] {error}')
+    finally:
+        return_to_dashboard(term)
+
+
 class ProcessManager:
     """A frozen process list and selection transaction, independent of paging."""
     def __init__(self):
@@ -2379,9 +2473,9 @@ class ProcessManager:
         ordered = self.ordered(view_idx, proc_filter)
         maximum = max(0, len(ordered) - 1)
         self.cursor = min(self.cursor, maximum)
-        if ch in ('UP', 'WHEEL_UP', 'k'):
+        if ch in ('UP', 'k'):
             self.cursor = max(0, self.cursor - 1)
-        elif ch in ('DOWN', 'WHEEL_DOWN', 'j'):
+        elif ch in ('DOWN', 'j'):
             self.cursor = min(maximum, self.cursor + 1)
         elif ch in ('PAGEUP', 'LEFT'):
             self.cursor = max(0, self.cursor - self.page_size)
@@ -2435,13 +2529,20 @@ class ProcessManager:
         elif ch in ('i', 'I') and ordered:
             inspected = ordered[self.cursor]
             run_process_inspector(inspected, term, snapshot_identity(inspected))
-        elif ch in ('f', 'F', 'u', 'U', 'x', 'X'):
+        elif ch in ('o', 'O'):
+            run_park_action(term)
+            self.processes = get_enriched_processes()
+            self.selected.clear()
+            self.identities.clear()
+        elif ch in ('f', 'F', 'u', 'U', 'x', 'X', 'p', 'P'):
             checked = [proc for proc in sort_processes(self.processes, view_idx)
                        if str(proc['pid']) in self.selected]
             if not checked:
                 self.notice = 'Nothing selected; tick rows with Space first.'
             else:
-                if ch.casefold() == 'x':
+                if ch.casefold() == 'p':
+                    run_park_action(term, checked, self.identities)
+                elif ch.casefold() == 'x':
                     run_signal_action(self.processes, view_idx, proc_limit, term,
                                       preselected=checked, expected_identities=self.identities)
                 else:
@@ -2470,6 +2571,7 @@ Default: 5-second samples, changed rows only; --fast: 0.5-second samples.
 Process CPU defaults to live interval usage; 100% = one logical CPU.
 --cpu-average shows the lifetime average. An unsampled process displays ….
 --static takes a short interval sample in live mode.
+CryoD status is read-only; unavailable or stale telemetry is shown explicitly.
 
 Dashboard:
   m             Freeze the process snapshot and enter manager mode
@@ -2483,7 +2585,7 @@ Dashboard:
   q             Quit
 
 Manager:
-  Up/Down, j/k  Move through the complete frozen list; mouse wheel also moves
+  Up/Down, j/k  Move through the complete frozen list; mouse input is ignored
   PgUp/PgDn     Move one visible page (Left/Right also work)
   Home/End,g/G  First / last matching process
   Space         Tick / untick the cursor process
@@ -2492,8 +2594,9 @@ Manager:
   /             Search by PID, user, UID, name, or command line; blank clears
   i             Inspect the cursor process
   f / u / x     Force-swap / unswap / signal checked processes
+  p / o         Park checked processes / resume a parked group
   1-4, v, +/-   Change sort, process filter, or visible row count
-  m / Esc       Leave manager, restoring the prior pause state
+  m             Leave manager, restoring the prior pause state
 
 Selection survives searches, filters, and sorting. Actions include every
 checked row, including rows hidden by a later filter. PID start time and UID
@@ -2504,8 +2607,8 @@ snapshot, plus --except, --except-bigger-than, and --min-rss. For example:
   all --except eden,codex,python* --except-bigger-than 2G
   'Isolated Web Co'   or   ff:tab*   or   1234,5678
 
-Actions show their targets and require confirmation. The existing forceswap
-and unswap helpers retain their warnings, pressure checks, and readback.''')
+Actions run after target selection. Unswap faults the selected PIDs directly,
+including under memory pressure, and reports remaining swap.''')
 
 
 # ── Main ──────────────────────────────────────────────────────────────

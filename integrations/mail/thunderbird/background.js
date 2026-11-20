@@ -31,9 +31,9 @@ async function deliver(folder, list, preview = false) {
       const key = `${account}:${msg.headerMessageId || msg.id}`;
       if (!preview && seen.has(key)) continue;
       // Suppress historic sync floods. Explicit preview is a separate action.
-      if (!preview && Date.now() - new Date(msg.date).getTime() > 15 * 60000) continue;
+      if (!preview && !config.careerOnly && Date.now() - new Date(msg.date).getTime() > 15 * 60000) continue;
       let bodies = [];
-      if ((config.preview || config.codes || config.links) && (msg.size || 0) <= 2 * 1024 * 1024) {
+      if ((config.careerOnly || config.preview || config.codes || config.links) && (msg.size || 0) <= 2 * 1024 * 1024) {
         try { bodies = parts(await messenger.messages.getFull(msg.id, {decrypt: false})); }
         catch (_) { /* Still deliver the envelope when the body is unavailable. */ }
       }
@@ -76,7 +76,9 @@ function connect() {
 }
 messenger.messages.onNewMailReceived.addListener((folder, list) => {
   if (!config.enabled || !config.notifications || !config.accounts.includes(folder.accountId)) return;
-  if (!(folder.type === "inbox" || folder.specialUse?.includes("inbox"))) return;
+  const excluded = ["sent", "drafts", "trash", "junk", "templates", "outbox"];
+  if (excluded.includes(folder.type) || folder.specialUse?.some(type => excluded.includes(type))) return;
+  if (!config.careerOnly && !(folder.type === "inbox" || folder.specialUse?.includes("inbox"))) return;
   queue = queue.then(() => deliver(folder, list)).catch(() => post({type: "status", status: "Message preview unavailable. Open Thunderbird to check mail."}));
 });
 for (const event of [messenger.accounts.onCreated, messenger.accounts.onDeleted, messenger.accounts.onUpdated])

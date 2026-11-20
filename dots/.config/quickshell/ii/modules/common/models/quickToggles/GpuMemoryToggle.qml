@@ -25,7 +25,7 @@ QuickToggleModel {
 
     Process {
         id: fetchGpu
-        running: true
+        running: false
         command: ["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh gpu-status"]
         stdout: StdioCollector {
             onStreamFinished: {
@@ -37,8 +37,9 @@ QuickToggleModel {
 
     Timer {
         interval: 5000
-        running: true
+        running: root.pollingEnabled
         repeat: true
+        triggeredOnStart: true
         onTriggered: fetchGpu.running = true
     }
 

@@ -27,7 +27,7 @@ QuickToggleModel {
 
     Process {
         id: fetchBudget
-        running: true
+        running: false
         command: ["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh writeback-status"]
         stdout: StdioCollector {
             onStreamFinished: {
@@ -46,8 +46,9 @@ QuickToggleModel {
 
     Timer {
         interval: 10000
-        running: true
+        running: root.pollingEnabled
         repeat: true
+        triggeredOnStart: true
         onTriggered: fetchBudget.running = true
     }
 

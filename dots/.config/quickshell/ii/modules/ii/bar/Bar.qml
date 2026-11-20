@@ -41,6 +41,9 @@ Scope {
                     repeat: false
                     onTriggered: {
                         barRoot.superShow = true
+                        // Peeking at a hidden bar must not also open the overview on release.
+                        if (Config?.options.bar.autoHide.enable || barLoader.fullscreen)
+                            GlobalStates.superReleaseMightTrigger = false
                     }
                 }
                 Connections {

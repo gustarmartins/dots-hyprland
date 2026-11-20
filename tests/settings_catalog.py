@@ -28,7 +28,7 @@ def schema():
 def catalog():
     text = (SHELL / 'modules/settings/SettingsCatalog.js').read_text()
     return {name: json.loads(re.search(r'var ' + name + r' = (.*?);\n', text, re.S)[1])
-            for name in ['entries', 'pages', 'retired', 'managed']}
+            for name in ['entries', 'pages', 'retired', 'managed', 'timeUnits']}
 
 
 def main():
@@ -45,12 +45,30 @@ def main():
     assert data['pages'][0]['id'] == 'design', 'Color and design must be the first destination'
     assert not page_ids.intersection({'effects', 'fonts'}), 'Design controls split across tabs again'
     assert all(e['page'] == 'design' for e in entries if e['path'].startswith('appearance.')), 'Appearance controls escaped Design'
+    time_units = {
+        'background.discovery.intervalMinutes':'min',
+        'bar.autoHide.showWhenPressingSuper.delay':'ms', 'bar.weather.fetchInterval':'min',
+        'notifications.timeout':'ms', 'osd.timeout':'ms', 'resources.updateInterval':'ms',
+        'musicRecognition.timeout':'s', 'musicRecognition.interval':'s',
+        'search.nonAppResultDelay':'ms', 'sidebar.translator.delay':'ms',
+        'time.pomodoro.breakTime':'s', 'time.pomodoro.focus':'s', 'time.pomodoro.longBreak':'s',
+        'updates.checkInterval':'min', 'hacks.arbitraryRaceConditionDelay':'ms',
+    }
+    numeric_time_keys = {path for path,(typ,_) in fields.items() if typ in ('int','real')
+                         and re.search(r'(?i)(interval|delay|timeout|duration)',path)} & set(keys)
+    assert numeric_time_keys <= time_units.keys(), ('Unreviewed time controls', numeric_time_keys-time_units.keys())
+    assert data['timeUnits'] == {'ms':'milliseconds','s':'seconds','min':'minutes'}
     for entry in entries:
         assert entry['page'] in page_ids
         assert 0 < len(entry['title']) < 90 and '\\n' not in entry['title'], entry['path']
         for dep, value in entry.get('when', []):
             assert dep in fields, dep
         typ, default = fields[entry['path']]
+        if entry['path'] in time_units:
+            assert entry.get('unit') == time_units[entry['path']], ('Missing or incorrect time unit',entry)
+            assert entry['scale'] == 1, ('Unit labels must not reinterpret stored values',entry)
+        if 'unit' in entry:
+            assert entry['unit'] in data['timeUnits'], entry
         if entry['kind'] == 'number':
             assert entry['min'] < entry['max'] and entry['step'] > 0 and entry['scale'] > 0
             literal = re.match(r'^(-?\d+(?:\.\d+)?)\s*(?://.*)?$', default)
@@ -77,7 +95,7 @@ def main():
     assert runtime_tiles == editor_tiles, 'Tile editor and runtime support differ'
     profiles = json.loads(subprocess.check_output(['bash', str(REPO / 'dots/.local/bin/fontctl'), 'preset', 'catalog']))
     assert len(profiles) == 26 and len({p['id'] for p in profiles}) == 26
-    print(f'PASS: {len(fields)} schema keys classified; {len(entries)} controls; {len(profiles)} font profiles; tile catalog matches runtime')
+    print(f'PASS: {len(fields)} schema keys classified; {len(entries)} controls; {len(time_units)} time units verified; {len(profiles)} font profiles; tile catalog matches runtime')
 
 
 if __name__ == '__main__':

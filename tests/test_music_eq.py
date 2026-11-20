@@ -67,4 +67,56 @@ class MusicEqTests(unittest.TestCase):
             with patch.object(m,'exchange',side_effect=['','auto','','-2']):
                 with self.assertRaises(RuntimeError): m.apply('auto','-1')
 
+    def test_mpv_source_and_toggle(self):
+        w=m.Watcher.__new__(m.Watcher)
+        w.bus=unittest.mock.Mock()
+        w.bus.call_sync.return_value.unpack.return_value=[1234]
+        with patch('pathlib.Path.read_bytes', return_value=b'mpv\0video.mkv\0'):
+            p=unittest.mock.Mock()
+            p.props.player_instance='mpv'
+            self.assertEqual(w.source(p), 'mpv')
+        with patch('pathlib.Path.read_bytes', return_value=b'mpv\0--input-ipc-server=/run/user/1000/jukebox.sock\0'):
+            self.assertEqual(w.source(p), 'jukebox')
+
+    def test_osu_stream_active_detection(self):
+        import json
+        active_nodes = [{
+            "info": {
+                "state": "running",
+                "props": {
+                    "media.class": "Stream/Output/Audio",
+                    "node.name": "alsa_playback.osu!",
+                    "application.name": "PipeWire ALSA [osu!]"
+                }
+            }
+        }]
+        with patch.object(m, 'run', return_value=unittest.mock.Mock(returncode=0, stdout=json.dumps(active_nodes))):
+            self.assertTrue(m.osu_stream_active())
+
+        idle_nodes = [{
+            "info": {
+                "state": "idle",
+                "props": {
+                    "media.class": "Stream/Output/Audio",
+                    "node.name": "alsa_playback.osu!",
+                    "application.name": "PipeWire ALSA [osu!]"
+                }
+            }
+        }]
+        with patch.object(m, 'run', return_value=unittest.mock.Mock(returncode=0, stdout=json.dumps(idle_nodes))):
+            self.assertFalse(m.osu_stream_active())
+
+        other_nodes = [{
+            "info": {
+                "state": "running",
+                "props": {
+                    "media.class": "Stream/Output/Audio",
+                    "node.name": "firefox",
+                    "application.name": "Firefox"
+                }
+            }
+        }]
+        with patch.object(m, 'run', return_value=unittest.mock.Mock(returncode=0, stdout=json.dumps(other_nodes))):
+            self.assertFalse(m.osu_stream_active())
+
 if __name__=='__main__':unittest.main()
