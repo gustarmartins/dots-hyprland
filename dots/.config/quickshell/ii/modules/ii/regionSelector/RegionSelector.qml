@@ -17,6 +17,11 @@ Scope {
     property bool hidePanels: false
     property var recordingPanel: null
     property string sessionId: ""
+    Binding {
+        target: HyprlandData
+        property: "trackLayerEvents"
+        value: GlobalStates.regionSelectorOpen
+    }
     readonly property bool allPrepared: panels.length > 0 && panels.length === Quickshell.screens.length && panels.every(p => p.preparationDone)
 
     function dismiss() {

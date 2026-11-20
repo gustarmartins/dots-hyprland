@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import statistics
 import tempfile
 import time
 
@@ -23,6 +24,7 @@ out = Path(tempfile.mkdtemp(prefix="super-tap-test-"))
 rt = Path(tempfile.mkdtemp(prefix="st-"))
 rt.chmod(0o700)
 env = os.environ.copy()
+assert env.get("DBUS_SESSION_BUS_ADDRESS") and f"/run/user/{os.getuid()}/bus" not in env["DBUS_SESSION_BUS_ADDRESS"], "Use a private dbus-run-session"
 for key in ("WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE"):
     env.pop(key, None)
 env.update(HOME=str(out / "home"), XDG_RUNTIME_DIR=str(rt), XDG_CONFIG_HOME=str(out / "config"),
@@ -32,6 +34,22 @@ env.update(HOME=str(out / "home"), XDG_RUNTIME_DIR=str(rt), XDG_CONFIG_HOME=str(
            NO_AT_BRIDGE="1", XDG_CURRENT_DESKTOP="")
 processes = []
 logs = []
+commands = out / "commands"
+commands.mkdir()
+# Confine even the missing-shell fallback. Never run pkill on the test host.
+for name in ("fuzzel", "pkill"):
+    stub = commands / name
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(0o755)
+shim = commands / "qs"
+shim.write_text("""#!/usr/bin/python3
+import os, sys
+if sys.argv[-2:] == ["search","toggle"]:
+    with open(os.environ["QS_TEST_IPC_LOG"],"a") as log: log.write("tap\\n")
+os.execv("/usr/bin/qs",["/usr/bin/qs",*sys.argv[1:]])
+""")
+shim.chmod(0o755)
+env.update(PATH=f"{commands}:/usr/bin", QS_TEST_IPC_LOG=str(out / "ipc-taps"))
 
 
 def launch(args, name):
@@ -115,19 +133,28 @@ try:
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 import qs
 import qs.modules.common
 import qs.modules.ii.overview
 ShellRoot {
  id: root
  property int changes: 0
+ property double changedAt: 0
+ PanelWindow {
+  id: marker
+  WlrLayershell.namespace: "quickshell:background"
+  WlrLayershell.layer: WlrLayer.Background
+  implicitWidth: 1; implicitHeight: 1; exclusiveZone: 0
+ }
  Overview { id: overview }
- Connections { target: GlobalStates; function onOverviewOpenChanged() { root.changes++; } }
+ Connections { target: GlobalStates; function onOverviewOpenChanged() { root.changedAt=Date.now(); root.changes++; } }
  IpcHandler {
   target: "test"
+  function background(show: bool): void { marker.visible=show; }
   function state(): string {
    const grid=overview.testGrid.item;
-   return JSON.stringify({ready:Config.ready,changes:root.changes,open:GlobalStates.overviewOpen,
+   return JSON.stringify({ready:Config.ready,changes:root.changes,changedAt:root.changedAt,open:GlobalStates.overviewOpen,
     panelVisible:overview.testPanel.visible,
     gridVisible:overview.testGrid.active && grid !== null && grid.visible && grid.width > 0 && grid.height > 0,
     gridWidth:grid?.width ?? 0,gridHeight:grid?.height ?? 0,superDown:GlobalStates.superDown});
@@ -203,6 +230,37 @@ end)''' + tap_bindings[old_end:]
     assert len(observers) == 12, observers
     assert all(b["non_consuming"] for b in observers), observers
     assert not ctl("configerrors")
+    if not args.baseline:
+        stats = {}
+        def ipc_count():
+            path = out / "ipc-taps"
+            return len(path.read_text().splitlines()) if path.exists() else 0
+        def has_marker():
+            return any(layer["namespace"] == "quickshell:background"
+                       for mon in json.loads(ctl("-j","layers")).values()
+                       for level in mon["levels"].values() for layer in level)
+        def timed_tap():
+            start = time.time_ns() / 1e6
+            subprocess.run(["wtype","-M","logo","-P","Super_L","-p","Super_L","-m","logo"],env=env,check=True,timeout=4)
+            observed = until(lambda: s if (s:=state()) and s["changes"]==taps else None)
+            return observed["changedAt"] - start
+        assert ipc_count() == 0, "Normal Super taps launched IPC clients"
+        for name, show in (("ipc",False),("native",True)):
+            subprocess.run(["/usr/bin/qs","-c","ii","ipc","call","test","background",str(show).lower()],env=env,check=True)
+            until(lambda:has_marker()==show)
+            before=ipc_count()
+            latencies=[]
+            for _ in range(12):
+                taps+=1
+                latencies.append(timed_tap())
+            assert ipc_count()-before == (0 if show else 12)
+            stats[name]={"samples":len(latencies),"median_ms":statistics.median(latencies),"max_ms":max(latencies),"cli_launches":ipc_count()-before}
+        # Several releases in one input connection. No waiting for QS between taps.
+        burst=["-M","logo","-P","Super_L","-p","Super_L","-m","logo","-s","30"]
+        subprocess.run(["wtype",*(burst*10)],env=env,check=True,timeout=6)
+        taps+=10
+        expect(taps,chords)
+        print("Synthetic input process start to QML state change:",json.dumps(stats),flush=True)
     print("PASS; isolated compositor logs:", out, flush=True)
 finally:
     for proc in reversed(processes):

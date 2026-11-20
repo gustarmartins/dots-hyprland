@@ -129,9 +129,8 @@ Singleton {
 
     property string mathResult: ""
     property bool clipboardWorkSafetyActive: {
-        const enabled = Config.options.workSafety.enable.clipboard;
-        const sensitiveNetwork = (StringUtils.stringListContainsSubstring(Network.networkName.toLowerCase(), Config.options.workSafety.triggerCondition.networkNameKeywords));
-        return enabled && sensitiveNetwork;
+        return Config.options.workSafety.enable.clipboard
+            && StringUtils.stringListContainsSubstring(Network.networkName.toLowerCase(), Config.options.workSafety.triggerCondition.networkNameKeywords);
     }
 
     function containsUnsafeLink(entry) {
@@ -141,34 +140,63 @@ Singleton {
         return StringUtils.stringListContainsSubstring(entry.toLowerCase(), unsafeKeywords);
     }
 
+    readonly property string mathExpression: {
+        const text = root.query;
+        const prefix = Config.options.search.prefix;
+        if (!text || text.startsWith(prefix.clipboard) || text.startsWith(prefix.emojis))
+            return "";
+        if (text.startsWith(prefix.math)) return text.slice(prefix.math.length);
+        return /^\d/.test(text) || prefix.showDefaultActionsWithoutPrefix ? text : "";
+    }
+
+    onMathExpressionChanged: {
+        nonAppResultsTimer.stop();
+        mathProc.pending = false;
+        if (mathProc.running) mathProc.running = false;
+        root.mathResult = "";
+        if (root.mathExpression) nonAppResultsTimer.restart();
+    }
+
     Timer {
         id: nonAppResultsTimer
         interval: Config.options.search.nonAppResultDelay
-        onTriggered: {
-            let expr = root.query;
-            if (expr.startsWith(Config.options.search.prefix.math)) {
-                expr = expr.slice(Config.options.search.prefix.math.length);
-            }
-            mathProc.calculateExpression(expr);
-        }
+        onTriggered: mathProc.calculate()
     }
 
     Process {
         id: mathProc
-        property list<string> baseCommand: ["qalc", "-t"]
-        function calculateExpression(expression) {
-            mathProc.running = false;
-            mathProc.command = baseCommand.concat(expression);
-            mathProc.running = true;
+        property string expression: ""
+        property bool pending: false
+        function calculate() {
+            if (!root.mathExpression || nonAppResultsTimer.running) return;
+            pending = running;
+            if (pending) return;
+            expression = root.mathExpression;
+            command = ["qalc", "-t", expression];
+            running = true;
         }
+        onExited: if (pending) Qt.callLater(calculate)
         stdout: SplitParser {
             onRead: data => {
-                root.mathResult = data;
+                if (mathProc.expression === root.mathExpression)
+                    root.mathResult = data;
             }
         }
     }
 
-    property list<var> results: {
+    // A calculator reply updates this one row, without rescoring applications or
+    // starting another calculation for the same input.
+    property LauncherSearchResult mathEntry: LauncherSearchResult {
+        name: root.mathResult
+        verb: Translation.tr("Copy")
+        type: Translation.tr("Math result")
+        fontType: LauncherSearchResult.FontType.Monospace
+        iconName: "calculate"
+        iconType: LauncherSearchResult.IconType.Material
+        execute: () => { Quickshell.clipboardText = root.mathResult; }
+    }
+
+    readonly property var results: {
         // Search results are handled here
         ////////////////// Skip? //////////////////
         if (root.query == "")
@@ -185,22 +213,24 @@ Singleton {
                     shouldBlurImage = shouldBlurImage && (root.containsUnsafeLink(array[index - 1]) || root.containsUnsafeLink(array[index + 1]));
                 }
                 const type = `#${entry.match(/^\s*(\S+)/)?.[1] || ""}`;
-                return resultComp.createObject(null, {
+                return ({
                     rawValue: entry,
                     name: StringUtils.cleanCliphistEntry(entry),
                     verb: "",
                     type: type,
+                    iconName: "",
+                    iconType: LauncherSearchResult.IconType.None,
                     execute: () => {
                         Cliphist.copy(entry);
                     },
-                    actions: [resultComp.createObject(null, {
+                    actions: [({
                             name: Translation.tr("Copy"),
                             iconName: "content_copy",
                             iconType: LauncherSearchResult.IconType.Material,
                             execute: () => {
                                 Cliphist.copy(entry);
                             }
-                        }), resultComp.createObject(null, {
+                        }), ({
                             name: Translation.tr("Delete"),
                             iconName: "delete",
                             iconType: LauncherSearchResult.IconType.Material,
@@ -216,7 +246,7 @@ Singleton {
             const searchString = StringUtils.cleanPrefix(root.query, Config.options.search.prefix.emojis);
             return Emojis.fuzzyQuery(searchString).map(entry => {
                 const emoji = entry.match(/^\s*(\S+)/)?.[1] || "";
-                return resultComp.createObject(null, {
+                return ({
                     rawValue: entry,
                     name: entry.replace(/^\s*\S+\s+/, ""),
                     iconName: emoji,
@@ -231,20 +261,8 @@ Singleton {
         }
 
         ////////////////// Init ///////////////////
-        nonAppResultsTimer.restart();
-        const mathResultObject = resultComp.createObject(null, {
-            name: root.mathResult,
-            verb: Translation.tr("Copy"),
-            type: Translation.tr("Math result"),
-            fontType: LauncherSearchResult.FontType.Monospace,
-            iconName: 'calculate',
-            iconType: LauncherSearchResult.IconType.Material,
-            execute: () => {
-                Quickshell.clipboardText = root.mathResult;
-            }
-        });
         const appResultObjects = AppSearch.fuzzyQuery(StringUtils.cleanPrefix(root.query, Config.options.search.prefix.app)).map(entry => {
-            return resultComp.createObject(null, {
+            return ({
                 type: Translation.tr("App"),
                 id: entry.id,
                 name: entry.name,
@@ -265,7 +283,7 @@ Singleton {
                 genericName: entry.genericName,
                 keywords: entry.keywords,
                 actions: entry.actions.map(action => {
-                    return resultComp.createObject(null, {
+                    return ({
                         name: action.name,
                         iconName: action.icon,
                         iconType: LauncherSearchResult.IconType.System,
@@ -281,7 +299,7 @@ Singleton {
                 })
             });
         });
-        const commandResultObject = resultComp.createObject(null, {
+        const commandResultObject = ({
             name: StringUtils.cleanPrefix(root.query, Config.options.search.prefix.shellCommand).replace("file://", ""),
             verb: Translation.tr("Run"),
             type: Translation.tr("Command"),
@@ -297,7 +315,7 @@ Singleton {
                 Quickshell.execDetached(["bash", "-c", root.query.startsWith('sudo') ? `${Config.options.apps.terminal} fish -C '${cleanedCommand}'` : cleanedCommand]);
             }
         });
-        const webSearchResultObject = resultComp.createObject(null, {
+        const webSearchResultObject = ({
             name: StringUtils.cleanPrefix(root.query, Config.options.search.prefix.webSearch),
             verb: Translation.tr("Search"),
             type: Translation.tr("Web search"),
@@ -315,7 +333,7 @@ Singleton {
         const launcherActionObjects = root.allActions.map(action => {
             const actionString = `${Config.options.search.prefix.action}${action.action}`;
             if (actionString.startsWith(root.query) || root.query.startsWith(actionString)) {
-                return resultComp.createObject(null, {
+                return ({
                     name: root.query.startsWith(actionString) ? root.query : actionString,
                     verb: Translation.tr("Run"),
                     type: Translation.tr("Action"),
@@ -336,7 +354,7 @@ Singleton {
         const startsWithShellCommandPrefix = root.query.startsWith(Config.options.search.prefix.shellCommand);
         const startsWithWebSearchPrefix = root.query.startsWith(Config.options.search.prefix.webSearch);
         if (startsWithNumber || startsWithMathPrefix) {
-            result.push(mathResultObject);
+            result.push(root.mathEntry);
         } else if (startsWithShellCommandPrefix) {
             result.push(commandResultObject);
         } else if (startsWithWebSearchPrefix) {
@@ -354,7 +372,7 @@ Singleton {
             if (!startsWithShellCommandPrefix)
                 result.push(commandResultObject);
             if (!startsWithNumber && !startsWithMathPrefix)
-                result.push(mathResultObject);
+                result.push(root.mathEntry);
             if (!startsWithWebSearchPrefix)
                 result.push(webSearchResultObject);
         }
@@ -362,8 +380,4 @@ Singleton {
         return result;
     }
 
-    Component {
-        id: resultComp
-        LauncherSearchResult {}
-    }
 }

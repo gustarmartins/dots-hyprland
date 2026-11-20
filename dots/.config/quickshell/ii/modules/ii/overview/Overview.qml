@@ -92,10 +92,11 @@ Scope {
                 }
             }
 
-            Loader {
+            OverviewContentLoader {
                 id: overviewLoader
                 anchors.horizontalCenter: parent.horizontalCenter
-                active: GlobalStates.overviewOpen && (Config?.options.overview.enable ?? true)
+                shown: GlobalStates.overviewOpen
+                featureEnabled: Config?.options.overview.enable ?? true
                 sourceComponent: OverviewWidget {
                     screen: panelWindow.screen
                     visible: (panelWindow.searchingText == "")
@@ -147,6 +148,11 @@ Scope {
         }
     }
 
+    GlobalShortcut {
+        name: "launcherTap"
+        description: "Toggle the overview on a clean Super tap"
+        onReleased: GlobalStates.overviewOpen = !GlobalStates.overviewOpen
+    }
     GlobalShortcut {
         name: "searchToggle"
         description: "Toggles search on press"

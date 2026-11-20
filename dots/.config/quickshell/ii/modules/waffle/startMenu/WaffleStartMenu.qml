@@ -101,6 +101,11 @@ Scope {
     }
 
     GlobalShortcut {
+        name: "launcherTap"
+        description: "Toggle the Start menu on a clean Super tap"
+        onReleased: GlobalStates.searchOpen = !GlobalStates.searchOpen
+    }
+    GlobalShortcut {
         name: "searchToggle"
         description: "Toggles search on press"
 

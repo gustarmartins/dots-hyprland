@@ -13,7 +13,7 @@ import Quickshell.Hyprland
 
 RippleButton {
     id: root
-    property LauncherSearchResult entry
+    property var entry
     property string query
     property bool entryShown: entry?.shown ?? true
     property string itemType: entry?.type ?? Translation.tr("App")

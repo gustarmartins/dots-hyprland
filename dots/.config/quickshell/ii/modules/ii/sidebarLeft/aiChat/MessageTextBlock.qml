@@ -33,40 +33,21 @@ ColumnLayout {
         id: renderTimer
         interval: 1000
         repeat: false
-        onTriggered: {
-            renderLatex()
-            for (const hash of renderedLatexHashes) {
-                handleRenderedLatex(hash, true);
-            }
-        }
+        onTriggered: root.renderLatex()
     }
 
     function renderLatex() {
-        // Regex for $...$, $$...$$, \[...\]
-        // Note: This is a simple approach and may need refinement for edge cases
-        let regex = /(\$\$([\s\S]+?)\$\$)|(\$([^\$]+?)\$)|(\\\[((?:.|\n)+?)\\\])|(\\\(([\s\S]+?)\\\))/g;
-        let match;
-        while ((match = regex.exec(segmentContent)) !== null) {
-            let expression = match[1] || match[2] || match[3] || match[4] || match[5] || match[6] || match[7] || match[8];
-            if (expression) {
-                Qt.callLater(() => {
-                    const [renderHash, isNew] = LatexRenderer.requestRender(expression.trim());
-                    if (!renderedLatexHashes.includes(renderHash)) {
-                        renderedLatexHashes.push(renderHash);
-                    }
-                });
-            }
-        }
-    }
-
-    function handleRenderedLatex(hash, force = false) {
-        if (renderedLatexHashes.includes(hash) || force) {
-            const imagePath = LatexRenderer.renderedImagePaths[hash];
-            const markdownImage = `![latex](${imagePath})`;
-
-            const expression = LatexRenderer.processedExpressions[hash];
-            renderedSegmentContent = renderedSegmentContent.replace(expression, markdownImage);
-        }
+        if (root.editing || typeof root.segmentContent !== "string") return;
+        const hashes = new Set();
+        const pattern = /(\$\$[\s\S]+?\$\$|\$[^\$]+?\$|\\\[(?:.|\n)+?\\\]|\\\((?:.|\n)+?\\\))/g;
+        root.renderedSegmentContent = root.segmentContent.replace(pattern, expression => {
+            const [hash] = LatexRenderer.requestRender(expression.trim());
+            hashes.add(hash);
+            const path = LatexRenderer.renderedImagePaths[hash];
+            return path ? `![latex](${path})` : expression;
+        });
+        root.renderedLatexHashes = Array.from(hashes);
+        root.shownText = root.renderedSegmentContent;
     }
 
     onDoneChanged: {
@@ -85,7 +66,7 @@ ColumnLayout {
         // console.log("Segment content changed: " + segmentContent);
         renderedSegmentContent = segmentContent;
         if (!root.editing && segmentContent) {
-            root.renderLatex();
+            Qt.callLater(root.renderLatex);
         }
     }
 
@@ -102,9 +83,8 @@ ColumnLayout {
     Connections {
         target: LatexRenderer
         function onRenderFinished(hash, imagePath) {
-            const expression = LatexRenderer.processedExpressions[hash];
-            // console.log("Render finished: " + hash + " " + expression);
-            handleRenderedLatex(hash);
+            if (root.renderedLatexHashes.includes(hash))
+                Qt.callLater(root.renderLatex);
         }
     }
 

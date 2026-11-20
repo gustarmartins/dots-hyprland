@@ -41,12 +41,16 @@ Singleton {
     ]
 
     // Deduped list to fix double icons
-    readonly property list<DesktopEntry> list: Array.from(DesktopEntries.applications.values)
-        .filter((app, index, self) => 
-            index === self.findIndex((t) => (
-                t.id === app.id
-            ))
-    )
+    readonly property list<DesktopEntry> list: {
+        const seen = new Set();
+        const unique = [];
+        for (const entry of DesktopEntries.applications.values) {
+            if (seen.has(entry.id)) continue;
+            seen.add(entry.id);
+            unique.push(entry);
+        }
+        return unique;
+    }
     
     readonly property var preppedNames: list.map(a => ({
         name: Fuzzy.prepare(`${a.name} `),
@@ -60,9 +64,10 @@ Singleton {
 
     function fuzzyQuery(search: string): var { // Idk why list<DesktopEntry> doesn't work
         if (root.sloppySearch) {
+            const needle = search.toLowerCase();
             const results = list.map(obj => ({
                 entry: obj,
-                score: Levendist.computeScore(obj.name.toLowerCase(), search.toLowerCase())
+                score: Levendist.computeScore(obj.name.toLowerCase(), needle)
             })).filter(item => item.score > root.scoreThreshold)
                 .sort((a, b) => b.score - a.score)
             return results
@@ -137,16 +142,12 @@ Singleton {
         if (iconExists(undescoreToKebabGuess)) return undescoreToKebabGuess;
 
         // Search in desktop entries
-        const iconSearchResults = Fuzzy.go(str, preppedIcons, {
+        const iconMatch = Fuzzy.go(str, preppedIcons, {
             all: true,
+            limit: 1,
             key: "name"
-        }).map(r => {
-            return r.obj.entry
-        });
-        if (iconSearchResults.length > 0) {
-            const guess = iconSearchResults[0].icon
-            if (iconExists(guess)) return guess;
-        }
+        })[0]?.obj.entry.icon;
+        if (iconExists(iconMatch)) return iconMatch;
 
         const nameSearchResults = root.fuzzyQuery(str);
         if (nameSearchResults.length > 0) {

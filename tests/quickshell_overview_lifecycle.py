@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -22,10 +23,10 @@ for key in ('DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'HYPRL
 env.update(HOME=str(OUT/'home'), XDG_CONFIG_HOME=str(OUT/'config'), XDG_STATE_HOME=str(OUT/'state'), XDG_CACHE_HOME=str(OUT/'cache'), XDG_DATA_HOME=str(OUT/'data'), XDG_RUNTIME_DIR=str(RUN), QT_QPA_PLATFORM='offscreen', QT_QPA_PLATFORMTHEME='', QT_NO_XDG_DESKTOP_PORTAL='1', XDG_CURRENT_DESKTOP='test', XDG_SESSION_TYPE='wayland', NO_AT_BRIDGE='1', BROWSER='/usr/bin/false', LIBGL_ALWAYS_SOFTWARE='1', LP_NUM_THREADS='2', AQ_DRM_DEVICES='/nonexistent-test-device')
 env.pop('QT_QUICK_BACKEND', None)
 subprocess.run(['dbus-update-activation-environment', *[k for k in env if k.startswith(('XDG_', 'QT_', 'WAYLAND', 'HYPRLAND', 'LIBGL', 'AQ_'))], 'HOME', 'BROWSER'], env=env, check=True)
-procs=[]; logs=[]
+procs=[]; logs=[]; cycle=None; last_state=None
 def launch(args,name):
     log=(OUT/(name+'.log')).open('w');logs.append(log)
-    proc=subprocess.Popen(args,env=env,stdout=log,stderr=subprocess.STDOUT);procs.append(proc);return proc
+    proc=subprocess.Popen(args,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True);procs.append(proc);return proc
 def until(fn, timeout=18):
     end=time.monotonic()+timeout
     while time.monotonic()<end:
@@ -43,6 +44,8 @@ try:
         shutil.copy2(os.environ['QS_CAPTURE_BASELINE'],shell/'services/HyprlandData.qml')
     p=shell/'modules/common/Directories.qml'
     p.write_text(p.read_text().split('    // Cleanup on init')[0]+'}\n')
+    p=shell/'modules/ii/overview/Overview.qml'
+    p.write_text(p.read_text().replace('    id: overviewScope', '    id: overviewScope\n    property alias fixturePanel: panelWindow\n    property alias fixtureLoader: overviewLoader', 1))
     config=OUT/'config/illogical-impulse/config.json';config.parent.mkdir(parents=True)
     config.write_text(json.dumps({'overview':{'columns':8,'rows':4,'scale':.12},'resources':{'updateInterval':1000,'historyLength':60},'hacks':{'arbitraryRaceConditionDelay':100}}))
     entry=shell/'capture-test.qml'
@@ -55,21 +58,19 @@ import qs.modules.common
 import qs.modules.ii.overview
 ShellRoot {
  id:root
- property bool shown:false
- PanelWindow {
-  id:panel; anchors {top:true;left:true;right:true} implicitHeight:600; color:"#202028"
-  Loader {anchors.centerIn:parent;active:root.shown;sourceComponent:OverviewWidget {screen:panel.screen}}
- }
+ property int gridCreations:0
+ Overview {id:overview}
+ Connections {target:overview.fixtureLoader;function onLoaded(){root.gridCreations++}}
  function captures(n) {
   let result=[];
-  if(n.hasContent!==undefined && n.captureSource!==undefined) result.push({content:n.hasContent,source:!!n.captureSource,w:n.sourceSize.width,h:n.sourceSize.height});
+  if(n.hasContent!==undefined && n.captureSource!==undefined) result.push({content:n.hasContent,source:!!n.captureSource,w:n.sourceSize.width,h:n.sourceSize.height,visible:n.visible,itemWidth:n.width,itemHeight:n.height});
   for(const child of n.children ?? []) result=result.concat(captures(child));
   return result;
  }
  IpcHandler {
   target:"test"
-  function toggle(value:bool):void {root.shown=value;GlobalStates.overviewOpen=value}
-  function status():string {return JSON.stringify({ready:Config.ready,count:HyprlandData.windowList.length,captures:root.captures(panel.contentItem)})}
+  function hideGrid(value:bool):void {overview.fixturePanel.setSearchingText(value ? "fixture" : "")}
+  function status():string {return JSON.stringify({ready:Config.ready,shown:GlobalStates.overviewOpen,panelVisible:overview.fixturePanel.visible,panelWidth:overview.fixturePanel.width,panelHeight:overview.fixturePanel.height,gridOpacity:overview.fixtureLoader.item?.opacity,count:HyprlandData.windowList.length,gridCreations:root.gridCreations,gridLoaded:overview.fixtureLoader.item!==null,captures:root.captures(overview.fixturePanel.contentItem)})}
  }
 }''')
     client=OUT/'clients.qml'
@@ -81,13 +82,14 @@ ShellRoot {
  Variants {model:Array.from({length:root.count},(_,i)=>i);Window {required property var modelData;visible:true;width:333+modelData*13;height:241+modelData*7;title:"Capture fixture "+modelData;color:Qt.hsla(modelData/8,.7,.4,1);Rectangle {anchors.centerIn:parent;width:50;height:50;color:"white";NumberAnimation on rotation {from:0;to:360;duration:3000;loops:Animation.Infinite}}}}
  IpcHandler {target:"clients";function fewer():void {root.count=4}}
 }''')
-    launch(['kwin_wayland','--virtual','--width','1280','--height','720','--no-lockscreen','--no-global-shortcuts','--no-kactivities','--socket','capture-parent'],'kwin')
+    parent_command=['kwin_wayland','--virtual','--width','1280','--height','720','--no-lockscreen','--no-global-shortcuts','--no-kactivities','--socket','capture-parent']
+    launch(parent_command,'kwin')
     until(lambda:(RUN/'capture-parent').exists())
     env.update(WAYLAND_DISPLAY='capture-parent',QT_QPA_PLATFORM='wayland')
     hc=OUT/'hyprland.lua'
     hc.write_text('hl.monitor({output="",mode="1280x720@60",position="auto",scale=1})\nhl.config({debug={disable_logs=false},animations={enabled=false},misc={disable_hyprland_logo=true,disable_splash_rendering=true},input={follow_mouse=0}})\n')
     launch([str(COMPOSITOR),'--config',str(hc)],'hyprland')
-    sock=until(lambda:next((RUN/'hypr').glob('*/.socket.sock'),None))
+    sock=until(lambda:next((RUN/'hypr').glob('*/.socket.sock'),None),timeout=60)
     env['HYPRLAND_INSTANCE_SIGNATURE']=sock.parent.name
     env['WAYLAND_DISPLAY']=until(lambda:next((p.name for p in RUN.glob('wayland-*') if not p.name.endswith('.lock')),None))
     until(lambda:json.loads(ctl('-j','monitors')))
@@ -102,32 +104,54 @@ ShellRoot {
     apps=launch(['/usr/bin/qs','-p',str(client)],'clients')
     def call(method,*args):
         return subprocess.check_output(['/usr/bin/qs','-p',str(entry),'ipc','call','test',method,*args],env=env,text=True,stderr=subprocess.DEVNULL,timeout=4).strip()
-    def status():return json.loads(call('status'))
+    def status():
+        global last_state
+        last_state=json.loads(call('status'))
+        return last_state
+    def show(opened):
+        subprocess.run(['/usr/bin/qs','-p',str(entry),'ipc','call','search','open' if opened else 'close'],
+                       env=env,check=True,stdout=subprocess.DEVNULL,timeout=4)
+    def all_previews_ready():
+        current=status()
+        return current if len(current['captures'])==current['count'] and current['count']>0 and all(c['content'] for c in current['captures']) else None
     until(lambda:status()['count']==8)
     first=None
     for cycle in range(30):
-        call('toggle','true')
-        state=until(lambda:(s if s['captures'] and all(c['content'] for c in s['captures']) else None) if (s:=status()) else None,timeout=10)
+        show(True)
+        state=until(all_previews_ready,timeout=10)
         if first is None:first=state
         assert qs.poll() is None
+        if cycle==5:
+            call('hideGrid','true')
+            hidden=until(lambda:(s if all(not c['source'] and not c['content'] for c in s['captures']) else None) if (s:=status()) else None)
+            assert hidden['captures'], 'Hiding should retain the widget while releasing captures'
+            call('hideGrid','false')
+            until(all_previews_ready)
         if cycle==10:
             subprocess.check_call(['/usr/bin/qs','-p',str(client),'ipc','call','clients','fewer'],env=env,stdout=subprocess.DEVNULL)
             until(lambda:status()['count']==4)
         if cycle%5==0:
             ctl('dispatch','hl.dsp.focus({workspace="2"})')
             ctl('dispatch','hl.dsp.focus({workspace="1"})')
-        call('toggle','false');time.sleep(.08)
+        show(False);time.sleep(.08)
+        closed=status()
+        assert all(not c['source'] and not c['content'] for c in closed['captures']), closed
+    warm=status()
+    assert warm['gridCreations']==1 and warm['gridLoaded'] and len(warm['captures'])==4,warm
+    until(lambda:not status()['gridLoaded'])
     assert hashlib.sha256(COMPOSITOR.read_bytes()).hexdigest()==COMPOSITOR_SHA256, 'Compositor changed during test'
-    result={'status':'pass','cycles':30,'first':first,'last':status(),'pid':qs.pid,'compositor':str(COMPOSITOR),'compositor_sha256':COMPOSITOR_SHA256,'output':str(OUT)}
+    result={'status':'pass','cycles':30,'first':first,'warm':warm,'last':status(),'pid':qs.pid,'compositor':str(COMPOSITOR),'compositor_sha256':COMPOSITOR_SHA256,'output':str(OUT)}
     (OUT/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result),flush=True)
 except Exception as error:
-    failure={'status':'failed','error':str(error),'output':str(OUT),'process_exits':[p.poll() for p in procs]}
+    failure={'status':'failed','error':str(error),'output':str(OUT),'cycle':cycle,'last_state':last_state,'process_exits':[p.poll() for p in procs]}
     (OUT/'result.json').write_text(json.dumps(failure,indent=2));print(json.dumps(failure),flush=True)
     raise
 finally:
     for proc in reversed(procs):
+        try:os.killpg(proc.pid,signal.SIGTERM)
+        except ProcessLookupError:pass
         if proc.poll() is None:
-            proc.terminate()
             try:proc.wait(timeout=4)
-            except subprocess.TimeoutExpired:proc.kill();proc.wait()
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid,signal.SIGKILL);proc.wait()
     for log in logs:log.close()

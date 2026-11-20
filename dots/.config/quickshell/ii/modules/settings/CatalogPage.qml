@@ -40,7 +40,7 @@ ScrollView {
             sourceComponent: root.pageId === "control" ? vrrPage : root.pageId === "agents" ? agentPage : root.pageId === "storage" ? storagePage : root.pageId === "cryod" ? cryodPage : root.pageId === "company" ? companyPage : root.pageId === "memory" ? memoryPage : root.pageId === "mail" ? mailPage : root.pageId === "fonts" ? fontPage : root.pageId === "audio" ? audioPage : wallpaperPage
         }
         Repeater {
-            model: root.query.trim() ? Catalog.destinations.filter(e => Catalog.matches(e, root.query)) : []
+            model: Catalog.matchingDestinations(root.query)
             delegate: SettingsButton {
                 required property var modelData
                 Layout.fillWidth: true

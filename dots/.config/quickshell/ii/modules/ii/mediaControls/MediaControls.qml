@@ -17,7 +17,7 @@ Scope {
     property bool visible: false
     readonly property MprisPlayer activePlayer: MprisController.activePlayer
     readonly property var realPlayers: MprisController.players
-    readonly property var meaningfulPlayers: filterDuplicatePlayers(realPlayers)
+    readonly property var meaningfulPlayers: GlobalStates.mediaControlsOpen ? filterDuplicatePlayers(realPlayers) : []
     readonly property real osdWidth: Appearance.sizes.osdWidth
     readonly property real widgetWidth: Appearance.sizes.mediaControlsWidth
     readonly property real widgetHeight: Appearance.sizes.mediaControlsHeight

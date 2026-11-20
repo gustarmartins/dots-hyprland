@@ -54,7 +54,8 @@ function partialRatio(shortS, longS) {
     let lenL = longS.length;
     let best = 0.0;
 
-    if (lenS === 0) return 1.0;
+    // An exact substring already attains the maximum possible score.
+    if (longS.includes(shortS)) return 1.0;
 
     for (let i = 0; i <= lenL - lenS; i++) {
         let sub = longS.slice(i, i + lenS);
@@ -74,7 +75,8 @@ function computeScore(s1, s2) {
     if (maxLen === 0) return 1.0;
 
     let full = 1.0 - (dist / maxLen);
-    let part = s1.length < s2.length ? partialRatio(s1, s2) : partialRatio(s2, s1);
+    let part = s1.length === s2.length ? full
+        : s1.length < s2.length ? partialRatio(s1, s2) : partialRatio(s2, s1);
 
     let score = 0.85 * full + 0.15 * part;
 
@@ -113,7 +115,8 @@ function computeTextMatchScore(s1, s2) {
     if (maxLen === 0) return 1.0;
 
     let full = 1.0 - (dist / maxLen);
-    let part = s1.length < s2.length ? partialRatio(s1, s2) : partialRatio(s2, s1);
+    let part = s1.length === s2.length ? full
+        : s1.length < s2.length ? partialRatio(s1, s2) : partialRatio(s2, s1);
 
     let score = 0.4 * full + 0.6 * part;
 

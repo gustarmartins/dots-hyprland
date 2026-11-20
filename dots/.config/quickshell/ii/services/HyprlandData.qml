@@ -73,6 +73,7 @@ Singleton {
             }),
         }));
     property var layers: ({})
+    property bool trackLayerEvents: false
     property double lastEventAt: 0
     IpcHandler {
         target: "hyprlandDiagnostics"
@@ -199,12 +200,25 @@ Singleton {
     }
 
     function biggestWindowForWorkspace(workspaceId) {
-        const windowsInThisWorkspace = HyprlandData.windowList.filter(w => w.workspace.id == workspaceId);
-        return windowsInThisWorkspace.reduce((maxWin, win) => {
-            const maxArea = (maxWin?.size?.[0] ?? 0) * (maxWin?.size?.[1] ?? 0);
-            const winArea = (win?.size?.[0] ?? 0) * (win?.size?.[1] ?? 0);
-            return winArea > maxArea ? win : maxWin;
-        }, null);
+        return windowStatsByWorkspace[workspaceId]?.largest ?? null;
+    }
+
+    // Both bars and the overview use the same snapshot. Visit each window once
+    // regardless of the number of outputs or workspace cells on screen.
+    readonly property var windowStatsByWorkspace: {
+        const stats = Object.create(null);
+        for (const window of root.windowList) {
+            const id = window.workspace?.id;
+            if (id == null) continue;
+            const group = stats[id] ?? (stats[id] = { count: 0, largest: null, area: 0 });
+            ++group.count;
+            const area = (window.size?.[0] ?? 0) * (window.size?.[1] ?? 0);
+            if (area > group.area) {
+                group.area = area;
+                group.largest = window;
+            }
+        }
+        return stats;
     }
 
     Component.onCompleted: {
@@ -220,11 +234,11 @@ Singleton {
         function onRawEvent(event) {
             root.lastEventAt = Date.now();
             if (["openlayer", "closelayer"].includes(event.name)) {
-                root.updateLayers();
+                if (root.trackLayerEvents) root.updateLayers();
                 return;
             }
             if (event.name === "screencast") return;
-            if (["monitoradded", "monitoraddedv2", "monitorremoved", "configreloaded"].includes(event.name))
+            if (root.trackLayerEvents && ["monitoradded", "monitoraddedv2", "monitorremoved", "configreloaded"].includes(event.name))
                 root.updateLayers();
             if (["windowtitle", "windowtitlev2"].includes(event.name)) {
                 if (!titleRefreshThrottle.running) titleRefreshThrottle.start();

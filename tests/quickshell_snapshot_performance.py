@@ -128,10 +128,13 @@ ShellRoot {
   target: "test"
   function reset(): void { root.changes=0; root.maxGap=0; }
   function refresh(): void { HyprlandData.updateAll(); }
+  function trackLayers(enabled: bool): void { HyprlandData.trackLayerEvents=enabled; }
   function state(): string { return JSON.stringify({changes:root.changes,gap:root.maxGap,
    windows:HyprlandData.windowList.map(w=>({address:w.address,title:w.title,width:w.size[0]})),
    focused:HyprlandData.activeWorkspace?.id ?? -1,
    workspaces:HyprlandData.workspaceIds, monitors:HyprlandData.monitors.map(m=>m.activeWorkspace.id),
+   largest:HyprlandData.biggestWindowForWorkspace(1)?.address,
+   windowCounts:HyprlandData.windowStatsByWorkspace ? [1,2].map(id=>HyprlandData.windowStatsByWorkspace[id]?.count ?? 0) : [],
    consumerLength:root.consumer.length}); }
  }
 }
@@ -142,8 +145,8 @@ ShellRoot {
         try:
             event_client, _ = until(lambda: event_server.accept())
 
-            def call(action):
-                return subprocess.check_output(['qs', '-p', str(fixture), 'ipc', 'call', 'test', action],
+            def call(action, *values):
+                return subprocess.check_output(['qs', '-p', str(fixture), 'ipc', 'call', 'test', action, *values],
                                                env=env, text=True, stderr=subprocess.DEVNULL, timeout=3).strip()
 
             def read():
@@ -184,6 +187,16 @@ ShellRoot {
             if label == 'after' and not args.allow_unbatched:
                 assert max(b['updates'] for b in batches) <= 2, batches
                 assert title_requests == 0, requests[request_start:]
+                first_on_one = next(w['address'] for w in final['windows'] if int(w['address'],16) % 2 == 0)
+                assert final['windowCounts'] == [4,3] and final['largest'] == first_on_one, final
+                time.sleep(.15)
+                start = len(requests)
+                event_client.sendall(b'openlayer>>quickshell:overview\ncloselayer>>quickshell:overview\n')
+                time.sleep(.2)
+                assert 'j/layers' not in requests[start:], requests[start:]
+                call('trackLayers','true')
+                event_client.sendall(b'openlayer>>fixture-selector\n')
+                until(lambda: 'j/layers' in requests[start:])
             assert final['workspaces'] == [1, 2], final
             results[label] = {'batches': batches, 'title_client_requests': title_requests,
                               'final': final}

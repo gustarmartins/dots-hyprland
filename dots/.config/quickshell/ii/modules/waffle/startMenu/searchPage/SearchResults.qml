@@ -48,100 +48,71 @@ RowLayout {
         Layout.fillHeight: true
         Layout.fillWidth: true
     }
+    LauncherSearchResult { id: emptyEntry }
     ResultPreview {
         Layout.preferredWidth: 386
         Layout.leftMargin: 1
         Layout.rightMargin: 1
-        entry: resultList.model[resultList.currentIndex] ?? searchResultComp.createObject()
+        entry: resultList.rows[resultList.currentIndex]?.entry ?? emptyEntry
     }
 
     component ResultList: WListView {
         id: resultListView
-        section {
-            criteria: ViewSection.FullString
-            property: "category" // This is "type" with tweaks to make it match more closely
-            labelPositioning: ViewSection.InlineLabels
-            delegate: Item {
-                id: sectionButton
-                required property string section
-                implicitHeight: sectionChoiceButton.implicitHeight + resultListView.spacing
-                width: ListView.view?.width
-                WChoiceButton {
-                    id: sectionChoiceButton
-                    anchors {
-                        left: parent.left
-                        right: parent.right
-                        top: parent.top
-                    }
-                    implicitHeight: 38
-                    contentItem: WText {
-                        text: sectionButton.section
-                        font.pixelSize: Looks.font.pixelSize.large
-                        font.weight: Looks.font.weight.strong
-                    }
-                    onClicked: {
-                        root.context.selectCategory(sectionButton.section);
-                    }
-                }
-            }
-        }
         clip: true
         spacing: 4
         currentIndex: root.currentIndex
 
-        // We can't use a ScriptModel here because it would mess up sections
-        model: {
+        readonly property var rows: {
             const allResults = LauncherSearch.results;
-            // Find categories
-            var categories = new Set();
-            for (let i = 0; i < allResults.length; i++) {
-                categories.add(allResults[i].type);
-            }
-
-            // Collect max 4 per category
-            var categorizedResults = [];
-            let categoriesArray = Array.from(categories);
-            let totalCount = 0;
-            for (let c = 0; c < categoriesArray.length; c++) {
-                let category = categoriesArray[c];
-                let count = 0;
-                for (let i = 0; i < allResults.length; i++) {
-                    if (allResults[i].type === category) {
-                        if (totalCount >= root.resultLimit) {
-                            break;
-                        }
-                        const entry = allResults[i];
-                        const tweakedEntry = searchResultComp.createObject(null, Object.assign({}, entry));
-                        tweakedEntry.category = categorizedResults.length === 0 ? Translation.tr("Best match") : entry.type;
-
-                        categorizedResults.push(tweakedEntry); // Section header
-                        count++;
-                        totalCount++;
-                        if (count >= root.maxResultsPerCategory) {
-                            break;
-                        }
-                    }
+            const groups = new Map();
+            for (const entry of allResults) {
+                let group = groups.get(entry.type);
+                if (!group) {
+                    if (groups.size >= root.resultLimit) continue;
+                    group = [];
+                    groups.set(entry.type, group);
                 }
-                if (totalCount >= root.resultLimit) {
-                    break;
+                if (group.length < root.maxResultsPerCategory) group.push(entry);
+            }
+            const categorizedResults = [];
+            for (const group of groups.values()) {
+                for (const entry of group) {
+                    const category = categorizedResults.length ? entry.type : Translation.tr("Best match");
+                    categorizedResults.push({ entry, category });
+                    if (categorizedResults.length >= root.resultLimit) return categorizedResults;
                 }
             }
-            
-            // print(JSON.stringify(categorizedResults, null, 2));
             return categorizedResults;
         }
-        onModelChanged: {
-            root.focusFirstItem();
-        }
-        delegate: SearchResultButton {
+        model: rows.length
+        onRowsChanged: if (resultList) root.focusFirstItem()
+        delegate: Column {
+            id: row
             required property int index
-            required property var modelData
-            entry: modelData
-            firstEntry: index === 0
-            width: ListView.view?.width
-            checked: resultListView.currentIndex === index
-            onRequestFocus: {
-                root.forceCurrentIndex(index);
+            readonly property var result: resultListView.rows[index]
+            width: resultListView.width
+            spacing: resultListView.spacing
+            function execute() { button.execute(); }
+
+            WChoiceButton {
+                width: parent.width
+                visible: row.result !== undefined && (row.index === 0
+                    || resultListView.rows[row.index-1]?.category !== row.result.category)
+                implicitHeight: 38
+                contentItem: WText {
+                    text: row.result?.category ?? ""
+                    font.pixelSize: Looks.font.pixelSize.large
+                    font.weight: Looks.font.weight.strong
+                }
+                onClicked: root.context.selectCategory(row.result.category)
+            }
+            SearchResultButton {
+                id: button
+                width: parent.width
+                entry: row.result?.entry ?? emptyEntry
+                firstEntry: row.index === 0
+                checked: resultListView.currentIndex === row.index
+                onRequestFocus: root.forceCurrentIndex(row.index)
             }
         }
     }
@@ -149,7 +120,7 @@ RowLayout {
     component ResultPreview: Rectangle {
         id: resultPreview
 
-        property LauncherSearchResult entry // LauncherSearchResult
+        property var entry: emptyEntry
 
         Layout.fillHeight: true
         color: Looks.colors.bg1
@@ -205,7 +176,7 @@ RowLayout {
                     const pinned = isAppEntry ? (Config.options.dock.pinnedApps.includes(appId)) : false;
                     const startPinned = isAppEntry ? (Config.options.launcher.pinnedApps.includes(appId)) : false;
                     var result = [
-                        searchResultComp.createObject(null, {
+                        ({
                             name: resultPreview.entry.verb,
                             iconName: isAppEntry ? "open_in_new" : "keyboard_return",
                             iconType: LauncherSearchResult.IconType.Material,
@@ -214,7 +185,7 @@ RowLayout {
                             }
                         }),
                         ...(isAppEntry ? [
-                            searchResultComp.createObject(null, {
+                            ({
                                 name: startPinned ? Translation.tr("Unpin from Start") : Translation.tr("Pin to Start"),
                                 iconName: startPinned ? "keep_off" : "keep",
                                 iconType: LauncherSearchResult.IconType.Material,
@@ -224,7 +195,7 @@ RowLayout {
                             })
                         ] : []),
                         ...(isAppEntry ? [
-                            searchResultComp.createObject(null, {
+                            ({
                                 name: pinned ? Translation.tr("Unpin from taskbar") : Translation.tr("Pin to taskbar"),
                                 iconName: pinned ? "keep_off" : "keep",
                                 iconType: LauncherSearchResult.IconType.Material,
@@ -234,7 +205,7 @@ RowLayout {
                             })
                         ] : []),
                     ];
-                    result = result.concat(resultPreview.entry.actions);
+                    result = result.concat(resultPreview.entry.actions ?? []);
                     return result;
                 }
                 delegate: WButton {
@@ -262,8 +233,4 @@ RowLayout {
         }
     }
 
-    Component {
-        id: searchResultComp
-        LauncherSearchResult {}
-    }
 }

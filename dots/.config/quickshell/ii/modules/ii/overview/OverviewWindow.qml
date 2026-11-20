@@ -49,7 +49,8 @@ Item { // Window
     property real iconToWindowRatio: centerIcons ? 0.23 : 0.15
     property real xwaylandIndicatorToIconRatio: 0.35
     property real iconToWindowRatioCompact: 0.6
-    property string iconPath: Quickshell.iconPath(AppSearch.guessIcon(windowData?.class), "image-missing")
+    readonly property string appClass: windowData?.class ?? ""
+    property string iconPath: Quickshell.iconPath(AppSearch.guessIcon(appClass), "image-missing")
     property bool compactMode: Appearance.font.pixelSize.smaller * 4 > targetWindowHeight || Appearance.font.pixelSize.smaller * 4 > targetWindowWidth
 
     property bool indicateXWayland: windowData?.xwayland ?? false
@@ -93,7 +94,7 @@ Item { // Window
     ScreencopyView {
         id: windowPreview
         anchors.fill: parent
-        captureSource: GlobalStates.overviewOpen ? root.toplevel : null
+        captureSource: GlobalStates.overviewOpen && root.visible ? root.toplevel : null
         // [gus patch] Don't *live*-capture truly-fullscreen windows (fullscreen >= 2).
         // A continuous toplevel copy forces composition on that output and kills its
         // direct scanout (e.g. osu! on the AOC when the overview/search opens on Super).

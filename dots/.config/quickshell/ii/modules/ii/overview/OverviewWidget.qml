@@ -32,18 +32,10 @@ Item {
     property real scale: Math.max(0.01, Math.min(Config.options.overview.scale || 0.12,
         (displayWidth - 88 - (root.gridColumns - 1) * workspaceSpacing) / (displayWidth * root.gridColumns),
         (displayHeight - 220 - (root.gridRows - 1) * workspaceSpacing) / (displayHeight * root.gridRows)))
-    readonly property var workspaceCounts: {
-        const result = {};
-        for (const window of root.windows) {
-            const id = window.workspace?.id;
-            if (id > 0) result[id] = (result[id] ?? 0) + 1;
-        }
-        return result;
-    }
     property real reveal: 0
     opacity: reveal
     transform: Translate { y: (1 - root.reveal) * 18 }
-    NumberAnimation on reveal { from: 0; to: 1; duration: 320; easing.type: Easing.OutCubic; running: true }
+    NumberAnimation on reveal { from: 0; to: 1; duration: 320; easing.type: Easing.OutCubic; running: GlobalStates.overviewOpen }
     property color activeBorderColor: Appearance.colors.colSecondary
 
     readonly property real usableWidth: Math.max(1, displayWidth - ((monitorData?.reserved?.[0] ?? 0) + (monitorData?.reserved?.[2] ?? 0)) / (monitor?.scale ?? 1))
@@ -137,7 +129,7 @@ Item {
                             required property int index
                             property int colIndex: index
                             property int workspaceValue: root.workspaceGroup * root.workspacesShown + getWsInCell(row.index, colIndex)
-                            readonly property int windowCount: root.workspaceCounts[workspaceValue] ?? 0
+                            readonly property int windowCount: HyprlandData.windowStatsByWorkspace[workspaceValue]?.count ?? 0
                             property color defaultWorkspaceColor: Qt.alpha(Appearance.m3colors.m3surfaceContainerHigh, windowCount > 0 ? 0.78 : 0.32)
                             property color hoveredWorkspaceColor: ColorUtils.mix(defaultWorkspaceColor, Appearance.colors.colLayer1Hover, 0.1)
                             property color hoveredBorderColor: Appearance.colors.colLayer2Hover
@@ -225,13 +217,13 @@ Item {
                 delegate: OverviewWindow {
                     id: window
                     required property var modelData
-                    property int monitorId: windowData?.monitor
+                    property int monitorId: windowData?.monitor ?? -1
                     property var monitor: HyprlandData.monitors.find(m => m.id == monitorId)
                     property var address: `0x${modelData.HyprlandToplevel.address}`
                     toplevel: modelData
                     monitorData: this.monitor
                     scale: root.scale
-                    widgetMonitor: HyprlandData.monitors.find(m => m.id == root.monitor.id)
+                    widgetMonitor: root.monitorData
                     windowData: windowByAddress[address]
 
                     property bool atInitPosition: (initX == x && initY == y)
@@ -344,7 +336,7 @@ Item {
                 delegate: Rectangle {
                     required property int index
                     readonly property int ws: root.workspaceGroup * root.workspacesShown + index + 1
-                    readonly property int count: root.workspaceCounts[ws] ?? 0
+                    readonly property int count: HyprlandData.windowStatsByWorkspace[ws]?.count ?? 0
                     visible: count > 0
                     x: (root.workspaceImplicitWidth + root.workspaceSpacing) * root.getWsColumn(ws) + 8
                     y: (root.workspaceImplicitHeight + root.workspaceSpacing) * root.getWsRow(ws) + root.workspaceImplicitHeight - 28

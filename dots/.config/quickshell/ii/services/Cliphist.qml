@@ -160,7 +160,8 @@ Singleton {
 
     Process {
         id: readProc
-        property list<string> buffer: []
+        // Build a private JS array, then publish the complete list once.
+        property var buffer: []
 
         command: [root.cliphistBinary, "list"]
 
@@ -172,7 +173,9 @@ Singleton {
 
         onExited: (exitCode, exitStatus) => {
             if (exitCode === 0) {
-                root.entries = readProc.buffer
+                const current = root.entries;
+                if (current.length !== buffer.length || buffer.some((value, i) => value !== current[i]))
+                    root.entries = buffer;
             } else {
                 console.error("[Cliphist] Failed to refresh with code", exitCode, "and status", exitStatus)
             }

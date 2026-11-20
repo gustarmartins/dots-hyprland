@@ -11,11 +11,18 @@ local qsIpcCall = "qs -c $qsConfig ipc call"
 -- `ipc show` is the side-effect-free liveness probe for the selected config.
 local qsIsAlive = "qs -c $qsConfig ipc show >/dev/null"
 
--- Send a toggle only for an uninterrupted Super tap, never every release.
+-- Both panel families keep a background or bar mapped during normal use.
+-- A qualified tap arrives here on release, so QS listens for the released event.
+local launcherTap = hl.dsp.global("quickshell:launcherTap")
 require("hyprland.super_tap").bind(function()
-    -- A global dispatcher inherits the release phase here, so it cannot
-    -- trigger Quickshell's onPressed handler. IPC invokes the toggle directly.
-    hl.dispatch(hl.dsp.exec_cmd(qsIpcCall .. " search toggle || " .. qsIsAlive .. " || pkill fuzzel || fuzzel"))
+    if hl.get_layers({ namespace = "quickshell:background" })[1]
+        or hl.get_layers({ namespace = "quickshell:bar" })[1]
+        or hl.get_layers({ namespace = "quickshell:verticalBar" })[1] then
+        hl.dispatch(launcherTap)
+    else
+        -- Also handles shell startup, layouts without a bar or background, and fuzzel.
+        hl.dispatch(hl.dsp.exec_cmd(qsIpcCall .. " search toggle || " .. qsIsAlive .. " || pkill fuzzel || fuzzel"))
+    end
 end)
 
 hl.bind("SUPER_L", hl.dsp.global("quickshell:workspaceNumber"), { ignore_mods = true, transparent = true })

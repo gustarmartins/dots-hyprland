@@ -10,8 +10,12 @@ QtObject {
     readonly property int activeWorkspace: monitor?.activeWorkspace?.id ?? 1
     readonly property int shownCount: Math.max(1, Config.options.bar.workspaces.shown)
     readonly property int group: Math.floor((activeWorkspace - 1) / shownCount)
-    readonly property var occupied: Array.from({length: shownCount}, (_, index) =>
-        Hyprland.workspaces.values.some(ws => ws && ws.id === root.getWorkspaceIdAt(index)))
+    readonly property var occupied: {
+        const ids = new Set();
+        for (const workspace of Hyprland.workspaces.values)
+            if (workspace) ids.add(workspace.id);
+        return Array.from({length: shownCount}, (_, index) => ids.has(root.getWorkspaceIdAt(index)));
+    }
     readonly property var biggestWindow: Array.from({length: shownCount}, (_, index) =>
         HyprlandData.biggestWindowForWorkspace(root.getWorkspaceIdAt(index)))
     // Each bar must judge its own active workspace, independent of keyboard focus.

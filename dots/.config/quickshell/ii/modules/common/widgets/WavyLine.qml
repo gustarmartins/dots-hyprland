@@ -13,21 +13,27 @@ Canvas {
         var ctx = getContext("2d");
         ctx.clearRect(0, 0, width, height);
 
-        var amplitude = root.lineWidth * root.amplitudeMultiplier;
-        var frequency = root.frequency;
-        var phase = Date.now() / 400.0;
-        var centerY = height / 2;
+        const amplitude = root.lineWidth * root.amplitudeMultiplier;
+        const first = root.lineWidth / 2;
+        const last = width - first;
+        if (last < first || root.fullLength <= 0) return;
+        const step = root.frequency * 2 * Math.PI / root.fullLength;
+        const angle = Date.now() / 400.0 + first * step;
+        const sinStep = Math.sin(step), cosStep = Math.cos(step);
+        let sin = Math.sin(angle), cos = Math.cos(angle);
+        const centerY = height / 2;
 
         ctx.strokeStyle = root.color;
         ctx.lineWidth = root.lineWidth;
         ctx.lineCap = "round";
         ctx.beginPath();
-        for (var x = ctx.lineWidth / 2; x <= root.width - ctx.lineWidth / 2; x += 1) {
-            var waveY = centerY + amplitude * Math.sin(frequency * 2 * Math.PI * x / root.fullLength + phase);
-            if (x === 0)
-                ctx.moveTo(x, waveY);
-            else
-                ctx.lineTo(x, waveY);
+        ctx.moveTo(first, centerY + amplitude * sin);
+        // Advance the angle by one pixel without a trigonometric call for each vertex.
+        for (let x = first + 1; x <= last; ++x) {
+            const nextSin = sin * cosStep + cos * sinStep;
+            cos = cos * cosStep - sin * sinStep;
+            sin = nextSin;
+            ctx.lineTo(x, centerY + amplitude * sin);
         }
         ctx.stroke();
     }

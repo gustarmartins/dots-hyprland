@@ -16,8 +16,12 @@ Item { // Wrapper
     id: root
 
     readonly property string xdgConfigHome: Directories.config
-    readonly property int typingDebounceInterval: 200
-    readonly property int typingResultLimit: 15 // Should be enough to cover the whole view
+    readonly property string highlightQuery: StringUtils.cleanOnePrefix(searchingText, [
+        Config.options.search.prefix.action, Config.options.search.prefix.app,
+        Config.options.search.prefix.clipboard, Config.options.search.prefix.emojis,
+        Config.options.search.prefix.math, Config.options.search.prefix.shellCommand,
+        Config.options.search.prefix.webSearch
+    ])
 
     property string searchingText: LauncherSearch.query
     property bool showResults: searchingText != ""
@@ -183,42 +187,24 @@ Item { // Wrapper
                     }
                 }
 
-                Timer {
-                    id: debounceTimer
-                    interval: root.typingDebounceInterval
-                    onTriggered: {
-                        resultModel.values = LauncherSearch.results ?? [];
-                    }
-                }
-
-                Connections {
-                    target: LauncherSearch
-                    function onResultsChanged() {
-                        resultModel.values = LauncherSearch.results.slice(0, root.typingResultLimit);
-                        root.focusFirstItem();
-                        debounceTimer.restart();
-                    }
-                }
-
-                model: ScriptModel {
-                    id: resultModel
-                    objectProp: "key"
-                }
+                // ListView only constructs the visible delegates. An integer model
+                // also avoids diffing thousands of clipboard or emoji records.
+                model: LauncherSearch.results.length
 
                 delegate: SearchItem {
                     id: searchItem
                     // The selectable item for each search result
-                    required property var modelData
+                    required property int index
                     anchors.left: parent?.left
                     anchors.right: parent?.right
-                    entry: modelData
-                    query: StringUtils.cleanOnePrefix(root.searchingText, [Config.options.search.prefix.action, Config.options.search.prefix.app, Config.options.search.prefix.clipboard, Config.options.search.prefix.emojis, Config.options.search.prefix.math, Config.options.search.prefix.shellCommand, Config.options.search.prefix.webSearch])
+                    entry: LauncherSearch.results[index]
+                    query: root.highlightQuery
 
                     Keys.onPressed: event => {
                         if (event.key === Qt.Key_Tab) {
                             if (LauncherSearch.results.length === 0)
                                 return;
-                            const tabbedText = searchItem.modelData.name;
+                            const tabbedText = searchItem.entry.name;
                             LauncherSearch.query = tabbedText;
                             searchBar.searchInput.text = tabbedText;
                             event.accepted = true;

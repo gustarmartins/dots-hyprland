@@ -422,16 +422,34 @@ var managed = {
 
 function canonicalPage(id) { return ["effects", "fonts"].indexOf(id) >= 0 ? "design" : id; }
 function page(id) { id = canonicalPage(id); return pages.find(function(p) { return p.id === id; }) || pages[0]; }
-function matches(entry, query) {
-    var haystack = [entry.title, entry.description || "", entry.section || "", entry.path || "", entry.unit || "", timeUnits[entry.unit] || "", page(entry.page).title].join(" ").toLowerCase();
-    return query.trim().toLowerCase().split(/\s+/).every(function(word) { return haystack.indexOf(word) >= 0; });
+var searchText = new WeakMap();
+function wordsOf(query) {
+    var text = (query || "").trim().toLowerCase();
+    return text ? text.split(/\s+/) : [];
+}
+function matchesWords(entry, words) {
+    if (!words.length) return true;
+    var haystack = searchText.get(entry);
+    if (haystack === undefined) {
+        haystack = [entry.title, entry.description || "", entry.section || "", entry.path || "", entry.unit || "", timeUnits[entry.unit] || "", page(entry.page).title].join(" ").toLowerCase();
+        searchText.set(entry, haystack);
+    }
+    return words.every(function(word) { return haystack.indexOf(word) >= 0; });
+}
+function matches(entry, query) { return matchesWords(entry, wordsOf(query)); }
+function matchingDestinations(query) {
+    var words = wordsOf(query);
+    return words.length ? destinations.filter(function(e) { return matchesWords(e, words); }) : [];
 }
 function sections(pageId, query) {
     var groups = [];
-    entries.filter(function(e) { return (!pageId || e.page === pageId) && matches(e, query || ""); }).forEach(function(e) {
+    var byKey = new Map();
+    var words = wordsOf(query);
+    entries.forEach(function(e) {
+        if ((pageId && e.page !== pageId) || !matchesWords(e, words)) return;
         var key = e.page + "/" + e.section;
-        var group = groups.find(function(g) { return g.key === key; });
-        if (!group) { group = {key:key, title:e.section, page:e.page, entries:[]}; groups.push(group); }
+        var group = byKey.get(key);
+        if (!group) { group = {key:key, title:e.section, page:e.page, entries:[]}; groups.push(group); byKey.set(key, group); }
         group.entries.push(e);
     });
     var order = {
