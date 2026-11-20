@@ -69,6 +69,11 @@ ShellRoot {
     IpcHandler {
         target: "shellControl"
         function reload(): void { Quickshell.reload(false) }
+        function restartForUpdate(): void {
+            Config.flushPendingWrites();
+            // Run normal teardown. The session's existing supervisor handles exit 75.
+            Qt.callLater(() => Qt.exit(75));
+        }
     }
 
     // Shortcuts

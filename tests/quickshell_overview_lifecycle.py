@@ -14,8 +14,10 @@ BASE = Path(tempfile.mkdtemp(prefix='qs-overview-lifecycle-'))
 OUT = BASE
 RUN = Path(tempfile.mkdtemp(prefix='qcap-')); RUN.chmod(0o700)
 REPO = Path(__file__).resolve().parents[1]
+SHELL_BINARY = Path(os.environ.get('QS_TEST_BINARY', '/usr/bin/qs')).resolve()
 COMPOSITOR = Path(shutil.which(os.environ.get('QS_TEST_HYPRLAND', 'Hyprland'))).resolve()
-COMPOSITOR_SHA256 = hashlib.sha256(COMPOSITOR.read_bytes()).hexdigest()
+with COMPOSITOR.open('rb') as binary:
+    COMPOSITOR_SHA256 = hashlib.file_digest(binary, 'sha256').hexdigest()
 env = os.environ.copy()
 assert f'/run/user/{os.getuid()}/bus' not in env.get('DBUS_SESSION_BUS_ADDRESS', ''), 'Private bus required'
 for key in ('DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'HYPRLAND_INSTANCE_SIGNATURE', 'DESKTOP_STARTUP_ID', 'XDG_ACTIVATION_TOKEN', 'QS_CONFIG_PATH', 'QS_CONFIG_NAME'):
@@ -99,17 +101,17 @@ ShellRoot {
         (OUT/'result.json').write_text(json.dumps(record,indent=2));print(json.dumps(record),flush=True)
         raise SystemExit(result.returncode)
     if os.environ.get('QS_CAPTURE_DEBUG'):env['WAYLAND_DEBUG']='1'
-    qs=launch(['/usr/bin/qs','-p',str(entry)],'overview')
+    qs=launch([str(SHELL_BINARY),'-p',str(entry)],'overview')
     env.pop('WAYLAND_DEBUG',None)
-    apps=launch(['/usr/bin/qs','-p',str(client)],'clients')
+    apps=launch([str(SHELL_BINARY),'-p',str(client)],'clients')
     def call(method,*args):
-        return subprocess.check_output(['/usr/bin/qs','-p',str(entry),'ipc','call','test',method,*args],env=env,text=True,stderr=subprocess.DEVNULL,timeout=4).strip()
+        return subprocess.check_output([str(SHELL_BINARY),'-p',str(entry),'ipc','call','test',method,*args],env=env,text=True,stderr=subprocess.DEVNULL,timeout=4).strip()
     def status():
         global last_state
         last_state=json.loads(call('status'))
         return last_state
     def show(opened):
-        subprocess.run(['/usr/bin/qs','-p',str(entry),'ipc','call','search','open' if opened else 'close'],
+        subprocess.run([str(SHELL_BINARY),'-p',str(entry),'ipc','call','search','open' if opened else 'close'],
                        env=env,check=True,stdout=subprocess.DEVNULL,timeout=4)
     def all_previews_ready():
         current=status()
@@ -128,7 +130,7 @@ ShellRoot {
             call('hideGrid','false')
             until(all_previews_ready)
         if cycle==10:
-            subprocess.check_call(['/usr/bin/qs','-p',str(client),'ipc','call','clients','fewer'],env=env,stdout=subprocess.DEVNULL)
+            subprocess.check_call([str(SHELL_BINARY),'-p',str(client),'ipc','call','clients','fewer'],env=env,stdout=subprocess.DEVNULL)
             until(lambda:status()['count']==4)
         if cycle%5==0:
             ctl('dispatch','hl.dsp.focus({workspace="2"})')
@@ -140,7 +142,7 @@ ShellRoot {
     assert warm['gridCreations']==1 and warm['gridLoaded'] and len(warm['captures'])==4,warm
     until(lambda:not status()['gridLoaded'])
     assert hashlib.sha256(COMPOSITOR.read_bytes()).hexdigest()==COMPOSITOR_SHA256, 'Compositor changed during test'
-    result={'status':'pass','cycles':30,'first':first,'warm':warm,'last':status(),'pid':qs.pid,'compositor':str(COMPOSITOR),'compositor_sha256':COMPOSITOR_SHA256,'output':str(OUT)}
+    result={'status':'pass','cycles':30,'shell_binary':str(SHELL_BINARY),'first':first,'warm':warm,'last':status(),'pid':qs.pid,'compositor':str(COMPOSITOR),'compositor_sha256':COMPOSITOR_SHA256,'output':str(OUT)}
     (OUT/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result),flush=True)
 except Exception as error:
     failure={'status':'failed','error':str(error),'output':str(OUT),'cycle':cycle,'last_state':last_state,'process_exits':[p.poll() for p in procs]}

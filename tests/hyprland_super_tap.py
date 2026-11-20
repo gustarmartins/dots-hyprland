@@ -46,7 +46,8 @@ shim.write_text("""#!/usr/bin/python3
 import os, sys
 if sys.argv[-2:] == ["search","toggle"]:
     with open(os.environ["QS_TEST_IPC_LOG"],"a") as log: log.write("tap\\n")
-os.execv("/usr/bin/qs",["/usr/bin/qs",*sys.argv[1:]])
+binary = os.environ.get("QS_TEST_BINARY", "/usr/bin/qs")
+os.execv(binary,[binary,*sys.argv[1:]])
 """)
 shim.chmod(0o755)
 env.update(PATH=f"{commands}:/usr/bin", QS_TEST_IPC_LOG=str(out / "ipc-taps"))
@@ -246,7 +247,7 @@ end)''' + tap_bindings[old_end:]
             return observed["changedAt"] - start
         assert ipc_count() == 0, "Normal Super taps launched IPC clients"
         for name, show in (("ipc",False),("native",True)):
-            subprocess.run(["/usr/bin/qs","-c","ii","ipc","call","test","background",str(show).lower()],env=env,check=True)
+            subprocess.run([env.get("QS_TEST_BINARY", "/usr/bin/qs"),"-c","ii","ipc","call","test","background",str(show).lower()],env=env,check=True)
             until(lambda:has_marker()==show)
             before=ipc_count()
             latencies=[]

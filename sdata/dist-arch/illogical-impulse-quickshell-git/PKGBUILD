@@ -1,4 +1,4 @@
-_commit='5d5d49873fe8cf1f99ddfd5006ceb2057c5c9b13'
+_commit='9b0f339b19057f4731bf3b48293307d7ef241671'
 # Useful links:
 # https://git.outfoxxed.me/quickshell/quickshell/commits/branch/master
 # https://aur.archlinux.org/packages/quickshell-git
@@ -7,7 +7,7 @@ groups=(illogical-impulse)
 _prefix='illogical-impulse'
 _pkgname=quickshell
 pkgname="$_prefix-$_pkgname-git"
-pkgver=0.3.1.r19.g5d5d498
+pkgver=0.3.2.r11.g9b0f339
 pkgrel=1
 pkgdesc="$_pkgname-git pinned commit and extra deps for $_prefix"
 arch=(x86_64 aarch64)
@@ -65,7 +65,7 @@ source=("$_pkgsrc::git+$url.git#commit=$_commit"
   0001-pipewire-guard-cached-node-interface.patch
   0002-test-wait-for-popup-polish.patch
   0003-hyprland-reconnect-event-socket.patch
-  tests/hyprland-reconnect.py
+  hyprland-reconnect.py
 )
 sha256sums=('SKIP'
   'd02da428ae72ca6bec2bf1be224674b39aaf7ddbff03d8c09a2f1eb81bd1cbdb'
@@ -99,7 +99,7 @@ build() {
   cmake -GNinja -S "$PWD" -B "$qs_build_dir" \
     -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
     -DCMAKE_INSTALL_PREFIX=/usr \
-    -DDISTRIBUTOR="Mekki 5d5d498 + PipeWire lifetime and Hyprland reconnect fixes" \
+    -DDISTRIBUTOR="Mekki ${_commit:0:7} + PipeWire lifetime and Hyprland reconnect fixes" \
     -DBUILD_TESTING=ON \
     -DINSTALL_QML_PREFIX=lib/qt6/qml
 

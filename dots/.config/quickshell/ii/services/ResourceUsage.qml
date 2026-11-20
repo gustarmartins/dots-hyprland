@@ -5,6 +5,7 @@ import qs.modules.common
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "resource" as Resource
 
 /**
  * Simple polled resource usage service with RAM, Swap, and CPU usage.
@@ -155,32 +156,7 @@ Singleton {
 
     // A tick requests one sample. Keep the blocking GPU driver reads independent
     // of CPU clock reads. A slow driver cannot build up a queue of old samples.
-    component SensorReader: Process {
-        id: reader
-        required property string sensor
-        property bool awaitingReply: false
-        signal sample(string line)
-        command: ["bash", Quickshell.shellPath("scripts/resource-sensors.sh"), sensor]
-        stdinEnabled: true
-        function requestSample() {
-            if (!running) {
-                running = true;
-            } else if (!awaitingReply) {
-                awaitingReply = true;
-                write("\n");
-            }
-        }
-        onStarted: requestSample()
-        onExited: awaitingReply = false
-        stdout: SplitParser {
-            onRead: line => {
-                reader.awaitingReply = false;
-                reader.sample(line);
-            }
-        }
-    }
-
-    SensorReader {
+    Resource.SensorReader {
         id: gpuStatsProc
         sensor: "gpu"
         onSample: line => {
@@ -204,7 +180,7 @@ Singleton {
         }
     }
 
-    SensorReader {
+    Resource.SensorReader {
         id: cpuClockProc
         sensor: "cpu-clock"
         onSample: line => root.cpuMaxClock = Number(line) / 1000

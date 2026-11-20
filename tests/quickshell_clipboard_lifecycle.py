@@ -51,7 +51,7 @@ def until(fn, timeout=15):
             result = fn()
             if result:
                 return result
-        except (subprocess.SubprocessError, json.JSONDecodeError, FileNotFoundError):
+        except (subprocess.SubprocessError, ValueError, FileNotFoundError):
             pass
         time.sleep(.08)
     raise AssertionError("Timeout; inspect " + str(OUT))
@@ -103,10 +103,17 @@ try:
     shell = OUT / "config/quickshell/ii"
     source = REPO / "dots/.config/quickshell/ii"
     shutil.copytree(source, shell)
+    main_shell = (source / "shell.qml").read_text()
+    start = main_shell.index('    IpcHandler {\n        target: "shellControl"')
+    end = main_shell.index('\n    }', start) + len('\n    }')
+    shell_control = main_shell[start:end]
     common = shell / "modules/common"
     (common / "Config.qml").write_text('''pragma Singleton
 import Quickshell
-Singleton { property var options: ({search:{sloppy:false},hacks:{arbitraryRaceConditionDelay:10}}) }
+Singleton {
+ property var options: ({search:{sloppy:false},hacks:{arbitraryRaceConditionDelay:10}})
+ function flushPendingWrites(): void {}
+}
 ''')
     (common / "Directories.qml").write_text('''pragma Singleton
 import Quickshell
@@ -116,16 +123,19 @@ Singleton { property string home: Quickshell.env("HOME") }
 import Quickshell
 import Quickshell.Io
 import qs.services
+import qs.modules.common
 ShellRoot {
+ SHELL_CONTROL
  Component.onCompleted: Cliphist.start()
  IpcHandler {
   target: "test"
+  function pid(): int { return Quickshell.processId; }
   function contains(text: string): bool { return Cliphist.entries.some(e => e.endsWith("\\t" + text)); }
   function imageCount(): int { return Cliphist.entries.filter(e => Cliphist.entryIsImage(e)).length; }
   function reload(): void { Quickshell.reload(false); }
  }
 }
-''')
+'''.replace('SHELL_CONTROL', shell_control))
     wrapper = OUT / "home/.local/bin/cliphist"
     wrapper.parent.mkdir(parents=True)
     (OUT / "home/.local/share/cliphist").mkdir(parents=True)
@@ -160,6 +170,14 @@ ShellRoot {
     row = next(r for r in rows if b"binary data" in r)
     assert subprocess.check_output([str(wrapper), "decode"], input=row, env=env) == image.getvalue()
     print("PASS: text and image saved, decoded and visible in the shell model", flush=True)
+    before_pid = int(ipc("test", "pid"))
+    ipc("shellControl", "restartForUpdate")
+    until(lambda: int(ipc("test", "pid")) != before_pid)
+    until(ready)
+    assert supervisor.poll() is None
+    assert ipc("test", "contains", "clipboard-before-crash") == "true"
+    assert ipc("test", "imageCount") == "1"
+    print("PASS: supervised update restart replaces only the shell and preserves captured history", flush=True)
 
     for i in range(3):
         ipc("test", "reload")

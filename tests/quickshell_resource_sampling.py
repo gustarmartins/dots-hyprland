@@ -11,12 +11,24 @@ import time
 
 assert os.environ.get('DBUS_SESSION_BUS_ADDRESS') and f'/run/user/{os.getuid()}/bus' not in os.environ['DBUS_SESSION_BUS_ADDRESS']
 repo=Path(__file__).resolve().parents[1]
+qs=os.environ.get('QS_TEST_BINARY','/usr/bin/qs')
 out=Path(tempfile.mkdtemp(prefix='qs-sampler-'))
 shell=out/'config/quickshell/ii'
 source=repo/'dots/.config/quickshell/ii'
 for name in ('services','scripts','modules/common'):
     (shell/name).mkdir(parents=True)
-shutil.copy2(source/'services/ResourceUsage.qml',shell/'services')
+resource_service=shell/'services/ResourceUsage.qml'
+resource_service.write_text('''pragma Singleton
+import QtQuick
+QtObject {
+    property real cpuMaxClock: -1
+    property real gpuUsage: 0
+    property real vramUsedPercentage: 0
+    property real gpuTempEdge: 0
+    property real gpuFan: 0
+    property var gpuUsageHistory: []
+    property var cpuUsageHistory: []
+}''')
 shutil.copy2(source/'scripts/resource-sensors.sh',shell/'scripts')
 (shell/'modules/common/Config.qml').write_text('''pragma Singleton
 import QtQuick
@@ -42,7 +54,7 @@ for name,v in {'mem_info_vram_total':8000,'mem_info_vram_used':2000,'gpu_busy_pe
 clock=out/'cpu/cpu3/cpufreq/scaling_cur_freq'
 clock.write_text('3700000\n')
 env=dict(os.environ, HOME=str(out/'home'),XDG_CONFIG_HOME=str(out/'config'),XDG_DATA_HOME=str(out/'data'),XDG_CACHE_HOME=str(out/'cache'),
-         XDG_STATE_HOME=str(out/'state'),XDG_RUNTIME_DIR=str(out/'run'),QT_QPA_PLATFORM='offscreen',WAYLAND_DISPLAY='',HYPRLAND_INSTANCE_SIGNATURE='')
+         XDG_STATE_HOME=str(out/'state'),XDG_RUNTIME_DIR=str(out/'run'),QT_QPA_PLATFORM='offscreen',QS_NO_RELOAD_POPUP='1',WAYLAND_DISPLAY='',HYPRLAND_INSTANCE_SIGNATURE='')
 entry=shell/'sample-test.qml'
 entry.write_text('''import QtQuick
 import Quickshell
@@ -58,10 +70,11 @@ ShellRoot {
                 history:ResourceUsage.gpuUsageHistory, cpuHistory:ResourceUsage.cpuUsageHistory.length});
         }
         function shrink():void {Config.options.resources.historyLength=2}
+        function reload():void {Quickshell.reload(false)}
     }
 }''')
 def call(fn):
-    return subprocess.check_output(['/usr/bin/qs','-p',str(entry),'ipc','call','fixture',fn],env=env,text=True,stderr=subprocess.DEVNULL,timeout=2).strip()
+    return subprocess.check_output([qs,'-p',str(entry),'ipc','call','fixture',fn],env=env,text=True,stderr=subprocess.DEVNULL,timeout=2).strip()
 def wait(fn):
     end=time.monotonic()+8
     while time.monotonic()<end:
@@ -76,8 +89,15 @@ def sensor_pids(parent):
     return {args[-1].decode():int(p) for p in pids if (procpath:=Path('/proc',p,'cmdline')).exists()
             and (args:=procpath.read_bytes().rstrip(b'\0').split(b'\0')) and str(helper).encode() in args}
 with (out/'shell.log').open('w') as log:
-    proc=subprocess.Popen(['/usr/bin/qs','-p',str(entry)],env=env,stdout=log,stderr=subprocess.STDOUT)
+    proc=subprocess.Popen([qs,'-p',str(entry)],env=env,stdout=log,stderr=subprocess.STDOUT)
     try:
+        wait(lambda v:v['clock']==-1)
+        # Add the real sampler to a running engine, as a dots update does.
+        shutil.copytree(source/'services/resource',shell/'services/resource')
+        pending=out/'resource-update.qml'
+        shutil.copy2(source/'services/ResourceUsage.qml',pending)
+        os.replace(pending,resource_service)
+        call('reload')
         initial=wait(lambda v:v['clock']==3700 and len(v['history'])==4)
         assert initial['gpu']==.63 and initial['memory']==.25 and initial['temp']==41 and initial['missing']==0,initial
         first=sensor_pids(proc.pid)

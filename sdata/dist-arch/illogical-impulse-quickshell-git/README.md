@@ -1,7 +1,9 @@
 # Pinned Mekki Quickshell package
 
-Native engine pinned to upstream `5d5d49873fe8cf1f99ddfd5006ceb2057c5c9b13`
-(0.3.1 plus 19 commits), retaining illogical-impulse dependencies.
+Native engine pinned to upstream `9b0f339b19057f4731bf3b48293307d7ef241671`
+(0.3.2 plus 11 commits), retaining illogical-impulse dependencies. This revision
+handles workspace ID changes, null screencopy targets, row identity changes in
+ScriptModel and the PipeWire event loop with the current Qt toolchain.
 This package does not replace or import the user's desktop QML configuration.
 
 Local patches:
@@ -34,6 +36,13 @@ the workstation's source/build symlinks. Debug symbols stay in the binary.
 The compatibility hook runs after Qt Base,
 Declarative and Wayland updates; rebuild this package after an ABI mismatch.
 
+For a native package update, the running `ii` shell exposes
+`shellControl.restartForUpdate`. Select its PID from `/usr/bin/qs list --all`,
+then call `/usr/bin/qs ipc --pid PID call shellControl restartForUpdate`.
+The shell flushes pending settings and exits normally with status 75. Its
+existing `qs_respawn.sh ii` supervisor then starts the installed executable.
+The usual `shellControl.reload` continues to reload QML in place.
+
 Before installing a changed pin, run the additional device-lifetime regression:
 
 ```sh
@@ -45,6 +54,14 @@ source and sink defaults (240 transitions), and stops its own server. It needs
 Python 3 and PipeWire tools; no root or desktop audio restart is used. Receipts
 are retained in the printed temporary directory. The prior installed 0.2.1 and
 unpatched current upstream both failed the first cycle; the guarded cache passes.
+
+The November 20 build passed all nine upstream suites and five private
+Hyprland reconnect checks on Qt 6.12.0. The packaged executable also passed
+240 private PipeWire transitions, 30 workspace overview open/close cycles,
+Super taps and chords, sensor upgrades, clipboard recovery and the settings
+UI. All 668 QML components in the deployed desktop tree compiled on this
+engine. Its supervised update retained both monitor bars and all four tray
+registrations on the desktop.
 
 Validated 2026-09-18 against Qt 6.11.2: nine upstream suites, private PipeWire
 regression, both custom panel-family component trees, Settings rendering and
