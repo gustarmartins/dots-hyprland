@@ -134,14 +134,14 @@ hl.bind("SUPER + ALT + F9", hl.dsp.exec_cmd("$HOME/.local/bin/obsctl split"),
 
 -- Keep hidden scratchpad transfers local to the sending monitor.
 require("custom.scratchpad")
-local emergencyPreference = (os.getenv("XDG_CONFIG_HOME") or (HOME .. "/.config")) .. "/hypr/emergency-terminal.state"
-local emergencyTerminal = hl.dsp.exec_cmd("HISTFILE=/dev/null foot --config=/dev/null --override=workers=1 --override=scrollback.lines=256 --app-id=com.mekki.emergency-terminal --title='Emergency terminal' /bin/bash --noprofile --norc -i")
-hl.bind("SUPER + CTRL + Return", function()
-    local preference = io.open(emergencyPreference, "r")
-    if preference then
-        local value = preference:read("*l")
-        preference:close()
-        if value and value:match("^%s*off%s*$") then return end
-    end
-    hl.dispatch(emergencyTerminal)
-end, { description = "App: Emergency terminal (foot)" })
+
+-- Read the preference in the child so a slow home filesystem cannot block Hyprland.
+hl.bind("SUPER + CTRL + Return", hl.dsp.exec_cmd([[
+    pref="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/emergency-terminal.state"
+    mode=on
+    if [ -r "$pref" ]; then read -r mode < "$pref" || :; fi
+    [ "$mode" = off ] && exit 0
+    export HISTFILE=/dev/null
+    exec foot --config=/dev/null --override=workers=1 --override=scrollback.lines=256 \
+        --app-id=com.mekki.emergency-terminal --title='Emergency terminal' /bin/bash --noprofile --norc -i
+]]), { description = "App: Emergency terminal (foot)" })

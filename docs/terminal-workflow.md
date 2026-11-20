@@ -33,7 +33,7 @@ The emergency shortcut starts a standalone Wayland `foot` process and Bash
 with startup files and saved history disabled. Its opaque window uses one
 render worker and 256 lines of scrollback. It needs a working Hyprland session
 and the `foot` package. Super+I → Launcher → Emergency terminal turns the
-shortcut on or off. Hyprland reads that preference when the key is pressed, so
+shortcut on or off. The launch command reads that preference in its own process, so
 the shortcut works while Quickshell, Kitty, tmux or the session bus is busy.
 
 SSH clipboard delivery depends on the client's OSC 52 support; pane capture and
