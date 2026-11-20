@@ -12,7 +12,6 @@ import qs.modules.waffle.looks
 import qs.modules.waffle.actionCenter.bluetooth
 import qs.modules.waffle.actionCenter.nightLight
 import qs.modules.waffle.actionCenter.volumeControl
-import qs.modules.waffle.actionCenter.wifi
 
 DelegateChooser {
     id: root
@@ -138,14 +137,7 @@ DelegateChooser {
     }
     DelegateChoice {
         roleValue: "network"
-        ActionCenterToggleButton {
-            toggleModel: NetworkToggle {}
-            name: toggleModel.statusText
-            icon: WIcons.internetIcon
-            menu: Component {
-                WifiControl {}
-            }
-        }
+        WNetworkToggle {}
     }
     DelegateChoice {
         roleValue: "nightLight"
