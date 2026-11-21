@@ -12,12 +12,16 @@ Rectangle {
     required property var setting
     property bool writable: true
     signal edited(string path)
+    signal providerEdited(var next)
+    signal navigate(string page)
+    property var providerValue
+    property string unavailableReason: ""
     property string error: ""
-    readonly property var value: read(setting.path)
+    readonly property var value: setting.provider ? providerValue : setting.kind === "destination" ? undefined : read(setting.path)
     readonly property string valueSuffix: setting.unit ? (Catalog.timeUnits[setting.unit] || setting.unit) : (setting.suffix || "")
     readonly property string accessibleTitle: setting.title + (valueSuffix ? ", " + valueSuffix : "")
-    readonly property bool available: (setting.when || []).every(pair => read(pair[0]) === pair[1])
-    readonly property bool compactEditor: ["toggle", "number", "choice", "monitor"].includes(setting.kind)
+    readonly property bool available: !unavailableReason && (setting.when || []).every(pair => read(pair[0]) === pair[1])
+    readonly property bool compactEditor: ["toggle", "number", "choice", "monitor", "destination"].includes(setting.kind)
     objectName: "setting:" + setting.path
     implicitHeight: layout.implicitHeight + 28
     color: Appearance.m3colors.m3surfaceContainerLow
@@ -31,6 +35,7 @@ Rectangle {
         return obj;
     }
     function dependencyMessage() {
+        if (unavailableReason) return unavailableReason;
         return (setting.when || []).filter(pair => read(pair[0]) !== pair[1]).map(pair => {
             const spec = Catalog.entries.find(e => e.path === pair[0]);
             const title = spec?.title ?? "the related option";
@@ -41,6 +46,11 @@ Rectangle {
     }
     function commit(next) {
         if (!root.writable || !root.available || !Config.ready) return;
+        if (setting.provider) {
+            if (next !== root.value) root.providerEdited(next);
+            root.error = "";
+            return;
+        }
         let keys = setting.path.split("."); let obj = Config.options;
         for (let i = 0; i < keys.length - 1; i++) obj = obj[keys[i]];
         if (JSON.stringify(obj[keys[keys.length - 1]]) !== JSON.stringify(next)) {
@@ -85,7 +95,8 @@ Rectangle {
                 Layout.preferredWidth: root.compactEditor ? Math.min(root.valueSuffix ? 300 : 250, layout.width) : layout.width
                 enabled: root.available && root.writable && Config.ready
                 opacity: enabled ? 1 : 0.45
-                sourceComponent: root.setting.kind === "toggle" ? toggleEditor
+                sourceComponent: root.setting.kind === "destination" ? destinationEditor
+                    : root.setting.kind === "toggle" ? toggleEditor
                     : root.setting.kind === "number" ? numberEditor
                     : root.setting.kind === "choice" || root.setting.kind === "monitor" ? choiceEditor
                     : root.setting.kind === "info" ? infoEditor
@@ -108,6 +119,14 @@ Rectangle {
             wrapMode: Text.WordWrap
             color: Appearance.m3colors.m3error
             font.pixelSize: 12
+        }
+    }
+    Component {
+        id: destinationEditor
+        SettingsButton {
+            text: Translation.tr("Open")
+            Accessible.name: Translation.tr("Open") + " " + root.setting.title
+            onClicked: root.navigate(root.setting.page)
         }
     }
     Component {

@@ -11,6 +11,7 @@ ScrollView {
     signal edited(string path)
     property string requestedSection: ""
     readonly property bool effectsDirty: desktopEffects.dirty
+    readonly property alias effectsEditor: desktopEffects
     readonly property bool effectsBusy: desktopEffects.busy || !desktopEffects.ready
     readonly property string effectsStatus: desktopEffects.status
     function applyEffects() { desktopEffects.run("apply", JSON.stringify(desktopEffects.draft)); }

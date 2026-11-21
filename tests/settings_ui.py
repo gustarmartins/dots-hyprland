@@ -190,10 +190,17 @@ probe = r'''
         function design(): string {
             const gpu=root.testFind("designExpand:gpu");
             const animation=root.testFind("designExpand:animation");
-            const effects=root.testFind("designEffects");
+            const effects=designPage.effectsEditor;
             return JSON.stringify({gpuExpanded:gpu?.parent?.parent?.expanded,animationExpanded:animation?.parent?.parent?.expanded,dirty:effects?.dirty,draft:effects?.draft});
         }
         function designTop(): void { designPage.contentItem.contentY=0; }
+        function searchGroups(): string {
+            return JSON.stringify(catalogPage.groups.map(group => ({
+                page:group.page, title:group.title,
+                rendered:!!root.testFind("searchGroup:" + group.page),
+                paths:[...group.entries, ...(group.timings || [])].filter(e => root.testFind("setting:" + e.path)).map(e => e.path)
+            })));
+        }
         function resize(width: int, height: int): void { root.width=width;root.height=height; }
         function value(path: string): string { let o=Config.options; for (const key of path.split(".")) o=o[key];return JSON.stringify(o); }
     }
@@ -339,6 +346,19 @@ try:
         'time.pomodoro.breakTime':'seconds', 'time.pomodoro.focus':'seconds', 'time.pomodoro.longBreak':'seconds',
         'updates.checkInterval':'minutes', 'hacks.arbitraryRaceConditionDelay':'milliseconds',
     }
+    expected_timings = set(unit_fields) | {'musicLoudness.autoInterval', 'effects.animationDuration', 'effects.ambientSpeed'}
+    for query in ('poll', 'interval', 'delay', 'time', 'interval/poll/time', 'frequency', 'timeout', 'duration'):
+        call('settings', 'search', query)
+        def all_timings():
+            groups = json.loads(call('test', 'searchGroups'))
+            return groups if groups and expected_timings <= {path for group in groups for path in group['paths']} else None
+        groups = until(all_timings)
+        ids = [g['page'] for g in groups]
+        assert ids == [page for page in pages if page in ids] and all(g['rendered'] for g in groups), (query, groups)
+    call('settings', 'search', 'weather poll')
+    assert {p for g in json.loads(call('test', 'searchGroups')) for p in g['paths']} == {'bar.weather.fetchInterval'}
+    call('settings', 'search', 'quux-nonexistent-fbf309')
+    assert json.loads(call('test', 'searchGroups')) == []
     for path, unit in unit_fields.items():
         select(path)
         label=json.loads(call('test','locate','unit:'+path))
@@ -421,6 +441,15 @@ try:
     screenshot('compact')
     assert not any(x in (OUT / 'settings.log').read_text() for x in ['ReferenceError:', 'TypeError:', 'Unable to assign', 'Binding loop', 'Failed to load configuration'])
     print('PASS: Design-first color/preset hierarchy, collapsed details, draft/reset/Apply, mode routing, lazy wallpaper library, all pages/read-only browsing, 15 explicit time units/accessibility/search/unchanged scales, toggle and text persistence, numeric/JSON validation with units, tile editing, font preview/apply reload, unrelated-value preservation, compact rendering', flush=True)
+    call('settings', 'search', 'launcher delay')
+    type_text('number:search.nonAppResultDelay', '135')
+    until(lambda: read('search.nonAppResultDelay') == 135)
+    call('settings', 'search', 'animation duration')
+    type_text('number:effects.animationDuration', '105')
+    until(lambda: json.loads(call('test','design'))['dirty'])
+    click('designApply')
+    until(lambda: not json.loads(call('test','design'))['dirty'])
+    print('PASS: 18 timing controls across tabs, shared search words, ordered tab groups, live numeric editing and staged design Apply', flush=True)
 finally:
     process.terminate()
     try:

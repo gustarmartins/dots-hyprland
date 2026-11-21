@@ -13,9 +13,11 @@ ScrollView {
     property string pageId: "control"
     property string query: ""
     property bool writable: true
+    property var effectsEditor: null
     signal edited(string path)
     signal navigate(string page)
-    readonly property var groups: Catalog.sections(query.trim() ? "" : pageId, query)
+    readonly property bool searching: query.trim().length > 0
+    readonly property var groups: searching ? Catalog.searchGroups(query) : Catalog.sections(pageId, "")
     function showMemoryReview() {
         if (pageId === "memory" && extra.item) {
             extra.item.showReview();
@@ -48,27 +50,17 @@ ScrollView {
             sourceComponent: root.pageId === "control" ? vrrPage : root.pageId === "agents" ? agentPage : root.pageId === "storage" ? storagePage : root.pageId === "cryod" ? cryodPage : root.pageId === "company" ? companyPage : root.pageId === "memory" ? memoryPage : root.pageId === "mail" ? mailPage : root.pageId === "fonts" ? fontPage : root.pageId === "audio" ? audioPage : wallpaperPage
         }
         Repeater {
-            model: Catalog.matchingDestinations(root.query)
-            delegate: SettingsButton {
-                required property var modelData
-                Layout.fillWidth: true
-                Layout.leftMargin: 20
-                Layout.rightMargin: 20
-                text: "Open " + modelData.title + " →"
-                onClicked: root.navigate(modelData.page)
-            }
-        }
-        Repeater {
             model: extra.item?.libraryOpen ? [] : root.groups
             delegate: ColumnLayout {
                 required property var modelData
+                objectName: root.searching ? "searchGroup:" + modelData.page : ""
                 Layout.fillWidth: true
                 Layout.leftMargin: 20
                 Layout.rightMargin: 20
                 spacing: 8
                 StyledText {
                     Layout.fillWidth: true
-                    text: (root.query.trim() ? Catalog.page(modelData.page).title + " / " : "") + modelData.title
+                    text: modelData.title
                     font.pixelSize: 18
                     font.weight: Font.Medium
                     wrapMode: Text.WordWrap
@@ -81,6 +73,25 @@ ScrollView {
                         setting: modelData
                         writable: root.writable && !Config.writesPaused
                         onEdited: path => { root.edited(path); if (setting.apply === "colors") colorTimer.restart(); }
+                    }
+                }
+                Repeater {
+                    model: modelData.timings || []
+                    delegate: TimingSettingRow {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        setting: modelData
+                        effectsEditor: root.effectsEditor
+                        writable: root.writable && !Config.writesPaused
+                    }
+                }
+                Repeater {
+                    model: modelData.links || []
+                    delegate: SettingRow {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        setting: ({kind:"destination", path:"destination." + modelData.title, title:modelData.title, page:modelData.page})
+                        onNavigate: page => root.navigate(page)
                     }
                 }
             }

@@ -1,4 +1,5 @@
 import QtQuick
+import "SettingsCatalog.js" as Catalog
 import QtQuick.Controls
 import QtQuick.Layouts
 import qs.services
@@ -89,19 +90,10 @@ ColumnLayout {
             Accessible.name: "Auto match loudness"
             onToggled: MusicLoudness.setAutoMatch(checked)
         }
-        RowLayout {
+        TimingSettingRow {
             visible: MusicLoudness.autoMatch
             Layout.fillWidth: true
-            StyledText { Layout.fillWidth: true; text: "Check every" }
-            SettingsComboBox {
-                objectName: "musicLoudnessAutoInterval"
-                Layout.preferredWidth: 110
-                model: ["15 seconds", "30 seconds", "60 seconds"]
-                currentIndex: [15, 30, 60].indexOf(MusicLoudness.autoInterval)
-                enabled: !MusicLoudness.busy
-                onActivated: index => MusicLoudness.setAutoInterval([15, 30, 60][index])
-                Accessible.name: "Automatic loudness check interval"
-            }
+            setting: Catalog.loudnessInterval
         }
         StyledText { Layout.fillWidth: true; visible: MusicLoudness.autoMatch; text: "Adjusts up or down by at most 1 dB per check, from −12 to +6 dB. Quiet passages and mixed audio are skipped. Manual − / + or Reset turns automatic matching off."; wrapMode: Text.WordWrap; font.pixelSize: 12 }
         SettingsButton { text: "Reset music loudness"; palette.buttonText: Appearance.m3colors.m3onSurface; onClicked: MusicLoudness.reset() }

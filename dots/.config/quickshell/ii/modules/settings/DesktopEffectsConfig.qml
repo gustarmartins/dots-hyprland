@@ -1,4 +1,5 @@
 import QtQuick
+import "SettingsCatalog.js" as Catalog
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
@@ -382,19 +383,10 @@ ColumnLayout {
                             onValueModified: root.edit("ambient_strength", value)
                         }
                     }
-                    RowLayout {
+                    TimingSettingRow {
                         Layout.fillWidth: true
-                        StyledText {
-                            Layout.fillWidth: true
-                            text: "Ambient animation speed (%)"
-                            wrapMode: Text.WordWrap
-                        }
-                        EffectsSpinBox {
-                            from: 40
-                            to: 200
-                            value: root.draft.ambient_speed ?? 40
-                            onValueModified: root.edit("ambient_speed", value)
-                        }
+                        effectsEditor: root
+                        setting: Catalog.ambientSpeed
                     }
                 }
             },
@@ -629,19 +621,10 @@ ColumnLayout {
                         onValueModified: root.edit("samples", value)
                     }
                 }
-                RowLayout {
+                TimingSettingRow {
                     Layout.fillWidth: true
-                    StyledText {
-                        Layout.fillWidth: true
-                        text: "Animation duration (%)"
-                        wrapMode: Text.WordWrap
-                    }
-                    EffectsSpinBox {
-                        from: 50
-                        to: 160
-                        value: root.draft[root.motionKey("tempo")] ?? 100
-                        onValueModified: root.edit(root.motionKey("tempo"), value)
-                    }
+                    effectsEditor: root
+                    setting: Catalog.animationDuration
                 }
                 RowLayout {
                     Layout.fillWidth: true

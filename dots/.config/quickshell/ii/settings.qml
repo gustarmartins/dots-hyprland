@@ -141,6 +141,7 @@ ApplicationWindow {
                     DesignPage { id: designPage; requestedSection: root.designSection; onEdited: path => { root.feedback = "Updated · " + (Catalog.entries.find(e => e.path === path)?.title ?? "Setting"); } }
                     CatalogPage {
                         id: catalogPage
+                        effectsEditor: designPage.effectsEditor
                         pageId: root.currentPage
                         query: root.query
                         writable: !Config.writesPaused
@@ -174,21 +175,21 @@ ApplicationWindow {
                     spacing: 10
                     StyledText {
                         Layout.fillWidth: true
-                        text: root.currentPage === "memory" ? "Memory-lock edits apply together with Apply all. Browsing never changes locks." : Config.writeError ? Config.writeError : Config.writesPaused ? "Applying desktop fonts…" : root.currentPage === "design" && !root.searching ? designPage.effectsDirty ? "Unapplied GPU / animation edits" : designPage.effectsStatus + " · Color and shell controls save immediately." : root.feedback
+                        text: root.searching && designPage.effectsDirty ? "Unapplied animation edits" : root.currentPage === "memory" ? "Memory-lock edits apply together with Apply all. Browsing never changes locks." : Config.writeError ? Config.writeError : Config.writesPaused ? "Applying desktop fonts…" : root.currentPage === "design" && !root.searching ? designPage.effectsDirty ? "Unapplied GPU / animation edits" : designPage.effectsStatus + " · Color and shell controls save immediately." : root.feedback
                         wrapMode: Text.WordWrap
                         font.pixelSize: 11
                         color: Appearance.m3colors.m3onSurfaceVariant
                     }
                     SettingsButton {
                         objectName: "designReset"
-                        visible: root.currentPage === "design" && !root.searching && designPage.effectsDirty
+                        visible: (root.currentPage === "design" || root.searching) && designPage.effectsDirty
                         enabled: !designPage.effectsBusy && !Config.writesPaused
                         text: "Reset edits"
                         onClicked: designPage.resetEffects()
                     }
                     SettingsButton {
                         objectName: "designApply"
-                        visible: root.currentPage === "design" && !root.searching && designPage.effectsDirty
+                        visible: (root.currentPage === "design" || root.searching) && designPage.effectsDirty
                         enabled: !designPage.effectsBusy && !Config.writesPaused
                         text: "Apply custom changes"
                         onClicked: designPage.applyEffects()
