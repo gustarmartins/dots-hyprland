@@ -10,6 +10,7 @@ import json
 import shutil
 import argparse
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 # --- ANSI Color Helpers ---
@@ -37,7 +38,6 @@ def bold_red(text): return col(text, "1;31")
 
 MOD_MAP = {
     'super': 'SUPER', 'win': 'SUPER', 'mod4': 'SUPER', 'mod': 'SUPER', 'logo': 'SUPER',
-    'super_l': 'SUPER', 'super_r': 'SUPER',
     'ctrl': 'CTRL', 'control': 'CTRL', 'mod3': 'CTRL',
     'alt': 'ALT', 'mod1': 'ALT', 'opt': 'ALT', 'option': 'ALT',
     'shift': 'SHIFT',
@@ -59,6 +59,7 @@ KEY_MAP = {
     'space': 'Space', 'spacebar': 'Space',
     'tab': 'Tab',
     'return': 'Return', 'enter': 'Return',
+    'super_l': 'Super_L', 'super_r': 'Super_R',
     'backspace': 'Backspace',
     'escape': 'Escape', 'esc': 'Escape',
     'delete': 'Delete', 'del': 'Delete',
@@ -160,7 +161,8 @@ def tokenize_user_query(q: str):
 def get_lua_extractor_script():
     return """
 HOME = os.getenv("HOME")
-package.path = HOME .. "/.config/hypr/?.lua;" .. HOME .. "/.config/hypr/?/init.lua;" .. package.path
+local config = arg[1]
+package.path = config .. "/?.lua;" .. config .. "/?/init.lua;" .. package.path
 
 local binds = {}
 local unbinds = {}
@@ -215,7 +217,7 @@ hl = {
             key = key,
             action = act_str,
             is_function = is_fn,
-            file = info.short_src or "",
+            file = info.source:gsub("^@", ""),
             line = info.currentline or 0,
             submap = current_submap,
             options = opts or {}
@@ -225,7 +227,7 @@ hl = {
         local info = debug.getinfo(2, "Sl")
         table.insert(unbinds, {
             key = key,
-            file = info.short_src or "",
+            file = info.source:gsub("^@", ""),
             line = info.currentline or 0
         })
     end,
@@ -238,6 +240,11 @@ hl = {
         current_submap = prev
     end,
     env = function(k, v) end,
+    on = function() end,
+    window_rule = function() end,
+    exec_cmd = function() end,
+    get_windows = function() return {} end,
+    get_layers = function() return {} end,
     get_config = function() return 1.0 end,
     config = function() end,
     notification = { create = function() end },
@@ -257,40 +264,12 @@ end
 
 function workspace_in_group(i) return i end
 
--- Find all keybinds.lua files
-local files_to_load = {}
-local function find_files()
-    local p = io.popen("find " .. HOME .. "/.config/hypr -name '*.lua' 2>/dev/null")
-    if p then
-        for f in p:lines() do
-            if f:match("keybinds%.lua") or f:match("variables%.lua") then
-                table.insert(files_to_load, f)
-            end
-        end
-        p:close()
-    end
-end
-find_files()
-
--- Ensure variables are loaded first
-pcall(function() dofile(HOME .. "/.config/hypr/hyprland/variables.lua") end)
-if is_file_exists(HOME .. "/.config/hypr/custom/variables.lua") then
-    pcall(function() dofile(HOME .. "/.config/hypr/custom/variables.lua") end)
-end
-
--- Load default keybinds
-pcall(function() dofile(HOME .. "/.config/hypr/hyprland/keybinds.lua") end)
-
--- Load custom keybinds
-if is_file_exists(HOME .. "/.config/hypr/custom/keybinds.lua") then
-    pcall(function() dofile(HOME .. "/.config/hypr/custom/keybinds.lua") end)
-end
-
--- Load any other keybinds.lua files found
-for _, f in ipairs(files_to_load) do
-    if f ~= HOME .. "/.config/hypr/hyprland/keybinds.lua" and f ~= HOME .. "/.config/hypr/custom/keybinds.lua" and not f:match("variables%.lua") then
-        pcall(function() dofile(f) end)
-    end
+-- Inspect registration only, without launching commands from configuration.
+os.execute = function() return nil end
+io.popen = function() return nil end
+for i = 2, #arg do
+    local ok, err = pcall(dofile, arg[i])
+    if not ok then io.stderr:write(tostring(err), "\\n") end
 end
 
 -- JSON Output
@@ -343,18 +322,27 @@ def extract_function_body(filepath: str, start_line: int, max_lines: int = 15) -
     except Exception:
         return ""
 
-def load_lua_binds():
+def load_lua_binds(hypr_dir):
     """Runs Lua evaluator to extract all binds dynamically defined in Lua configs."""
-    lua_code = get_lua_extractor_script()
+    root = Path(hypr_dir)
+    primary = [root / scope / name for name in ('variables.lua', 'keybinds.lua')
+               for scope in ('hyprland', 'custom')]
+    extras = sorted(p for p in root.rglob('*keybinds.lua') if p not in primary and '.conf-old' not in p.parts)
+    files = [p for p in primary + extras if p.is_file()]
+    if not files:
+        return [], []
     try:
-        res = subprocess.run(['lua', '-e', lua_code], capture_output=True, text=True, timeout=5)
+        res = subprocess.run(['lua', '-', str(root), *map(str, files)], input=get_lua_extractor_script(),
+                             capture_output=True, text=True, timeout=5)
+        if res.stderr.strip():
+            print(f'hyprbinds: Lua source: {res.stderr.strip()}', file=sys.stderr)
         if res.returncode == 0 and res.stdout.strip():
             for line in res.stdout.splitlines():
                 if line.startswith('{"binds":'):
                     data = json.loads(line)
                     return data.get("binds", []), data.get("unbinds", [])
-    except Exception:
-        pass
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        print(f'hyprbinds: could not read Lua bindings: {error}', file=sys.stderr)
     return [], []
 
 def scan_conf_binds(hypr_dir: str):
@@ -443,8 +431,8 @@ class KeybindEntry:
             self.description = re.sub(r'^\s*\[hidden\]\s*', '', self.description).strip()
 
 def collect_all_binds(include_conf=True):
-    hypr_dir = os.path.expanduser("~/.config/hypr")
-    lua_binds_raw, lua_unbinds_raw = load_lua_binds()
+    hypr_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "hypr"
+    lua_binds_raw, lua_unbinds_raw = load_lua_binds(hypr_dir)
     conf_binds_raw, conf_unbinds_raw = scan_conf_binds(hypr_dir) if include_conf else ([], [])
 
     all_entries = []
@@ -483,7 +471,50 @@ def collect_all_binds(include_conf=True):
                 entry.is_unbound = True
             all_entries.append(entry)
 
+    if include_conf:
+        add_live_bindings(all_entries)
     return all_entries
+
+
+def add_live_bindings(entries):
+    """Supplement source locations with binds registered by plugins and other config files."""
+    try:
+        result = subprocess.run(['hyprctl', '-j', 'binds'], capture_output=True, text=True, timeout=2)
+        if result.returncode:
+            return
+        live = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return
+    if not isinstance(live, list):
+        return
+
+    def signature(entry):
+        key = (entry.key or '').casefold()
+        # Hyprland includes the key's own modifier bit when exporting Super_L/R.
+        mods = entry.mods - {'SUPER'} if key in ('super_l', 'super_r') else entry.mods
+        return frozenset(mods), key, entry.submap, entry.description
+
+    configured = Counter(signature(e) for e in entries if not e.is_unbound)
+    modifiers = {1: 'SHIFT', 2: 'CAPS', 4: 'CTRL', 8: 'ALT', 16: 'MOD2', 32: 'MOD3', 64: 'SUPER', 128: 'MOD5'}
+    for row in live:
+        key = row.get('key') or ('code:' + str(row['keycode']) if row.get('keycode') else '')
+        if not key:
+            continue
+        action = row.get('dispatcher', '')
+        arg = row.get('arg', '')
+        if arg and not (arg.isdigit() and (action.startswith('HL.Dispatcher(') or action.startswith('function:'))):
+            action += ' ' + arg
+        item = KeybindEntry({'key': key, 'description': row.get('description', ''), 'action': action,
+                             'submap': row.get('submap', ''), 'locked': row.get('locked', False),
+                             'repeating': row.get('repeat', False)}, source_type='live')
+        item.mods = {mod for bit, mod in modifiers.items() if row.get('modmask', 0) & bit}
+        item.key = normalize_key(key)
+        item.combo_formatted = format_combo(item.mods, item.key)
+        sig = signature(item)
+        if configured[sig]:
+            configured[sig] -= 1
+        else:
+            entries.append(item)
 
 def search_binds(entries, query: str):
     mods_q, key_q, raw_q = tokenize_user_query(query)
@@ -494,7 +525,7 @@ def search_binds(entries, query: str):
     text_matches = []
     
     raw_lower = raw_q.lower()
-    is_single_key_query = bool(key_q and not mods_q)
+    is_single_key_query = len(raw_q) == 1
     
     for e in entries:
         is_exact = False
@@ -520,11 +551,9 @@ def search_binds(entries, query: str):
         # Only perform text match if not already matched AND query is not a single character key
         if not (is_exact or is_superset or is_key_match):
             if not is_single_key_query and len(raw_lower) >= 2:
-                if (raw_lower in e.description.lower() or 
-                    raw_lower in e.action.lower() or 
-                    raw_lower in e.combo_formatted.lower() or
-                    raw_lower in e.display_file.lower()):
-                    is_text = True
+                searchable = " ".join((e.description, e.action, e.combo_formatted, e.display_file,
+                                       e.function_code, e.submap)).casefold()
+                is_text = all(word in searchable for word in raw_lower.split())
 
         if is_exact:
             exact_matches.append(e)
@@ -564,7 +593,7 @@ def render_entry(e: KeybindEntry, highlight_exact=False):
     tag_str = (" " + " ".join(status_tags)) if status_tags else ""
     
     combo_disp = bold_green(e.combo_formatted) if highlight_exact else bold_cyan(e.combo_formatted)
-    loc_disp = dim(f"{e.display_file}:{e.line}")
+    loc_disp = dim(f"{e.display_file}:{e.line}" if e.file else "Hyprland (live)")
     
     print(f"  • {combo_disp}{tag_str}  {loc_disp}")
     
