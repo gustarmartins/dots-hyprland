@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Compare desktop effects presets using AMDGPU and Linux kernel counters."""
+import argparse
+import csv
+import json
+import math
+import os
+from pathlib import Path
+import re
+import sys
+import time
+
+MIB = 1024 ** 2
+PRESETS = ('light', 'balanced', 'cinematic', 'aurora')
+METRICS = ('gpu', 'vram', 'gtt', 'cpu', 'ram')
+
+
+def number(path):
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def gpu_card(requested):
+    root = Path('/sys/class/drm')
+    cards = sorted(p for p in root.glob('card[0-9]*') if re.fullmatch(r'card\d+', p.name)
+                   and (p/'device/vendor').is_file() and (p/'device/vendor').read_text().strip() == '0x1002')
+    if requested:
+        if any(p.name == requested for p in cards):
+            return root/requested
+        raise SystemExit('No AMD DRM device matches ' + requested)
+    def priority(card):
+        connected = any(p.read_text().strip() == 'connected' for p in root.glob(card.name+'-*/status'))
+        return connected, number(card/'device/boot_vga') == 1
+    return max(cards, key=priority) if cards else None
+
+
+def preset():
+    try:
+        state = json.loads((Path.home()/'.local/state/desktop-effects/state.json').read_text())
+        value = state['preset']
+        return value if isinstance(value, str) and value else 'unknown'
+    except (OSError, KeyError, ValueError, TypeError):
+        return 'unknown'
+
+
+def cpu_ticks():
+    with open('/proc/stat') as source:
+        fields = [int(x) for x in source.readline().split()[1:9]]
+    return sum(fields), fields[3] + fields[4]
+
+
+def sample(device, prev, current):
+    with open('/proc/meminfo') as f:
+        ram = {k.rstrip(':'): int(v) for line in f for k, v, *_ in [line.split()] if k in ('MemTotal:', 'MemAvailable:')}
+    total = current[0] - prev[0]
+    values = {'cpu': 100 * (1 - (current[1] - prev[1]) / total) if total > 0 else None,
+              'ram': (ram['MemTotal'] - ram['MemAvailable']) / 1024}
+    for key, fname, divisor in [('gpu', 'gpu_busy_percent', 1), ('vram', 'mem_info_vram_used', MIB),
+                                ('gtt', 'mem_info_gtt_used', MIB)]:
+        val = number(device/fname) if device else None
+        values[key] = val/divisor if val is not None else None
+    return values
+
+
+class Average:
+    def __init__(self):
+        self.seconds = 0
+        self.sums = dict.fromkeys(METRICS, 0.0)
+        self.weights = dict.fromkeys(METRICS, 0.0)
+
+    def add(self, values, seconds):
+        self.seconds += seconds
+        for k, value in values.items():
+            if value is not None:
+                self.sums[k] += value*seconds
+                self.weights[k] += seconds
+
+    def mean(self, key):
+        return self.sums[key]/self.weights[key] if self.weights[key] else None
+
+
+def display(value, digits=0, sign=False):
+    return '—' if value is None else format(value, ('+' if sign else '') + f'.{digits}f')
+
+
+def line(name, elapsed, vals, reference=None):
+    gpu, vram, gtt, cpu, ram = (vals[k] for k in METRICS)
+    delta = vram - reference if vram is not None and reference is not None else None
+    return (f'{name:<12} {elapsed:>6} {display(gpu,1):>7} {display(vram):>9} {display(gtt):>8}'
+            f' {display(cpu,1):>7} {display(ram):>9} {display(delta,0,True):>8}')
+
+
+def report(stats):
+    baseline = stats.get('balanced')
+    ref = baseline.mean('vram') if baseline else None
+    rows = ['Preset        Time(s)   GPU %  VRAM MiB  GTT MiB   CPU %   RAM MiB    ΔVRAM']
+    for name in dict.fromkeys((*PRESETS, *stats)):
+        a = stats.get(name)
+        if a:
+            rows.append(line(name, display(a.seconds), {k:a.mean(k) for k in METRICS}, ref))
+        else:
+            rows.append(f'{name:<12}      —')
+    return '\n'.join(rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--interval', type=float, default=1, metavar='SECONDS', help='sample interval, default 1 second')
+    parser.add_argument('--settle', type=float, default=3, metavar='SECONDS', help='exclude transition time, default 3 seconds')
+    parser.add_argument('--samples', type=int, metavar='N', help='exit after N samples')
+    parser.add_argument('--card', metavar='cardN', help='choose an AMD card on a multi-GPU system')
+    parser.add_argument('--csv', type=Path, help='append samples, with units and a settled flag')
+    args = parser.parse_args()
+    if not math.isfinite(args.interval) or not .1 <= args.interval <= 3600 or not math.isfinite(args.settle) or args.settle < 0 or (args.samples is not None and args.samples < 1):
+        parser.error('use an interval of 0.1–3600 seconds, a nonnegative settle time and a positive sample count')
+    card = gpu_card(args.card)
+    device = card/'device' if card else None
+    name = f'{card.name} ({device.resolve().name})' if card else 'AMD GPU unavailable'
+    previous = cpu_ticks()
+    active = preset()
+    began = last = time.monotonic()
+    stats = {}
+    count = 0
+    stream = args.csv.open('a', newline='') if args.csv else None
+    writer = csv.writer(stream) if stream else None
+    if stream and stream.tell() == 0:
+        writer.writerow(['unix_seconds','preset','settled','gpu_percent','vram_used_mib','gtt_used_mib','cpu_percent','ram_used_mib'])
+    tty = sys.stdout.isatty()
+    try:
+        while args.samples is None or count < args.samples:
+            time.sleep(max(0, last + args.interval - time.monotonic()))
+            current = cpu_ticks()
+            now = time.monotonic()
+            selected = preset()
+            if selected != active:
+                active, began = selected, now
+            settled = last >= began + args.settle
+            values = sample(device, previous, current)
+            if settled and active != 'unknown':
+                stats.setdefault(active, Average()).add(values, now - last)
+            if writer:
+                writer.writerow([round(time.time(),3), active, int(settled), *[values[k] for k in METRICS]])
+                stream.flush()
+            if tty:
+                summary = report(stats).splitlines()
+                snapshot = (f'GPU {name}   Preset {active}' + ('' if settled else ' (settling)') +
+                            '\n\n' + summary[0] + '\n' + line('Now','',values) + '\n' + '\n'.join(summary[1:]) +
+                            '\n\nSettled averages. ΔVRAM is relative to Balanced (MiB). Ctrl+C finishes.')
+                print(('\033[2J' if count == 0 else '')+'\033[H'+snapshot+'\033[J', end='', flush=True)
+            else:
+                print(line(active, 'ready' if settled else 'settle', values), flush=True)
+            last, previous = now, current
+            count += 1
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if stream: stream.close()
+    print('\n'+report(stats))
+
+
+if __name__ == '__main__':
+    main()
