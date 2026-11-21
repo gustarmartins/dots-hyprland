@@ -1,5 +1,26 @@
 # Desktop settings
 
+Search works across tabs. Related words such as `delay`, `poll`, `interval`,
+`duration`, and `time` find timing controls together. Add a feature name to
+narrow the list, for example `weather poll` or `launcher delay`. Results are
+grouped in sidebar order and support editing in place. Animation edits keep
+their usual Apply / Reset behavior.
+
+Ctrl+Shift+Escape and the Task Manager buttons use the preferred application
+from Launcher & apps. The default `vminfo` opens its process picker in the
+configured terminal. Tick processes with Space, press X and type a signal or
+press Enter to send the displayed one. The first default is TERM. Each machine
+remembers the last confirmed choice. Ctrl+C cancels before sending.
+
+To compare the Light, Balanced, Cinematic and Aurora looks, run
+`qs-preset-monitor` in a terminal and switch looks in Design. It samples GPU
+busy time, driver-reported VRAM and GTT allocations, system CPU use and RAM
+use. It skips transition samples and shows each look's average and VRAM
+difference from Balanced. Use the same scene and workload for comparisons.
+`qs-preset-monitor --csv looks.csv` also saves your readings. Ctrl+C stops it.
+On an integrated GPU, VRAM and GTT both use system memory. The RAM and GPU
+columns overlap. `amdgpu_top --smi --no-pc` provides a separate GPU view.
+
 Open Settings with the existing Super+I shortcut. The app now follows the current
 fork instead of putting most controls into one long Interface page.
 

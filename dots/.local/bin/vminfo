@@ -2321,7 +2321,8 @@ def run_signal_action(processes, view_idx, proc_limit, term,
         default = preferred_signal()
         choice = keyboard_input(f'Signal [{default}] · Enter sends to {len(identities)} selected · Ctrl+C cancels: ')
         sig = normalize_signal(choice.strip() or default)
-        remember_signal(sig)
+        if signal_name(sig).removeprefix('SIG') != default:
+            remember_signal(sig)
         if all(target['uid'] == os.getuid() for target in identities.values()):
             status = signal_snapshot_pids(sig, identities)
         else:
