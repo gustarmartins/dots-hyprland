@@ -45,6 +45,8 @@ import shlex
 import json
 import math
 import stat
+import tempfile
+from pathlib import Path
 
 def keyboard_input(prompt=''):
     """Read a keyboard line, excluding terminal events and bracketed paste."""
@@ -2228,6 +2230,38 @@ def signal_name(signum):
         return f'SIG{int(signum)}'
 
 
+_session_signal = 'TERM'
+
+
+def signal_preference_path():
+    return Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state') / 'vminfo/last-signal'
+
+
+def preferred_signal():
+    try:
+        value = signal_preference_path().read_text(encoding='ascii')
+        return signal_name(normalize_signal(value)).removeprefix('SIG')
+    except (OSError, ValueError):
+        return _session_signal
+
+
+def remember_signal(signum):
+    global _session_signal
+    _session_signal = signal_name(signum).removeprefix('SIG')
+    path = signal_preference_path()
+    pending = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False, mode='w', encoding='ascii') as stream:
+            pending = Path(stream.name)
+            stream.write(_session_signal + '\n')
+        pending.replace(path)
+    except OSError:
+        # The picker still works when the state directory is read-only.
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+
+
 def signal_snapshot_pids(signum, identities):
     """Bind signals to pidfds; a recycled numeric PID is never a fallback."""
     failed = False
@@ -2273,35 +2307,45 @@ def run_guarded_signal_cli(argv):
 def run_signal_action(processes, view_idx, proc_limit, term,
                       preselected=None, expected_identities=None):
     term.suspend()
+    show_result = True
     try:
         print(f"\n{BOLD}{BRED}== Signal selected processes =={RESET}")
         selected = prompt_process_selection(processes, view_idx, proc_limit, 'signal', preselected)
         if not selected:
             return
-        sig = normalize_signal(keyboard_input('signal [TERM]: '))
         print_process_selection(selected)
-        print(f'[!] Sending {signal_name(sig)} to {len(selected)} selected PID(s).')
-        # Owner 2026-11-16: execute the selected action without a yes/no step.
-        # if keyboard_input("Confirm [y/N]: ").strip().casefold() not in {"y", "yes"}:
-        #     print("Cancelled.")
-        #     return
         identities = action_identities(selected, expected_identities)
         if not identities:
             print('[-] No selected process passed identity checks.')
             return
-        result = subprocess.run(['sudo', '--', sys.executable, os.path.realpath(__file__),
-                                 '--_signal', str(int(sig))] + resolved_arguments(identities),
-                                text=True, capture_output=True)
-        if result.stdout.strip():
-            print(result.stdout.strip())
-        if result.returncode:
-            print(result.stderr.strip() or f'[-] Signal action exited {result.returncode}.')
+        default = preferred_signal()
+        choice = keyboard_input(f'Signal [{default}] · Enter sends to {len(identities)} selected · Ctrl+C cancels: ')
+        sig = normalize_signal(choice.strip() or default)
+        remember_signal(sig)
+        if all(target['uid'] == os.getuid() for target in identities.values()):
+            status = signal_snapshot_pids(sig, identities)
+        else:
+            result = subprocess.run(['sudo', '--', sys.executable, os.path.realpath(__file__),
+                                     '--_signal', str(int(sig))] + resolved_arguments(identities),
+                                    text=True, capture_output=True)
+            status = result.returncode
+            if result.stdout.strip():
+                print(result.stdout.strip())
+            if status:
+                print(result.stderr.strip() or f'[-] Signal action exited {status}.')
+        show_result = status != 0
+        if not status:
+            return f'{signal_name(sig)} sent to {len(identities)} selected.'
     except (EOFError, KeyboardInterrupt):
-        print("Cancelled.")
+        show_result = False
+        return 'Signal cancelled.'
     except (OSError, ValueError) as error:
         print(f'[-] {error}')
     finally:
-        return_to_dashboard(term)
+        if show_result:
+            return_to_dashboard(term)
+        else:
+            term.resume()
 
 
 def run_zram_action(kind, term):
@@ -2540,11 +2584,12 @@ class ProcessManager:
             if not checked:
                 self.notice = 'Nothing selected; tick rows with Space first.'
             else:
+                notice = None
                 if ch.casefold() == 'p':
                     run_park_action(term, checked, self.identities)
                 elif ch.casefold() == 'x':
-                    run_signal_action(self.processes, view_idx, proc_limit, term,
-                                      preselected=checked, expected_identities=self.identities)
+                    notice = run_signal_action(self.processes, view_idx, proc_limit, term,
+                                               preselected=checked, expected_identities=self.identities)
                 else:
                     op = 'forceswap' if ch.casefold() == 'f' else 'unswap'
                     run_swap_action(op, self.processes, view_idx, proc_limit, term,
@@ -2554,7 +2599,7 @@ class ProcessManager:
                 self.selected.clear()
                 self.identities.clear()
                 self.cursor = self.offset = 0
-                self.notice = 'Snapshot refreshed; selection cleared.'
+                self.notice = notice or 'Snapshot refreshed; selection cleared.'
         elif ch in ('m', 'M', 'ESC'):
             self.active = False
             self.selected.clear()
