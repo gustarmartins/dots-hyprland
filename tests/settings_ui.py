@@ -356,7 +356,7 @@ try:
         ids = [g['page'] for g in groups]
         assert ids == [page for page in pages if page in ids] and all(g['rendered'] for g in groups), (query, groups)
     call('settings', 'search', 'weather poll')
-    assert {p for g in json.loads(call('test', 'searchGroups')) for p in g['paths']} == {'bar.weather.fetchInterval'}
+    assert {p for g in json.loads(call('test', 'searchGroups')) for p in g['paths']} == {'bar.weather.enable', 'background.widgets.weather.enable', 'bar.weather.fetchInterval'}
     call('settings', 'search', 'quux-nonexistent-fbf309')
     assert json.loads(call('test', 'searchGroups')) == []
     for path, unit in unit_fields.items():
