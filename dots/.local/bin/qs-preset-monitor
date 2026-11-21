@@ -11,7 +11,7 @@ import sys
 import time
 
 MIB = 1024 ** 2
-PRESETS = ('light', 'balanced', 'cinematic', 'aurora')
+PRESETS = {'light': 'Minimal', 'balanced': 'Soft glass', 'cinematic': 'Cinema', 'aurora': 'Aurora'}
 METRICS = ('gpu', 'vram', 'gtt', 'cpu', 'ram')
 
 
@@ -99,9 +99,9 @@ def report(stats):
     for name in dict.fromkeys((*PRESETS, *stats)):
         a = stats.get(name)
         if a:
-            rows.append(line(name, display(a.seconds), {k:a.mean(k) for k in METRICS}, ref))
+            rows.append(line(PRESETS.get(name, name), display(a.seconds), {k:a.mean(k) for k in METRICS}, ref))
         else:
-            rows.append(f'{name:<12}      —')
+            rows.append(f'{PRESETS.get(name, name):<12}      —')
     return '\n'.join(rows)
 
 
@@ -145,9 +145,9 @@ def main():
                 stream.flush()
             if tty:
                 summary = report(stats).splitlines()
-                snapshot = (f'GPU {name}   Preset {active}' + ('' if settled else ' (settling)') +
+                snapshot = (f'GPU {name}   Preset {PRESETS.get(active, active)} [{active}]' + ('' if settled else ' (settling)') +
                             '\n\n' + summary[0] + '\n' + line('Now','',values) + '\n' + '\n'.join(summary[1:]) +
-                            '\n\nSettled averages. ΔVRAM is relative to Balanced (MiB). Ctrl+C finishes.')
+                            '\n\nSettled averages. ΔVRAM is relative to Soft glass [balanced] (MiB). Ctrl+C finishes.')
                 print(('\033[2J' if count == 0 else '')+'\033[H'+snapshot+'\033[J', end='', flush=True)
             else:
                 print(line(active, 'ready' if settled else 'settle', values), flush=True)

@@ -12,7 +12,7 @@ configured terminal. Tick processes with Space, press X and type a signal or
 press Enter to send the displayed one. The first default is TERM. Each machine
 remembers the last confirmed choice. Ctrl+C cancels before sending.
 
-To compare the Light, Balanced, Cinematic and Aurora looks, run
+To compare Minimal, Soft glass (Balanced), Cinema and Aurora, run
 `qs-preset-monitor` in a terminal and switch looks in Design. It samples GPU
 busy time, driver-reported VRAM and GTT allocations, system CPU use and RAM
 use. It skips transition samples and shows each look's average and VRAM
