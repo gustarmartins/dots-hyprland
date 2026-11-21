@@ -30,7 +30,8 @@ Singleton {
     }
 
     function launchTaskManager() {
-        Quickshell.execDetached(["bash", "-c", `${Config.options.apps.taskManager}`]);
+        Quickshell.execDetached([Quickshell.env("HOME") + "/.local/bin/ii-task-manager",
+            Config.options.apps.taskManager, Config.options.apps.terminal]);
     }
 
     function hibernate() {
