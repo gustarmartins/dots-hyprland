@@ -221,7 +221,7 @@ Singleton {
                     property JsonObject clock: JsonObject {
                         property bool enable: true
                         property bool showOnlyWhenLocked: false
-                        property string placementStrategy: "leastBusy" // "free", "leastBusy", "mostBusy"
+                        property string placementStrategy: "leastBusy" // "free", "avoidWindows", "leastBusy", "mostBusy"
                         property real x: 100
                         property real y: 100
                         property string style: "cookie"        // Options: "cookie", "digital"
@@ -260,7 +260,7 @@ Singleton {
                     }
                     property JsonObject weather: JsonObject {
                         property bool enable: false
-                        property string placementStrategy: "free" // "free", "leastBusy", "mostBusy"
+                        property string placementStrategy: "free" // "free", "avoidWindows", "leastBusy", "mostBusy"
                         property real x: 400
                         property real y: 100
                     }
@@ -592,22 +592,37 @@ Singleton {
                 property JsonObject quickToggles: JsonObject {
                     property string style: "android" // Options: classic, android
                     property JsonObject android: JsonObject {
-                        property int columns: 7
+                        property int columns: 8
                         property list<var> toggles: [
-                            { "size": 7, "height": 3, "type": "vrr" },
-                            { "size": 2, "type": "network" },
-                            { "size": 2, "type": "bluetooth"  },
-                            { "size": 1, "type": "idleInhibitor" },
-                            { "size": 1, "type": "mic" },
-                            { "size": 2, "type": "audio" },
-                            { "size": 2, "type": "nightLight" },
-                            { "size": 2, "type": "memoryMode" },
-                            { "size": 2, "type": "focusMode" },
-                            { "size": 2, "type": "zramRecompress" },
-                            { "size": 2, "type": "zramWriteback" },
-                            { "size": 1, "type": "dropCaches" },
-                            { "size": 1, "type": "memoryCompact" },
-                            { "size": 2, "type": "gpuMemory" }
+                            { "column": 0, "row": 0, "size": 2, "height": 1, "type": "network" },
+                            { "column": 2, "row": 0, "size": 2, "height": 1, "type": "bluetooth" },
+                            { "column": 4, "row": 0, "size": 2, "height": 1, "type": "audio" },
+                            { "column": 6, "row": 0, "size": 2, "height": 1, "type": "mic" },
+                            { "column": 0, "row": 1, "size": 2, "height": 1, "type": "powerProfile" },
+                            { "column": 2, "row": 1, "size": 2, "height": 1, "type": "easyEffects" },
+                            { "column": 4, "row": 1, "size": 2, "height": 1, "type": "darkMode" },
+                            { "column": 6, "row": 1, "size": 2, "height": 1, "type": "nightLight" },
+                            { "column": 0, "row": 2, "size": 1, "height": 1, "type": "idleInhibitor" },
+                            { "column": 1, "row": 2, "size": 1, "height": 1, "type": "notifications" },
+                            { "column": 2, "row": 2, "size": 1, "height": 1, "type": "screenSnip" },
+                            { "column": 3, "row": 2, "size": 1, "height": 1, "type": "colorPicker" },
+                            { "column": 4, "row": 2, "size": 1, "height": 1, "type": "musicRecognition" },
+                            { "column": 5, "row": 2, "size": 1, "height": 1, "type": "antiFlashbang" },
+                            { "column": 6, "row": 2, "size": 1, "height": 1, "type": "onScreenKeyboard" },
+                            { "column": 7, "row": 2, "size": 1, "height": 1, "type": "vrr" },
+                            { "column": 0, "row": 3, "size": 2, "height": 1, "type": "focusMode" },
+                            { "column": 2, "row": 3, "size": 2, "height": 1, "type": "directScanout" },
+                            { "column": 4, "row": 3, "size": 2, "height": 1, "type": "tearing" },
+                            { "column": 6, "row": 3, "size": 2, "height": 1, "type": "gameMode" },
+                            { "column": 0, "row": 4, "size": 2, "height": 1, "type": "memoryMode" },
+                            { "column": 2, "row": 4, "size": 3, "height": 1, "type": "gpuMemory" },
+                            { "column": 5, "row": 4, "size": 3, "height": 1, "type": "zramAlgo" },
+                            { "column": 0, "row": 5, "size": 4, "height": 1, "type": "zramWriteback" },
+                            { "column": 4, "row": 5, "size": 4, "height": 1, "type": "zramRecompress" },
+                            { "column": 0, "row": 6, "size": 2, "height": 1, "type": "memoryCompact" },
+                            { "column": 2, "row": 6, "size": 2, "height": 1, "type": "dropCaches" },
+                            { "column": 4, "row": 6, "size": 2, "height": 1, "type": "buildCache" },
+                            { "column": 6, "row": 6, "size": 2, "height": 1, "type": "tripleBuffer" }
                         ]
                     }
                 }
@@ -617,6 +632,18 @@ Singleton {
                     property bool showMic: false
                     property bool showVolume: true
                     property bool showBrightness: true
+                }
+
+                property JsonObject displayStatus: JsonObject {
+                    property bool enable: true
+                    property string monitor: "" // Empty auto-selects AOC, then focused output
+                    property bool showProcessDetails: true
+                    property bool expandedByDefault: false
+                }
+
+                property JsonObject audioStatus: JsonObject {
+                    property bool enable: true
+                    property bool expandedByDefault: false
                 }
             }
 
@@ -695,7 +722,7 @@ Singleton {
                     property bool leftAlignApps: false
                 }
                 property JsonObject actionCenter: JsonObject {
-                    property list<string> toggles: [ "network", "bluetooth", "easyEffects", "powerProfile", "idleInhibitor", "nightLight", "darkMode", "antiFlashbang", "cloudflareWarp", "mic", "musicRecognition", "notifications", "onScreenKeyboard", "gameMode", "tearing", "vrr", "directScanout", "tripleBuffer", "screenSnip", "colorPicker" ]
+                    property list<string> toggles: [ "network", "bluetooth", "easyEffects", "powerProfile", "idleInhibitor", "nightLight", "darkMode", "antiFlashbang", "mic", "musicRecognition", "notifications", "onScreenKeyboard", "gameMode", "tearing", "vrr", "directScanout", "tripleBuffer", "screenSnip", "colorPicker" ]
                 }
                 property JsonObject calendar: JsonObject {
                     property bool force2CharDayOfWeek: true

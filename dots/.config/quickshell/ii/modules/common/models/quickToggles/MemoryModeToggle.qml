@@ -19,6 +19,9 @@ QuickToggleModel {
         : "Disk swap · off"
     toggled: memoryState === "ram-plus"
     altActionOnRightClick: true
+    altActionRequiresHold: true
+    altHoldDurationMs: 1000
+    altHoldLabel: memoryState === "ram-plus" ? Translation.tr("Disable swap") : Translation.tr("Enable 4G swap")
 
     mainAction: () => {
         Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-mode.sh report"])
@@ -58,5 +61,5 @@ QuickToggleModel {
         onTriggered: fetchActiveState.running = true
     }
 
-    tooltipText: Translation.tr("Left: memory information. Right: toggle 4 GiB of low-priority disk swap.")
+    tooltipText: Translation.tr("Left: memory information. Hold right-click: toggle 4 GiB of low-priority disk swap.")
 }

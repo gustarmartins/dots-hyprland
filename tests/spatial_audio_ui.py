@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory(prefix='spatial-audio-ui-') as tmp:
     for name, qmldir in {
         'qs/services':'module qs.services\nsingleton SpatialAudio 1.0 SpatialAudio.qml\n',
         'qs/modules/common':'module qs.modules.common\nsingleton Appearance 1.0 Appearance.qml\n',
-        'qs/modules/common/widgets':'module qs.modules.common.widgets\nStyledText 1.0 StyledText.qml\n',
+        'qs/modules/common/widgets':'module qs.modules.common.widgets\nStyledText 1.0 StyledText.qml\nMaterialSymbol 1.0 MaterialSymbol.qml\n',
     }.items():
         p=imports/name;p.mkdir(parents=True);(p/'qmldir').write_text(qmldir)
     (imports/'qs/services/SpatialAudio.qml').write_text('''pragma Singleton
@@ -20,6 +20,10 @@ import QtQuick
 QtObject {
  property bool enabled: false
  property bool automatic: true
+ property string profile: "atmos-7.1"
+ property var profiles: [{id:"atmos-7.1",label:"Dolby Atmos 7.1 HRIR",available:true},{id:"sofa-kemar",label:"PipeWire SOFA 3D (KEMAR)",available:true}]
+ property bool passthrough: false
+ property string hdmiSummary: "No Dolby HDMI AVR — connected displays are LPCM only"
  property bool busy: false
  property string message: "Off"
  property string error: ""
@@ -27,10 +31,13 @@ QtObject {
  function refresh() {}
  function setEnabled(value) { enabled=value;lastAction=value?"enable":"disable"; }
  function setAutomatic(value) { automatic=value;lastAction=value?"automatic-on":"automatic-off"; }
+ function setProfile(id) { profile=id;lastAction="profile:"+id; }
+ function setPassthrough(value) { passthrough=value;lastAction=value?"passthrough-on":"passthrough-off"; }
 }
 ''')
     (imports/'qs/modules/common/Appearance.qml').write_text('pragma Singleton\nimport QtQuick\nQtObject { property var m3colors: ({m3error:"red",m3onSurfaceVariant:"white",m3primary:"blue",m3surfaceContainerHighest:"gray",m3outline:"white",m3onPrimary:"white"}) }\n')
     (imports/'qs/modules/common/widgets/StyledText.qml').write_text('import QtQuick\nText {}\n')
+    (imports/'qs/modules/common/widgets/MaterialSymbol.qml').write_text('import QtQuick\nText { property real iconSize: 16; font.pixelSize: iconSize }\n')
     source=repo/'dots/.config/quickshell/ii/modules/settings'
     for name in ['SpatialAudioControls.qml','SettingsSwitch.qml']:shutil.copy2(source/name,root/name)
     (root/'SettingsButton.qml').write_text('import QtQuick.Controls\nButton {}\n')
@@ -50,7 +57,12 @@ Item {
    verify(!features.visible);verify(!master.checked);
    mouseClick(master);compare(SpatialAudio.lastAction,"enable");verify(features.visible);
    mouseClick(automatic);compare(SpatialAudio.lastAction,"automatic-off");
-   SpatialAudio.busy=true;verify(!master.enabled);verify(!automatic.enabled);
+   let sofaBtn=findChild(controls,"mpvSpatialProfile-sofa-kemar");
+   let ptSwitch=findChild(controls,"mpvSpatialPassthrough");
+   verify(sofaBtn!==null);verify(ptSwitch!==null);
+   mouseClick(sofaBtn);compare(SpatialAudio.lastAction,"profile:sofa-kemar");
+   mouseClick(ptSwitch);compare(SpatialAudio.lastAction,"passthrough-on");
+   SpatialAudio.busy=true;verify(!master.enabled);verify(!automatic.enabled);verify(!ptSwitch.enabled);
    SpatialAudio.busy=false;mouseClick(master);compare(SpatialAudio.lastAction,"disable");verify(!features.visible);
   }
  }

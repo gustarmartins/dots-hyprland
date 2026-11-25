@@ -49,4 +49,7 @@ end
 -- Shell overrides --
 require("hyprland.shellOverrides.main")
 require("custom.vrr")
+if not migrationTest and is_file_exists(HOME .. "/.config/hypr/custom/kitty-monitor-font.lua") then
+    require("custom.kitty-monitor-font")
+end
 

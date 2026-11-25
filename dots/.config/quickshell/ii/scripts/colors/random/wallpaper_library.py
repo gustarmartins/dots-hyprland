@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Persistent discovery originals, restorable history, and bounded storage."""
 import argparse
+from datetime import datetime
 import fcntl
 import hashlib
 import json
@@ -41,6 +42,62 @@ def atomic_json(path, value):
         os.replace(name, path)
     finally:
         Path(name).unlink(missing_ok=True)
+
+
+def sanitize_log_field(value):
+    return re.sub(r'[\r\n\t|]+', ' ', str(value or '')).strip()
+
+
+def cached_image_url(identity):
+    if not identity or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', str(identity)):
+        return ''
+    detail = read_json(CACHE / f'detail-{identity}.json', {})
+    url = (detail.get('data') if isinstance(detail, dict) else None) or {}
+    path = url.get('path', '') if isinstance(url, dict) else ''
+    return path if isinstance(path, str) and path.startswith(('https://', 'http://')) else ''
+
+
+def rotation_log_count(path):
+    try:
+        with Path(path).open('r', encoding='utf-8') as stream:
+            return sum(1 for line in stream if line.strip() and not line.lstrip().startswith('#'))
+    except OSError:
+        return 0
+
+
+def append_rotation_log(entry, event='applied', log_path=None):
+    path = Path(log_path) if log_path else (STATE / 'rotation.log')
+    raw_ts = entry.get('appliedAt') or entry.get('lastUsedAt')
+    ts = float(raw_ts) if isinstance(raw_ts, (int, float)) and raw_ts > 0 else time.time()
+    stamp = datetime.fromtimestamp(ts).astimezone().isoformat(timespec='seconds')
+    kind = sanitize_log_field(event or 'applied') or 'applied'
+    theme = sanitize_log_field(entry.get('theme') or entry.get('provider') or 'unknown') or 'unknown'
+    identity = sanitize_log_field(entry.get('id') or '-') or '-'
+    width, height = entry.get('width'), entry.get('height')
+    dims = f'{int(width)}x{int(height)}' if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0 else '-'
+    url = sanitize_log_field(entry.get('url', ''))
+    file_url = sanitize_log_field(entry.get('imageUrl') or entry.get('fileUrl') or cached_image_url(entry.get('id', '')))
+    source = sanitize_log_field(entry.get('source', ''))
+    local_path = sanitize_log_field(entry.get('path', ''))
+    parts = [stamp, kind, theme, identity, dims]
+    if url:
+        parts.append('url=' + url)
+    if file_url:
+        parts.append('file_url=' + file_url)
+    if source:
+        parts.append('source=' + source)
+    if local_path:
+        parts.append('path=' + local_path)
+    line = ' | '.join(parts) + '\n'
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a', encoding='utf-8') as stream:
+            stream.write(line)
+            stream.flush()
+        return True
+    except OSError as error:
+        print(f'Warning: could not append wallpaper rotation log: {error}', file=sys.stderr)
+        return False
 
 
 def pictures_dir():
@@ -147,6 +204,13 @@ class Library:
             except (OSError, ValueError):
                 continue
 
+    @property
+    def rotation_log_path(self):
+        return STATE / 'rotation.log'
+
+    def log_rotation(self, entry, event='applied'):
+        return append_rotation_log(entry, event=event, log_path=self.rotation_log_path)
+
     def snapshot(self, generate_thumbnails=False):
         entries = self.entries()
         if generate_thumbnails:
@@ -166,7 +230,10 @@ class Library:
             untrackedBytes=untracked_bytes,
             keptCount=sum(entry['favorite'] for entry in entries),
             protectedBytes=sum(entry['storageBytes'] for entry in entries if entry['protected']),
-            overBudget=total > limit, lowSpace=free < reserve, updatedAt=int(time.time()))
+            overBudget=total > limit, lowSpace=free < reserve,
+            rotationLogPath=str(self.rotation_log_path),
+            rotationLogCount=rotation_log_count(self.rotation_log_path),
+            updatedAt=int(time.time()))
         atomic_json(STATE / 'library.json', summary)
         return summary
 
@@ -234,8 +301,13 @@ class Library:
                 stdout=log, stderr=log, check=True, timeout=90)
         entry['appliedAt'] = entry['lastUsedAt'] = int(time.time())
         entry['queued'] = False
+        if not entry.get('imageUrl'):
+            cached = cached_image_url(identity)
+            if cached:
+                entry['imageUrl'] = cached
         atomic_json(self.metadata_path(identity), entry)
         atomic_json(STATE / 'current.json', entry)
+        self.log_rotation(entry, event='restored')
         history = read_json(STATE / 'history.json', [])
         atomic_json(STATE / 'history.json', (history + [entry])[-150:])
         return self.snapshot()
@@ -243,11 +315,41 @@ class Library:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['list', 'prune', 'keep', 'restore'])
+    parser.add_argument('action', choices=['list', 'prune', 'keep', 'restore', 'log-rotation'])
     parser.add_argument('identity', nargs='?')
     parser.add_argument('--value', choices=['true', 'false'], default='true')
+    parser.add_argument('--event', default='applied')
+    parser.add_argument('--theme', default='')
+    parser.add_argument('--url', default='')
+    parser.add_argument('--file-url', default='')
+    parser.add_argument('--source', default='')
+    parser.add_argument('--path', default='')
+    parser.add_argument('--width', type=int, default=0)
+    parser.add_argument('--height', type=int, default=0)
     args = parser.parse_args()
     STATE.mkdir(parents=True, exist_ok=True)
+    if args.action == 'log-rotation':
+        width, height = args.width, args.height
+        if (width <= 0 or height <= 0) and args.path and Path(args.path).is_file():
+            try:
+                with Image.open(args.path) as image:
+                    width, height = image.size
+            except (OSError, ValueError):
+                pass
+        logged = append_rotation_log(dict(
+            id=args.identity or '-', theme=args.theme, url=args.url,
+            imageUrl=args.file_url, source=args.source, path=args.path,
+            width=width, height=height, appliedAt=int(time.time()),
+        ), event=args.event)
+        with (STATE / 'fetch.lock').open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                Library().snapshot()
+        print(json.dumps({'logged': logged, 'rotationLogPath': str(STATE / 'rotation.log')}))
+        return 0 if logged else 1
     with (STATE / 'fetch.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

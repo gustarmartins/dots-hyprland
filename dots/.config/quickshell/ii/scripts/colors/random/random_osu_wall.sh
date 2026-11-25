@@ -41,4 +41,9 @@ if [ "$downloadPath" == "$currentWallpaperPath" ]; then
     downloadPath="$PICTURES_DIR/Wallpapers/random_wallpaper-1.$ext"
 fi
 curl "$link" -o "$downloadPath"
-"$SCRIPT_DIR/../switchwall.sh" --image "$downloadPath"
+if "$SCRIPT_DIR/../switchwall.sh" --image "$downloadPath"; then
+    osu_id="osu-$(basename "${link%%\?*}")"
+    python3 -B "$SCRIPT_DIR/wallpaper_library.py" log-rotation \
+        --event random --theme osu \
+        --file-url "$link" --path "$downloadPath" "$osu_id" >/dev/null 2>&1 || true
+fi

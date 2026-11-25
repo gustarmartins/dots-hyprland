@@ -8,12 +8,7 @@ import qs.modules.common.widgets
 
 ColumnLayout {
     id: root
-    spacing: 5
-    StyledText {
-        text: "Desktop mood"
-        font.pixelSize: 11
-        color: Appearance.m3colors.m3onSurfaceVariant
-    }
+    spacing: 3
     readonly property string currentValue: {
         const current = DesktopEffects.settings;
         if (current.preset !== "custom")
@@ -25,10 +20,13 @@ ColumnLayout {
         id: picker
         objectName: "controlMoodPicker"
         Layout.fillWidth: true
-        implicitHeight: 38
-        buttonRadius: 12
+        implicitHeight: 34
+        buttonRadius: 11
         buttonIcon: "auto_awesome"
         colBackground: Appearance.m3colors.m3surfaceContainerHigh
+        colBackgroundHover: Appearance.m3colors.m3surfaceContainerHighest
+        colBackgroundActive: Appearance.m3colors.m3secondaryContainer
+        colText: Appearance.m3colors.m3onSurface
         enabled: !apply.running
         model: [
             {label: "Light", value: "light"},
@@ -45,6 +43,7 @@ ColumnLayout {
             apply.running = true;
         }
         Accessible.name: "Desktop mood"
+        StyledToolTip { text: "Desktop mood · " + picker.displayText }
     }
     StyledText { id: errorLabel; visible: text.length > 0; Layout.fillWidth: true; font.pixelSize: 11; wrapMode: Text.WordWrap; color: Appearance.m3colors.m3error }
     Process {

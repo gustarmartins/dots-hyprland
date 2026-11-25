@@ -18,6 +18,9 @@ QuickToggleModel {
         : cacheState === "off" ? "Btrfs · 1-click RAM" : cacheState
     toggled: cacheState === "on"
     altActionOnRightClick: true
+    mainActionRequiresHold: true
+    mainHoldDurationMs: 950
+    mainHoldLabel: cacheState === "on" ? Translation.tr("Sync to Btrfs") : Translation.tr("Move to RAM")
 
     mainAction: () => {
         Quickshell.execDetached(["bash", "-c", "exec \"$HOME/.local/bin/build-cache-mode\" toggle-gui"])
@@ -55,5 +58,5 @@ QuickToggleModel {
         onTriggered: fetchState.running = true
     }
 
-    tooltipText: Translation.tr("L: copy Gradle caches to 6 GiB tmpfs or sync them back. R: status. Active writers safely block switching.")
+    tooltipText: Translation.tr("Hold left-click: copy Gradle caches to 6 GiB tmpfs or sync them back. Right-click: status. Active writers safely block switching.")
 }

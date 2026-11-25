@@ -69,11 +69,19 @@ end, { description = "Window: Close visible focused window" })
 hl.unbind("SUPER + F")
 hl.bind("SUPER + F", function()
     local window = hl.get_active_window()
+    if window and window.class == "osu!" then
+        hl.dispatch(hl.dsp.send_shortcut({ mods = "ALT", key = "Return", window = window }))
+        return
+    end
     if window and (window.class == "dev.eglantine.eglantine"
-        or ((window.class == "Eglantine" or window.class == "eglantine")
-            and window.title and window.title:match("^[Ee]glantine"))) then
-        -- The installed Eglantine profile uses Ctrl+N for its native fullscreen toggle.
-        hl.dispatch(hl.dsp.send_shortcut({ mods = "CTRL", key = "n", window = window }))
+        or window.class == "Eglantine" or window.class == "eglantine") then
+        -- Eglantine hides its menu bar in fullscreen so its QAction Ctrl+N may not exit;
+        -- send its QShortcut Exit Fullscreen (Ctrl+B) when already fullscreen.
+        local is_fullscreen =
+            (window.fullscreen and window.fullscreen ~= 0)
+            or (window.fullscreen_client and window.fullscreen_client ~= 0)
+        local key = is_fullscreen and "b" or "n"
+        hl.dispatch(hl.dsp.send_shortcut({ mods = "CTRL", key = key, window = window }))
         return
     end
     if window and (window.class == "dev.eden_emu.eden" or window.class == "eden") then
@@ -82,7 +90,7 @@ hl.bind("SUPER + F", function()
     end
 
     hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" }))
-end, { description = "Window: Fullscreen (Eden/Eglantine native)" })
+end, { description = "Window: Fullscreen (native in osu!, Eden and Eglantine)" })
 
 hl.bind("SUPER + ALT + A",
     hl.dsp.exec_cmd("pkill rofi; rofi -show animations -modi 'animations:~/.config/hypr/custom/scripts/hypr_anim.sh'"),

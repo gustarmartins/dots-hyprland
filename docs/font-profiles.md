@@ -74,6 +74,29 @@ Super+I → Desktop font profiles exposes hinting, grayscale rendering and a
 `fontctl preset humanist --kitty-size 12`: Fira Sans 11 pt, Hack 12 pt, full
 hinting and RGB. Browser CSS sizes remain independent of desktop point sizes.
 
+## Per-monitor Kitty font sizing
+
+`kitty-font-monitor` (configured in **Super+I → Design → Typography** or on the
+command line) manages per-monitor Kitty point sizes without changing Hyprland
+display scale—for example, a compact size on a 27" 1080p AOC monitor and a
+larger size on a 16" high-PPI Arzopa monitor.
+
+- **Dependencies:** `kitty` with `allow_remote_control socket-only` and
+  `listen_on unix:@kitty-{kitty_pid}.sock`, `hyprctl`, and the event-driven
+  Hyprland Lua hook (`dots/.config/hypr/custom/kitty-monitor-font.lua`). There
+  is no background polling daemon.
+- **Preset integration:** When enabled with a positive `default_size`, `fontctl`
+  preserves that default Kitty size across preset switches (explicit CLI
+  `--kitty-size` still wins) and live-reloads open Kitty windows with the new
+  monospace family and each monitor's configured point size when
+  `reload_on_fontctl` is on. `kitty-font-all 0` (`Ctrl+0`) restores each window
+  to its monitor's target size; manual per-window zoom (`Ctrl+Shift+`/`-`)
+  stays untouched until a window moves to a different monitor.
+- **Off behavior:** Turning the master switch off (`kitty-font-monitor set --enabled false --reset-live`)
+  hides the per-monitor controls in Super+I, makes the Hyprland Lua hook a
+  no-op, returns `fontctl` to each preset's built-in Kitty size, and resets
+  open Kitty windows back to `kitty.conf`'s `font_size`.
+
 Run `python3 tests/test_fontctl_browsers.py` for isolated profile discovery,
 content preservation, rendering-only behavior, active-profile protection,
 backup/idempotence and GTK missing-key regressions.

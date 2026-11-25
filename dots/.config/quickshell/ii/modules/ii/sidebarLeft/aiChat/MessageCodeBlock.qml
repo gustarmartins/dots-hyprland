@@ -26,16 +26,17 @@ ColumnLayout {
     spacing: 3
 
     function getCommandAnalysis(cmdText) {
+        const dark = Appearance.m3colors.darkmode;
         if (!cmdText || typeof cmdText !== "string") {
             return {
                 binary: "bash",
                 category: "general",
                 label: "EXEC",
                 icon: "terminal",
-                bg: "#181a1f",
-                badgeBg: "#282c34",
-                fg: "#adb5bd",
-                border: "#3a3f4b"
+                bg: dark ? "#181a1f" : Appearance.m3colors.m3surfaceContainer,
+                badgeBg: dark ? "#282c34" : Appearance.m3colors.m3surfaceContainerHighest,
+                fg: dark ? "#adb5bd" : Appearance.m3colors.m3onSurface,
+                border: dark ? "#3a3f4b" : Appearance.m3colors.m3outlineVariant
             };
         }
 
@@ -59,10 +60,10 @@ ColumnLayout {
                 category: "destructive",
                 label: "DESTRUCTIVE",
                 icon: "warning",
-                bg: "#2b1114",
-                badgeBg: "#4a1c22",
-                fg: "#ff8787",
-                border: "#7a2732"
+                bg: dark ? "#2b1114" : "#fff0ef",
+                badgeBg: dark ? "#4a1c22" : "#ffdad6",
+                fg: dark ? "#ff8787" : "#93000a",
+                border: dark ? "#7a2732" : "#e5a6a0"
             };
         }
 
@@ -73,10 +74,10 @@ ColumnLayout {
                 category: "write",
                 label: "MODIFY",
                 icon: "edit_note",
-                bg: "#261a0a",
-                badgeBg: "#473012",
-                fg: "#ffd43b",
-                border: "#6b491b"
+                bg: dark ? "#261a0a" : "#fff6e6",
+                badgeBg: dark ? "#473012" : "#ffdea8",
+                fg: dark ? "#ffd43b" : "#784900",
+                border: dark ? "#6b491b" : "#e0bd7d"
             };
         }
 
@@ -87,10 +88,10 @@ ColumnLayout {
                 category: "read",
                 label: "READ",
                 icon: "search",
-                bg: "#0c2117",
-                badgeBg: "#173d2b",
-                fg: "#69db7c",
-                border: "#255c42"
+                bg: dark ? "#0c2117" : "#eef8f0",
+                badgeBg: dark ? "#173d2b" : "#c8eed3",
+                fg: dark ? "#69db7c" : "#15572c",
+                border: dark ? "#255c42" : "#97cfa8"
             };
         }
 
@@ -100,10 +101,10 @@ ColumnLayout {
             category: "general",
             label: "EXEC",
             icon: "terminal",
-            bg: "#181a1f",
-            badgeBg: "#282c34",
-            fg: "#adb5bd",
-            border: "#3a3f4b"
+            bg: dark ? "#181a1f" : Appearance.m3colors.m3surfaceContainer,
+            badgeBg: dark ? "#282c34" : Appearance.m3colors.m3surfaceContainerHighest,
+            fg: dark ? "#adb5bd" : Appearance.m3colors.m3onSurface,
+            border: dark ? "#3a3f4b" : Appearance.m3colors.m3outlineVariant
         };
     }
 

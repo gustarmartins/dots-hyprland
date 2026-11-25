@@ -25,26 +25,37 @@ MANUAL = RUNTIME/'music-eq-manual.json'
 DEFAULT = dict(spotify=True, jukebox=True, mpv=True, osu=True, artists=True, genres=True, tracks=[], artist_rules={}, genre_rules={}, fallback='', osu_preset='astra-osu', route='')
 
 
-def osu_stream_active():
-    """Detect whether osu! has an active (running/uncorked) audio stream."""
+def audio_graph_state():
+    """Inspect PipeWire playback nodes once: returns (osu_active, spatial_sink_present, mpv_running)."""
     try:
         res = run('pw-dump', 'Node')
         if res.returncode == 0:
             nodes = json.loads(res.stdout)
+            osu_active = False
+            spatial_present = False
+            mpv_running = False
             for n in nodes:
-                props = n.get('info', {}).get('props', {})
-                if props.get('media.class') != 'Stream/Output/Audio':
-                    continue
+                info = n.get('info', {})
+                props = info.get('props', {})
+                state = info.get('state')
+                mc = props.get('media.class', '')
                 name = props.get('node.name', '')
+                if mc == 'Audio/Sink' and name == 'effect_input.spatial-surround':
+                    spatial_present = True
+                    continue
+                if mc != 'Stream/Output/Audio':
+                    continue
                 app = props.get('application.name', '')
                 binary = props.get('application.process.binary', '')
                 desc = props.get('node.description', '')
                 combined = f"{name} {app} {binary} {desc}".lower()
-                targets = ('osu!', 'osu!.exe', 'osu.appimage', 'sh.ppy.osulazer', 'osulazer')
-                if any(t in combined for t in targets) or name == 'alsa_playback.osu!':
-                    if n.get('info', {}).get('state') == 'running':
-                        return True
-            return False
+                if state == 'running':
+                    targets = ('osu!', 'osu!.exe', 'osu.appimage', 'sh.ppy.osulazer', 'osulazer')
+                    if any(t in combined for t in targets) or name == 'alsa_playback.osu!':
+                        osu_active = True
+                    if binary == 'mpv' or name == 'mpv' or app == 'mpv':
+                        mpv_running = True
+            return osu_active, spatial_present, mpv_running
     except Exception:
         pass
     try:
@@ -56,11 +67,16 @@ def osu_stream_active():
                 inp_lower = inp.lower()
                 if any(t in inp_lower for t in ('osu!', 'osu!.exe', 'osulazer', 'alsa_playback.osu!')):
                     if 'corked: no' in inp_lower:
-                        return True
-            return False
+                        return True, False, False
+            return False, False, False
     except Exception:
         pass
-    return False
+    return False, False, False
+
+
+def osu_stream_active():
+    """Detect whether osu! has an active (running/uncorked) audio stream."""
+    return audio_graph_state()[0]
 
 
 def read(path, default):
@@ -85,7 +101,7 @@ def norm(s):
 
 
 def file_preset(track, cfg):
-    if track.get('source') != 'jukebox': return None
+    if track.get('source') not in ('jukebox', 'mpv'): return None
     url=urlparse(track.get('url',''))
     if url.scheme != 'file' or url.netloc not in ('', 'localhost'): return None
     return cfg.get('file_rules',{}).get(unquote(url.path))
@@ -161,17 +177,24 @@ def apply(name, gain):
     data=json.loads(preset_path(name).read_text())['output']
     if 'limiter#0' not in data:
         raise RuntimeError('Preset must contain limiter#0')
-    float(gain)  # Reject missing/error IPC replies before changing anything.
+    target_gain=float(gain)  # Reject missing/error IPC replies before changing anything.
     exchange('load_preset:output:'+name)
-    for _ in range(10):
-        if exchange('get_last_loaded_preset:output') == name: break
-        time.sleep(.05)
+    for _ in range(30):
+        try:
+            if exchange('get_last_loaded_preset:output') == name: break
+        except (TimeoutError, ConnectionResetError, OSError):
+            pass
+        time.sleep(.1)
     else: raise RuntimeError('Preset load was not confirmed')
     # Bank presets end with limiter#0. Keep the listener output trim, not input drive.
     if 'limiter#0' not in json.loads(preset_path(name).read_text())['output']:
         raise RuntimeError('Preset must contain limiter#0')
     exchange('set_property:output:limiter:0:outputGain:'+gain)
-    if exchange('get_property:output:limiter:0:outputGain') != gain:
+    actual_gain=exchange('get_property:output:limiter:0:outputGain')
+    try:
+        if abs(float(actual_gain) - target_gain) > 1e-4:
+            raise RuntimeError('Output gain readback failed')
+    except ValueError:
         raise RuntimeError('Output gain readback failed')
     expected=json.loads(preset_path(name).read_text())['output'].get('equalizer#0',{}).get('input-gain')
     if expected is not None and abs(float(exchange('get_property:output:equalizer:0:inputGain'))-expected)>1e-5:
@@ -201,7 +224,8 @@ class Watcher:
         self.manager.connect('player-vanished',lambda *a:self.schedule())
         self.pending=0; self.key=None; self.last=None; self.before=None; self.held=False
         self.observed=None; self.manual_id=None
-        self.audio_proc=None; self.audio_listener=None
+        self.audio_proc=None; self.audio_listener=None; self.stopping=False
+        self._last_spatial_release=0.0
         self.load_session()
         self.loop=GLib.MainLoop()
         for name in self.manager.props.player_names: self.add(name)
@@ -212,20 +236,46 @@ class Watcher:
         self.start_audio_listener()
         self.schedule()
 
+    def check_audio_graph(self):
+        return audio_graph_state()
+
     def check_osu_active(self):
         return osu_stream_active()
+
+    def cleanup_idle_spatial_sink(self):
+        now=time.monotonic()
+        if now - getattr(self, '_last_spatial_release', 0.0) < 5.0:
+            return
+        helper=HOME/'.local/bin/mpv-spatial'
+        if not os.access(helper, os.X_OK):
+            return
+        self._last_spatial_release=now
+        try:
+            subprocess.Popen([str(helper), 'release'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
 
     def start_audio_listener(self):
         import shutil, threading
         if not shutil.which('pactl'): return
         def listen():
-            try:
-                proc=subprocess.Popen(['pactl','subscribe'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
-                self.audio_proc=proc
-                for line in proc.stdout:
-                    if 'sink-input' in line or 'client' in line:
-                        self.G.idle_add(self.schedule)
-            except Exception: pass
+            while not self.stopping:
+                proc=None
+                try:
+                    proc=subprocess.Popen(['pactl','subscribe'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+                    self.audio_proc=proc
+                    for line in proc.stdout:
+                        if self.stopping: break
+                        if ("'new'" in line or "'remove'" in line or "'change'" in line) and ('sink-input' in line or ' on sink ' in line or ' on server ' in line):
+                            self.G.idle_add(lambda: (self.schedule(), False)[1])
+                except Exception:
+                    pass
+                finally:
+                    if proc and proc.poll() is None:
+                        try: proc.terminate()
+                        except Exception: pass
+                if not self.stopping:
+                    time.sleep(2)
         t=threading.Thread(target=listen,daemon=True); t.start()
         self.audio_listener=t
 
@@ -314,6 +364,7 @@ class Watcher:
         self.observed=exchange('get_last_loaded_preset:output')
 
     def stop(self):
+        self.stopping=True
         if hasattr(self,'audio_proc') and self.audio_proc:
             try: self.audio_proc.terminate()
             except Exception: pass
@@ -367,10 +418,11 @@ class Watcher:
         current=self.observe_manual()  # Before idle/restore: pause must not swallow a click.
         tracks=self.tracks(cfg)
         playing=[t for t in tracks if t['playing']]
-        osu_is_active=cfg.get('osu',True) and self.check_osu_active()
 
         if len(playing)>1:
             self.restore()
+            if self.key == ['osu','active']:
+                self.key=None; self.held=False
             self.status('Paused: multiple players are playing')
             return
 
@@ -395,6 +447,15 @@ class Watcher:
             self.apply_target(name,reason,key,current,track=t)
             return
 
+        spatial_present=False; mpv_running=False
+        if 'check_osu_active' in getattr(self, '__dict__', {}):
+            osu_active=self.check_osu_active()
+        else:
+            osu_active, spatial_present, mpv_running=self.check_audio_graph()
+        if spatial_present and not mpv_running:
+            self.cleanup_idle_spatial_sink()
+        osu_is_active=cfg.get('osu',True) and osu_active
+
         if osu_is_active:
             key=['osu','active']
             changed=self.key != key
@@ -412,6 +473,13 @@ class Watcher:
             self.apply_target(target_preset,'osu! active audio',key,current)
             return
 
+        # Leaving osu! must always restore the prior preset before adopting any
+        # background paused player, otherwise osu!'s preset sticks permanently.
+        if self.key == ['osu','active']:
+            self.restore()
+            self.key=None
+            self.held=False
+
         if not playing and len(tracks)==1:
             paused_key=track_key(tracks[0],self.key)
             if paused_key is not None and paused_key != self.key:
@@ -421,8 +489,6 @@ class Watcher:
         paused_same=(not playing and len(tracks)==1 and track_key(tracks[0],self.key) == self.key)
         if not paused_same:
             self.restore()
-            if self.key == ['osu','active']:
-                self.key=None; self.held=False
         self.status('Manual preset held through pause/interruption' if self.held else
                     'Waiting for playback')
 

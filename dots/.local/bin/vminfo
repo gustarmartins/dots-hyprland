@@ -12,6 +12,8 @@ Keys:
   v      Cycle All / User / System processes
   f      Force-swap (evict) selected PIDs/names into swap
   u      Unswap (fault back) selected PIDs/names into RAM
+  p      Park selected PIDs/names (freeze + page out + optional disk writeback)
+  o      Unpark (resume) parked group(s) by number, name, PID, or all
   k      Send an explicit signal to selected PIDs
   r      Run ZRAM recompression
   w      Run guarded ZRAM writeback
@@ -26,7 +28,7 @@ Manager keys:
   /             Search by PID, user, UID, name, or command line
   i             Inspect the cursor process
   f / u / x     Force-swap / unswap / signal checked processes
-  p / o         Park checked processes / resume a parked group
+  p / o         Park checked processes / unpark checked or saved group(s)
   m             Leave manager and restore the prior pause state
 """
 import sys
@@ -513,7 +515,84 @@ def _read_zram_stats_unlocked():
     return stats
 
 
-def get_zram_stats(previous=None):
+
+_ZRAM_HELPERS = {'/usr/local/bin/memory-tool-apply', '/usr/local/libexec/cryod-desktop/memory-tool-apply',
+                 '/usr/lib/cryod-desktop/memory-tool-apply'}
+_ZRAM_VERBS = {'recompress', 'writeback', 'writeback-bounded', 'writeback-pressure-bounded', 'compact-zram'}
+
+
+def zram_helper_label(pid, lock_key):
+    """Identify a live helper. A lock conflict alone says nothing about its actor."""
+    before = read_process_identity(pid)
+    if not before or before['uid'] != 0:
+        return None
+    argv = (_read_proc_field(pid, 'cmdline') or '').split('\0')
+    if os.path.basename(argv[0]) in ('sh', 'bash'):
+        argv = argv[1:]
+    if len(argv) < 2 or argv[0] not in _ZRAM_HELPERS or argv[1] not in _ZRAM_VERBS:
+        return None
+    action = 'writeback' if argv[1] in ('writeback-bounded', 'writeback-pressure-bounded') else argv[1]
+    groups = (_read_proc_field(pid, 'cgroup') or '').splitlines()
+    if '0::/system.slice/cryod.service' in groups:
+        actor = 'CryoD'
+    else:
+        try:
+            fields = _read_proc_field(pid, 'stat').rsplit(')', 1)[1].split()
+            tty = int(fields[4])
+            parent = int(fields[1])
+            # sudo can give its child a new pty. Follow sudo back to the invoking tty.
+            for _ in range(3):
+                if _read_proc_field(parent, 'comm') != 'sudo':
+                    break
+                fields = _read_proc_field(parent, 'stat').rsplit(')', 1)[1].split()
+                tty = int(fields[4]) or tty
+                parent = int(fields[1])
+            own_tty = int(_read_proc_field('self', 'stat').rsplit(')', 1)[1].split()[4])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return None
+        if not tty:
+            actor = 'background'
+        elif tty == own_tty:
+            actor = 'this terminal'
+        elif 136 <= os.major(tty) <= 143:
+            actor = f'pts/{(os.major(tty) - 136) * 256 + os.minor(tty)}'
+        else:
+            actor = f'tty {os.major(tty)},{os.minor(tty)}'
+        login = _read_proc_field(pid, 'loginuid')
+        if login and login.isdecimal() and int(login) != 4294967295:
+            actor += ' (your login)' if int(login) == os.getuid() else f' (uid {int(login)})'
+    # FD 9 is the open file description used by both memory-tool helpers.
+    # When root's fdinfo is private, report the observed helper explicitly.
+    fdinfo = _read_proc_field(pid, 'fdinfo/9') or ''
+    held = any(len(parts) == 9 and parts[0] == 'lock:'
+               and parts[2:5] == ['FLOCK', 'ADVISORY', 'WRITE'] and parts[6] == lock_key
+               for parts in (row.split() for row in fdinfo.splitlines()))
+    if read_process_identity(pid) == before:
+        return f'{actor} {action}', held
+    return None
+
+
+def zram_busy_label(processes, lock_stat):
+    # Reuse the existing process census for terminal jobs. Short CryoD workers
+    # can start between dashboard samples, so also consult the service cgroup.
+    pids = {str(p['pid']) for p in processes if 'memory-tool-apply' in p.get('cmdline', '')}
+    try:
+        with open('/sys/fs/cgroup/system.slice/cryod.service/cgroup.procs') as stream:
+            pids.update(stream.read().split())
+    except OSError:
+        pass
+    lock_key = f'{os.major(lock_stat.st_dev):02x}:{os.minor(lock_stat.st_dev):02x}:{lock_stat.st_ino}'
+    observations = {info for pid in pids if (info := zram_helper_label(pid, lock_key))}
+    holders = {label for label, held in observations if held}
+    if len(holders) == 1:
+        return holders.pop()
+    labels = {label for label, _ in observations}
+    if len(labels) == 1:
+        return labels.pop() + ' helper seen'
+    return 'multiple helpers observed' if labels else 'owner unknown'
+
+
+def get_zram_stats(previous=None, processes=()):
     """Read ZRAM stats without allowing a tier action to freeze the TUI.
 
     The memory-tools wrapper holds the ZRAM action lock for the duration of a
@@ -522,33 +601,25 @@ def get_zram_stats(previous=None):
     first.  If it is busy, return the last sample and let the dashboard label
     it as stale; all other telemetry continues to refresh normally.
     """
-    fd = None
     try:
         fd = os.open(_ZRAM_ACTION_LOCK, os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        return _read_zram_stats_unlocked()
+    try:
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError) as exc:
-            if isinstance(exc, BlockingIOError) or getattr(exc, 'errno', None) in (11, 35):
-                stats = dict(previous or {})
-                stats['busy'] = True
-                stats['sample_time'] = stats.get('sample_time')
-                return stats
-            raise
-    except OSError:
-        # If the optional coordination file is absent, preserve legacy
-        # read-only behavior.  Normal memory-tools actions always create it.
-        return _read_zram_stats_unlocked()
-
-    try:
+        except BlockingIOError:
+            stats = dict(previous or {})
+            stats.update(busy=True, activity=zram_busy_label(processes, os.fstat(fd)))
+            return stats
+        except OSError:
+            return _read_zram_stats_unlocked()
         stats = _read_zram_stats_unlocked()
         stats['busy'] = False
         stats['sample_time'] = time.monotonic()
         return stats
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+        os.close(fd)
 
 
 def get_vm_knobs():
@@ -1158,8 +1229,48 @@ STATE_MAP = {
     'I': ('IDL', GRAY),
 }
 
-def fmt_state(raw):
+_APPPARK_ROOT = Path('/run/apppark')
+
+
+def read_parked_groups():
+    """Read current-boot parked receipts from /run/apppark without sudo."""
+    try:
+        if not _APPPARK_ROOT.is_dir():
+            return [], set()
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        groups = []
+        identities = set()
+        for path in sorted(_APPPARK_ROOT.glob('*.json')):
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or data.get('boot') != boot or data.get('state') == 'resumed':
+                continue
+            procs = data.get('processes') or []
+            names = list(dict.fromkeys(str(p.get('name', '')) for p in procs if p.get('name')))
+            label = data.get('label') or ', '.join(names) or data.get('id', '?')
+            groups.append({
+                'id': str(data.get('id', '')),
+                'label': str(label),
+                'mode': str(data.get('mode', 'disk')),
+                'state': str(data.get('state', 'parked')),
+                'processes': procs,
+                'created': data.get('created', 0),
+            })
+            for p in procs:
+                if 'pid' in p and 'start' in p:
+                    identities.add((str(p['pid']), int(p['start'])))
+        groups.sort(key=lambda g: (float(g.get('created', 0) or 0), g['id']))
+        return groups, identities
+    except OSError:
+        return [], set()
+
+
+def fmt_state(raw, parked=False):
     """Format process state character with color and label."""
+    if parked:
+        return f"{BCYAN}PRK{RESET}"
     base = raw[0] if raw else '?'
     label, color = STATE_MAP.get(base, (base, WHITE))
     return f"{color}{label}{RESET}"
@@ -1210,13 +1321,16 @@ VIEW_MODES = [
 
 # ── Dashboard Rendering ───────────────────────────────────────────────
 
-def footer_rows(width, count, filter_label='Filter', android=False, lite=False):
+def footer_rows(width, count, filter_label='Filter', android=False, lite=False, parked_count=0):
     controls = [('q', 'quit', DIM), ('1-2' if lite else '1-4', 'view', DIM),
                 ('v', filter_label, DIM), ('+/-', count, DIM)]
     if not android:
         controls += [('t', 'CPU ' + _cpu_mode, BCYAN)]
     if not lite:
+        unpark_label = f'unpark({parked_count})' if parked_count else 'unpark'
+        unpark_color = BGREEN if parked_count else DIM
         controls += [('f', 'swap', BMAGENTA), ('u', 'unswap', BGREEN),
+                     ('p', 'park', BCYAN), ('o', unpark_label, unpark_color),
                      ('k', 'sig', BRED), ('r', 'recomp', BMAGENTA), ('w', 'wb', BCYAN)]
     controls += [('Space', 'pause', DIM)]
     if not lite:
@@ -1237,9 +1351,11 @@ def control_rows(controls, width):
     return rows
 
 
-def manager_footer_rows(manager, width, count, filter_label):
+def manager_footer_rows(manager, width, count, filter_label, parked_count=0):
     query = f" · search={manager.query!r}" if manager.query else ''
     rows = [f" {BYELLOW}{len(manager.selected)} selected{RESET}{query}"]
+    unpark_label = f'unpark({parked_count})' if parked_count else 'unpark'
+    unpark_color = BGREEN if parked_count else DIM
     rows += control_rows([
         ('↑↓/jk', 'move', BYELLOW), ('PgUp/PgDn', 'page', DIM),
         ('Home/End', 'jump', DIM), ('Space', 'tick', BYELLOW),
@@ -1248,7 +1364,7 @@ def manager_footer_rows(manager, width, count, filter_label):
         ('i', 'inspect', BCYAN), ('1-4', 'view', DIM), ('v', filter_label, DIM),
         ('t', 'CPU ' + _cpu_mode, BCYAN),
         ('+/-', count, DIM), ('f', 'swap', BMAGENTA), ('u', 'unswap', BGREEN),
-        ('p', 'park', DIM), ('o', 'resume', DIM),
+        ('p', 'park', BCYAN), ('o', unpark_label, unpark_color),
         ('x', 'signal', BRED), ('m', 'exit', DIM),
     ], width)
     if manager.notice:
@@ -1511,7 +1627,8 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
             for row in compact_fields('WB', fields, tw):
                 emit(row)
     if zram_busy:
-        emit(f" {BYELLOW}ZRAM  busy / cached sample{RESET}")
+        sample = 'cached' if zr.get('sample_time') is not None else 'waiting for first sample'
+        emit(f" {BYELLOW}ZRAM  busy · {zr.get('activity', 'owner unknown')} · {sample}{RESET}")
 
     # ── PSI ─────────────────────────────────────────────────────────
     s10 = psi['some']['avg10']
@@ -1604,12 +1721,15 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     # The upper dashboard now wraps telemetry according to the live width.
     # Measure the rendered lines directly so process rows fill only genuinely
     # unused height instead of relying on stale fixed-line estimates.
+    parked_groups, parked_identities = read_parked_groups()
+    parked_count = len(parked_groups)
     count_hint = f"{min(proc_limit, len(ordered))}/{len(ordered)}"
     if manager_active:
         count_hint = f"{len(ordered)}-{len(ordered)}/{len(ordered)}"
-    footer_height = len(manager_footer_rows(manager, tw, count_hint, filter_label)
-                        if manager_active else footer_rows(tw, count_hint, filter_label))
-    table_chrome = 5 + footer_height
+    footer_height = len(manager_footer_rows(manager, tw, count_hint, filter_label, parked_count=parked_count)
+                        if manager_active else footer_rows(tw, count_hint, filter_label, parked_count=parked_count))
+    parked_banner_lines = 1 if parked_count else 0
+    table_chrome = 5 + parked_banner_lines + footer_height
     if manager_active and len(lines) + table_chrome + min(5, len(ordered)) > th:
         # Keep navigation, checkmarks, and actions visible in short split panes.
         lines = lines[:2]
@@ -1619,6 +1739,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                          f"PSI {s10:.2f}% / full {f10:.2f}%"])
     max_procs_by_height = max(1, th - len(lines) - table_chrome)
     effective_limit = min(proc_limit, max_procs_by_height)
+    _last_visible_proc_rows[0] = effective_limit
     window_start = 0
     if manager_active:
         manager.page_size = effective_limit
@@ -1637,6 +1758,11 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
         else:
             tabs.append(f"{DIM}[{vm['key']}]{RESET}")
     emit(f" {' '.join(tabs)}  {DIM}CPU {_cpu_mode.upper()}{RESET}")
+    if parked_count:
+        names = ', '.join(g['label'] for g in parked_groups[:4])
+        if parked_count > 4:
+            names += f", +{parked_count - 4} more"
+        emit(f" {BCYAN}{BOLD}Parked ({parked_count}):{RESET} {BWHITE}{names}{RESET} {DIM}· [o] unpark or 'unpark <name>'{RESET}")
     emit(f" {CYAN}{'─' * max(1, tw - 2)}{RESET}")
 
     sort_key = view['sort']
@@ -1665,6 +1791,9 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
         if width <= 1:
             return command[:width]
         return f"{command[:width - 1]}…"
+
+    def proc_is_parked(proc):
+        return (str(proc['pid']), proc.get('start')) in parked_identities
 
     if table_width < 55:
         # At genuinely tiny widths, retain a useful PID/command/value view.
@@ -1697,7 +1826,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                  f"{command_cell(p['comm'], command_width)}"
                  f"{BWHITE}{to_human(p['rss']):>8}{RESET}"
                  f"{secondary_color}{secondary:>8}{RESET}"
-                 f" {fmt_state(p['state'])}"
+                 f" {fmt_state(p['state'], proc_is_parked(p))}"
                  f"{oom_c}{oom:>4}{RESET}"
                  f"{DIM}{fmt_duration(p['elapsed']):>7}{RESET}")
     elif table_width < 90:
@@ -1717,7 +1846,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                  f"{BWHITE}{to_human(p['rss']):>10}{RESET}"
                  f"{swap_c}{to_human(p['swap']):>10}{RESET}"
                  f"{BWHITE}{format_process_cpu(p['pcpu']):>7}{RESET}"
-                 f" {fmt_state(p['state'])}"
+                 f" {fmt_state(p['state'], proc_is_parked(p))}"
                  f" {oom_c}{oom:>4}{RESET}"
                  f"{DIM}{fmt_duration(p['elapsed']):>8}{RESET}")
     else:
@@ -1744,7 +1873,7 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
                  f"{BWHITE}{format_process_cpu(p['pcpu']):>7}{RESET}"
                  f"{DIM}{p['pmem']:>6.1f}{RESET}%"
                  f"{DIM}{p['threads']:>5}{RESET}"
-                 f" {fmt_state(p['state'])}"
+                 f" {fmt_state(p['state'], proc_is_parked(p))}"
                  f"  {oom_c}{oom:>4}{RESET}"
                  f"{DIM}{fmt_duration(p['elapsed']):>8}{RESET}")
 
@@ -1757,8 +1886,8 @@ def draw_dashboard(mem, psi, zr, view_idx, paused, deltas, processes,
     count_info = (f"{window_start + 1}-{window_start + shown}/{total_procs}"
                   if manager_active and shown else
                   f"{shown}" if shown == total_procs else f"{shown}/{total_procs}")
-    footer = (manager_footer_rows(manager, tw, count_info, filter_label)
-              if manager_active else footer_rows(tw, count_info, filter_label))
+    footer = (manager_footer_rows(manager, tw, count_info, filter_label, parked_count=parked_count)
+              if manager_active else footer_rows(tw, count_info, filter_label, parked_count=parked_count))
     for row in footer:
         emit(row)
 
@@ -2391,10 +2520,13 @@ def run_zram_action(kind, term):
         term.resume()
 
 
+_last_visible_proc_rows = [0]
+
+
 def preferred_proc_limit():
-    """Use the available vertical space instead of an arbitrary width gate."""
+    """Fill the available vertical height instead of capping at 30 rows."""
     _, height = get_term_size()
-    return max(10, min(30, height - 30))
+    return max(10, height)
 
 
 def filtered_processes(processes, mode):
@@ -2448,25 +2580,95 @@ def run_process_inspector(proc, term, expected_identity=None):
         return_to_dashboard(term)
 
 
-def run_park_action(term, selected=None, expected_identities=None):
-    """Compact UI; process ownership and recovery live in apppark."""
+def _fetch_parked_groups_json(exe):
+    """Load live parked groups from apppark without sudo when possible."""
+    for cmd in ([sys.executable, exe, 'list', '--json'], ['sudo', '--', exe, 'list', '--json']):
+        proc = subprocess.run(cmd, text=True, capture_output=True)
+        if proc.returncode == 0:
+            try:
+                return json.loads(proc.stdout or '[]')
+            except ValueError:
+                return []
+    return []
+
+
+def run_park_action(term, selected=None, expected_identities=None, *,
+                    processes=None, view_idx=0, proc_limit=10, action=None):
+    """Compact park/unpark UI; process ownership and recovery live in apppark."""
     term.suspend()
     try:
         exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'apppark')
-        if selected is None:
-            subprocess.run(['sudo', '--', exe, 'list'], check=True)
-            receipt = keyboard_input('Resume ID (empty cancels): ').strip()
-            if receipt:
-                subprocess.run(['sudo', '--', exe, 'resume', receipt])
+        is_unpark = (action == 'unpark') or (action is None and selected is None)
+        if is_unpark:
+            print(f"\n{BOLD}{BGREEN}== Unpark processes =={RESET}")
+            groups = _fetch_parked_groups_json(exe)
+            if not groups:
+                print('No parked groups.')
+                return
+            if selected:
+                wanted_pids = {int(p['pid']) for p in selected}
+                wanted_ids = {(int(p['pid']), int(p['start'])) for p in selected if p.get('start') is not None}
+                matched = []
+                for g in groups:
+                    for gp in g.get('processes', ()):
+                        if (int(gp['pid']), int(gp['start'])) in wanted_ids or (not wanted_ids and int(gp['pid']) in wanted_pids):
+                            matched.append(g)
+                            break
+                if matched:
+                    print(f"[*] Unparking {len(matched)} checked group(s): "
+                          + ', '.join(f"{g['label']} ({g['id']})" for g in matched))
+                    result = subprocess.run(['sudo', '--', exe, 'resume', '--yes'] + [g['id'] for g in matched])
+                    if result.returncode:
+                        print('Unpark did not complete; see result above.')
+                    return
+                print('[*] Checked process(es) are not in a parked group. Choose below:')
+            for index, g in enumerate(groups, 1):
+                procs = g.get('processes', ())
+                proc_desc = ', '.join(f"{p['pid']}:{p['name']}" for p in procs[:4])
+                if len(procs) > 4:
+                    proc_desc += f", +{len(procs) - 4} more"
+                print(f"  {index:>2}) {g['label']:<20}  {g['mode']:<4}  {g['state']:<8}  "
+                      f"RSS {to_human(g.get('rss', 0)):>9}  swap {to_human(g.get('swap', 0)):>9}  "
+                      f"[{g['id']}]  ({proc_desc})")
+            if len(groups) == 1:
+                prompt = f"\nUnpark [Enter=1 ({groups[0]['label']}) | name | PID | all | q]: "
+            else:
+                prompt = '\nUnpark [# | 1,2 | 1-3 | name | PID | all | q] (empty cancels): '
+            raw = keyboard_input(prompt).strip()
+            if raw.casefold() in {'q', 'quit', 'c', 'cancel'}:
+                print('Cancelled.')
+                return
+            if not raw:
+                if len(groups) == 1:
+                    tokens = ['1']
+                else:
+                    print('Cancelled.')
+                    return
+            else:
+                tokens = raw.split()
+            result = subprocess.run(['sudo', '--', exe, 'resume', '--yes', '--allow-index', *tokens])
+            if result.returncode:
+                print('Unpark did not complete; see result above.')
             return
+
+        print(f"\n{BOLD}{BCYAN}== Park processes =={RESET}")
+        if selected is None:
+            selected = prompt_process_selection(processes or [], view_idx, proc_limit, 'park')
+            if not selected:
+                return
         identities = action_identities(selected, expected_identities)
         if not identities:
+            print('[-] No selected process passed identity checks.')
             return
         print_process_selection(selected)
-        mode = keyboard_input('Park with descendants [disk/ram, empty cancels]: ').strip().lower()
-        if mode not in {'disk', 'ram'}:
+        choice = keyboard_input('Park with descendants — [d]isk / [r]am (Enter=disk, q/Ctrl+C cancels): ').strip().lower()
+        if choice in {'', 'd', 'disk'}:
+            mode = 'disk'
+        elif choice in {'r', 'ram'}:
+            mode = 'ram'
+        else:
+            print('Cancelled.')
             return
-        # Choosing a mode is the existing explicit confirmation step.
         result = subprocess.run(['sudo', '--', exe, 'park', '--yes', '--tree',
                                  '--mode', mode] + resolved_arguments(identities))
         if result.returncode:
@@ -2568,17 +2770,23 @@ class ProcessManager:
             proc_filter = (proc_filter + 1) % 3
             self.cursor = self.offset = 0
         elif ch in ('+', '='):
-            proc_limit = min(50, proc_limit + 5)
+            base = _last_visible_proc_rows[0] if _last_visible_proc_rows[0] else proc_limit
+            proc_limit = min(max(50, get_term_size()[1]), min(proc_limit, base) + 5)
         elif ch in ('-', '_'):
-            proc_limit = max(3, proc_limit - 5)
+            base = _last_visible_proc_rows[0] if _last_visible_proc_rows[0] else proc_limit
+            proc_limit = max(3, min(proc_limit, base) - 5)
         elif ch in ('i', 'I') and ordered:
             inspected = ordered[self.cursor]
             run_process_inspector(inspected, term, snapshot_identity(inspected))
         elif ch in ('o', 'O'):
-            run_park_action(term)
+            checked = [proc for proc in sort_processes(self.processes, view_idx)
+                       if str(proc['pid']) in self.selected]
+            run_park_action(term, checked or None, self.identities if checked else None, action='unpark')
             self.processes = get_enriched_processes()
             self.selected.clear()
             self.identities.clear()
+            self.cursor = self.offset = 0
+            self.notice = 'Snapshot refreshed; selection cleared.'
         elif ch in ('f', 'F', 'u', 'U', 'x', 'X', 'p', 'P'):
             checked = [proc for proc in sort_processes(self.processes, view_idx)
                        if str(proc['pid']) in self.selected]
@@ -2587,7 +2795,7 @@ class ProcessManager:
             else:
                 notice = None
                 if ch.casefold() == 'p':
-                    run_park_action(term, checked, self.identities)
+                    run_park_action(term, checked, self.identities, action='park')
                 elif ch.casefold() == 'x':
                     notice = run_signal_action(self.processes, view_idx, proc_limit, term,
                                                preselected=checked, expected_identities=self.identities)
@@ -2627,6 +2835,7 @@ Dashboard:
   v             Cycle All / User / System processes
   +/-           Show more / fewer process rows
   f / u / k     Choose processes to force-swap / unswap / signal
+  p / o         Park processes (disk/ram) / unpark parked group(s)
   r / w         ZRAM recompression / writeback
   Space         Pause / resume
   q             Quit
@@ -2641,7 +2850,7 @@ Manager:
   /             Search by PID, user, UID, name, or command line; blank clears
   i             Inspect the cursor process
   f / u / x     Force-swap / unswap / signal checked processes
-  p / o         Park checked processes / resume a parked group
+  p / o         Park checked processes / unpark checked or saved group(s)
   1-4, v, +/-   Change sort, process filter, or visible row count
   m             Leave manager, restoring the prior pause state
 
@@ -2675,8 +2884,8 @@ def main():
     if not sys.stdout.isatty() or '--static' in sys.argv or '-s' in sys.argv:
         mem = get_meminfo()
         psi = get_psi()
-        zr = get_zram_stats()
         procs = get_enriched_processes(10)
+        zr = get_zram_stats(processes=procs)
         cpu_pct = None
         if _cpu_mode == 'live':
             prev_cpu = get_cpu_times()
@@ -2703,9 +2912,9 @@ def main():
     # Initialise data BEFORE the loop
     mem = get_meminfo()
     psi = get_psi()
-    zr = get_zram_stats()
     deltas = {}
     processes = get_enriched_processes(50)
+    zr = get_zram_stats(processes=processes)
     zones, vmstat = get_watermark_snapshot()
     vmstat_deltas = {}
     prev_cpu = get_cpu_times()
@@ -2776,16 +2985,25 @@ def main():
                     elif ch == '4':
                         view_idx = 3
                     elif ch in ('+', '='):
+                        base = _last_visible_proc_rows[0] if auto_proc_limit and _last_visible_proc_rows[0] else proc_limit
                         auto_proc_limit = False
-                        proc_limit = min(30, proc_limit + 5)
+                        proc_limit = min(max(50, get_term_size()[1]), base + 5)
                     elif ch in ('-', '_'):
+                        base = _last_visible_proc_rows[0] if auto_proc_limit and _last_visible_proc_rows[0] else proc_limit
                         auto_proc_limit = False
-                        proc_limit = max(3, proc_limit - 5)
+                        proc_limit = max(3, base - 5)
                     elif ch in ('f', 'F'):
                         run_swap_action('forceswap', filtered_processes(processes, proc_filter), view_idx, proc_limit, term)
                         processes = get_enriched_processes(50)
                     elif ch in ('u', 'U'):
                         run_swap_action('unswap', filtered_processes(processes, proc_filter), view_idx, proc_limit, term)
+                        processes = get_enriched_processes(50)
+                    elif ch in ('p', 'P'):
+                        run_park_action(term, processes=filtered_processes(processes, proc_filter),
+                                        view_idx=view_idx, proc_limit=proc_limit, action='park')
+                        processes = get_enriched_processes(50)
+                    elif ch in ('o', 'O'):
+                        run_park_action(term, action='unpark')
                         processes = get_enriched_processes(50)
                     elif ch in ('v', 'V'):
                         proc_filter = (proc_filter + 1) % 3
@@ -2812,7 +3030,7 @@ def main():
                         proc_limit = preferred_proc_limit()
                     mem = get_meminfo()
                     psi = get_psi()
-                    zr = get_zram_stats(zr)
+                    zr = get_zram_stats(zr, processes)
                     loadavg = get_loadavg()
                     uptime_s = get_uptime()
                     zones, vmstat = get_watermark_snapshot()

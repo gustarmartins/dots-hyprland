@@ -29,10 +29,15 @@ Scope {
             id: "gamma",
             sourceUrl: "indicators/GammaIndicator.qml"
         },
+        {
+            id: "audioDevice",
+            sourceUrl: "indicators/AudioDeviceIndicator.qml"
+        },
     ]
 
-    function triggerOsd() {
+    function triggerOsd(customTimeoutMs = Config.options.osd.timeout) {
         GlobalStates.osdVolumeOpen = true;
+        osdTimeout.interval = Math.max(400, customTimeoutMs);
         osdTimeout.restart();
     }
 
@@ -83,12 +88,17 @@ Scope {
     }
 
     Connections {
-        // Listen to protection triggers
+        // Listen to protection triggers & device plug/switch alerts
         target: Audio
         function onSinkProtectionTriggered(reason) {
             root.protectionMessage = reason;
             root.currentIndicator = "volume";
             root.triggerOsd();
+        }
+        function onDeviceEvent(title, subtitle, iconName) {
+            root.protectionMessage = "";
+            root.currentIndicator = "audioDevice";
+            root.triggerOsd(2400);
         }
     }
 
@@ -121,7 +131,8 @@ Scope {
                     radius: Math.round(protectionMessageBackground.radius)
                 }
             }
-            BackgroundEffect.blurRegion: osdIndicatorLoader.item?.glassSurface?.glassEnabled ? osdRegion : null
+            readonly property bool monitorFullscreen: HyprlandData.monitorHasFullscreen(osdRoot.screen?.name ?? "")
+            BackgroundEffect.blurRegion: (!monitorFullscreen && osdIndicatorLoader.item?.glassSurface?.glassEnabled) ? osdRegion : null
 
             exclusionMode: ExclusionMode.Ignore
             exclusiveZone: 0

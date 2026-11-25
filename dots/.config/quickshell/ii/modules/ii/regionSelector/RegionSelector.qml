@@ -101,7 +101,7 @@ Scope {
     property bool recordWithAudio: false
     Process {
         id: recordingCheck
-        command: ["pidof", "wf-recorder"]
+        command: [Quickshell.env("HOME") + "/.local/bin/recordctl", "is-recording"]
         onExited: (code, status) => {
             if (code === 0) {
                 Quickshell.execDetached([Directories.recordScriptPath]);

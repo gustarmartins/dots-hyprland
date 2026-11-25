@@ -1,0 +1,618 @@
+#!/usr/bin/env python3
+"""Per-monitor Kitty terminal font sizing for Hyprland + fontctl.
+
+Owns ~/.config/fontctl/kitty-monitors.json and adjusts live Kitty instances
+over their local abstract control sockets (@kitty-<pid>.sock). Event-driven
+via Hyprland Lua hooks or explicit CLI/Super+I calls; no background polling.
+"""
+import argparse
+import concurrent.futures
+import contextlib
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+MIN_PT = 4.0
+MAX_PT = 72.0
+DEFAULT_CONFIG = {
+    'enabled': False,
+    'default_size': 0.0,
+    'monitors': {},
+    'auto_on_move': True,
+    'reload_on_fontctl': True,
+}
+
+
+def config_dir():
+    xdg = os.environ.get('XDG_CONFIG_HOME')
+    return Path(xdg) if xdg else Path.home() / '.config'
+
+
+def state_path():
+    return config_dir() / 'fontctl' / 'kitty-monitors.json'
+
+
+def lock_path():
+    return config_dir() / 'fontctl' / 'kitty-monitors.lock'
+
+
+def kitty_conf_path():
+    return config_dir() / 'kitty' / 'kitty.conf'
+
+
+def clean_pt(value):
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'Invalid font size: {value!r}')
+    if not math.isfinite(num):
+        raise ValueError(f'Invalid font size: {value!r}')
+    if num == 0:
+        return 0.0
+    if num < MIN_PT or num > MAX_PT:
+        raise ValueError(f'Font size must be 0 or between {MIN_PT:g} and {MAX_PT:g} pt (got {value})')
+    return round(num, 2)
+
+
+def format_pt(value):
+    num = round(float(value), 2)
+    return str(int(num)) if num.is_integer() else f'{num:g}'
+
+
+def normalize_config(raw):
+    data = dict(DEFAULT_CONFIG)
+    if not isinstance(raw, dict):
+        return data
+    data['enabled'] = bool(raw.get('enabled', False))
+    try:
+        data['default_size'] = clean_pt(raw.get('default_size', 0))
+    except ValueError:
+        data['default_size'] = 0.0
+    data['auto_on_move'] = bool(raw.get('auto_on_move', True))
+    data['reload_on_fontctl'] = bool(raw.get('reload_on_fontctl', True))
+    monitors = {}
+    raw_monitors = raw.get('monitors', {})
+    if isinstance(raw_monitors, dict):
+        for key, value in raw_monitors.items():
+            if not isinstance(key, str) or not key.strip():
+                continue
+            try:
+                pt = clean_pt(value)
+            except ValueError:
+                continue
+            if pt > 0:
+                monitors[key.strip()] = pt
+    data['monitors'] = monitors
+    return data
+
+
+def load_config():
+    path = state_path()
+    if not path.is_file():
+        return dict(DEFAULT_CONFIG, monitors={})
+    try:
+        return normalize_config(json.loads(path.read_text()))
+    except (OSError, ValueError):
+        return dict(DEFAULT_CONFIG, monitors={})
+
+
+@contextlib.contextmanager
+def state_lock():
+    path = lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a+') as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def save_config(data):
+    normalized = normalize_config(data)
+    path = state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(normalized, indent=2, ensure_ascii=False) + '\n').encode()
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix='.kitty-monitors-')
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name, 0o644)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+    return normalized
+
+
+def read_kitty_conf_size():
+    path = kitty_conf_path()
+    if not path.is_file():
+        return None
+    try:
+        for line in path.read_text().splitlines():
+            match = re.match(r'^\s*font_size\s+([0-9]+(?:\.[0-9]+)?)\b', line)
+            if match:
+                return clean_pt(match[1])
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def update_kitty_conf_size(size_pt):
+    path = kitty_conf_path()
+    if not path.is_file() or size_pt <= 0:
+        return False
+    lines = path.read_text().splitlines()
+    formatted = format_pt(size_pt)
+    replaced = False
+    out = []
+    for line in lines:
+        if not replaced and re.match(r'^font_size[ \t]+', line):
+            out.append(f'font_size {formatted}')
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f'font_size {formatted}')
+    new_text = '\n'.join(out) + '\n'
+    if path.read_text() == new_text:
+        return False
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix='.kitty-conf-')
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(new_text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name, path.stat().st_mode & 0o777)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+    return True
+
+
+def hyprctl_json(subcmd):
+    try:
+        result = subprocess.run(['hyprctl', '-j', subcmd], capture_output=True, text=True, timeout=3)
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        return json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def clean_description(desc):
+    if not desc or not isinstance(desc, str):
+        return False
+    if '\\x' in desc or '`' in desc or '\n' in desc:
+        return False
+    return all(32 <= ord(ch) <= 126 for ch in desc)
+
+
+def monitor_selector(monitor):
+    # Match vrrctl's convention: ARZOPA and noisy EDID serials use connector name.
+    name = monitor.get('name') or ''
+    if monitor.get('model') == 'ARZOPA' and name == 'HDMI-A-1':
+        return name
+    desc = monitor.get('description') or ''
+    if clean_description(desc):
+        return 'desc:' + desc
+    return name or ('desc:' + desc)
+
+
+def monitor_label(monitor):
+    make = (monitor.get('make') or '').strip()
+    model = (monitor.get('model') or '').strip()
+    name = (monitor.get('name') or '').strip()
+    title = ' '.join(part for part in (make, model) if part) or name or 'Monitor'
+    return f'{title} · {name}' if name and title != name else title
+
+
+def monitor_metrics(monitor):
+    w = monitor.get('width') or 0
+    h = monitor.get('height') or 0
+    pw = monitor.get('physicalWidth') or 0
+    ph = monitor.get('physicalHeight') or 0
+    inches = round(math.hypot(pw, ph) / 25.4, 1) if pw > 0 and ph > 0 else 0.0
+    ppi = round(math.hypot(w, h) / (math.hypot(pw, ph) / 25.4)) if w > 0 and h > 0 and pw > 0 and ph > 0 else 0
+    return inches, ppi
+
+
+def configured_size_for_monitor(cfg, monitor):
+    monitors = cfg.get('monitors', {})
+    if monitor:
+        candidates = []
+        sel = monitor_selector(monitor)
+        candidates.append(sel)
+        if monitor.get('description'):
+            candidates.append('desc:' + monitor['description'])
+        if monitor.get('name'):
+            candidates.append(monitor['name'])
+        make_model = ' '.join(p for p in ((monitor.get('make') or '').strip(), (monitor.get('model') or '').strip()) if p)
+        if make_model:
+            candidates.append(make_model)
+        if monitor.get('model'):
+            candidates.append(monitor['model'])
+        for key in candidates:
+            if key in monitors and monitors[key] > 0:
+                return monitors[key]
+    return 0.0
+
+
+def effective_size_for_monitor(cfg, monitor, conf_size):
+    specific = configured_size_for_monitor(cfg, monitor)
+    if specific > 0:
+        return specific
+    if cfg.get('default_size', 0) > 0:
+        return cfg['default_size']
+    if conf_size and conf_size > 0:
+        return conf_size
+    return 11.0
+
+
+def kitty_sockets():
+    result = {}
+    uid = os.getuid()
+    try:
+        lines = Path('/proc/net/unix').read_text().splitlines()
+    except OSError:
+        return result
+    for line in lines:
+        fields = line.split()
+        if len(fields) != 8 or fields[3] != '00010000':
+            continue
+        match = re.fullmatch(r'@kitty-(\d+)\.sock', fields[7])
+        if not match:
+            continue
+        pid = int(match[1])
+        proc = Path('/proc') / str(pid)
+        try:
+            if proc.stat().st_uid == uid and (proc / 'comm').read_text().strip() == 'kitty':
+                result[pid] = 'unix:' + fields[7]
+        except OSError:
+            pass
+    return result
+
+
+def wait_for_kitty_socket(pid, timeout=1.5):
+    deadline = time.monotonic() + timeout
+    proc = Path('/proc') / str(pid)
+    while True:
+        socks = kitty_sockets()
+        if pid in socks:
+            return socks[pid]
+        if not proc.exists() or time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
+
+
+def send_kitty_size(address, size_pt, reload_config=False):
+    formatted = format_pt(size_pt)
+    if reload_config:
+        cmd = ['kitten', '@', '--to', address, 'load-config', '--ignore-overrides', '-o', f'font_size={formatted}']
+    else:
+        cmd = ['kitten', '@', '--to', address, 'set-font-size', '--all', '--', formatted]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=4)
+
+
+def reset_kitty_window(address):
+    cmd = ['kitten', '@', '--to', address, 'set-font-size', '--all', '--', '0']
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=4)
+
+
+def build_status(cfg):
+    conf_size = read_kitty_conf_size()
+    raw_monitors = hyprctl_json('monitors')
+    hypr_available = isinstance(raw_monitors, list)
+    monitors_out = []
+    seen_keys = set()
+    for mon in (raw_monitors or []):
+        sel = monitor_selector(mon)
+        seen_keys.add(sel)
+        if mon.get('name'):
+            seen_keys.add(mon['name'])
+        if mon.get('description'):
+            seen_keys.add('desc:' + mon['description'])
+        inches, ppi = monitor_metrics(mon)
+        configured = configured_size_for_monitor(cfg, mon)
+        effective = effective_size_for_monitor(cfg, mon, conf_size)
+        monitors_out.append({
+            'id': mon.get('id'),
+            'name': mon.get('name', ''),
+            'selector': sel,
+            'label': monitor_label(mon),
+            'width': mon.get('width', 0),
+            'height': mon.get('height', 0),
+            'scale': mon.get('scale', 1.0),
+            'inches': inches,
+            'ppi': ppi,
+            'configured_size': configured,
+            'effective_size': effective,
+            'connected': True,
+        })
+    for key, size in sorted(cfg.get('monitors', {}).items()):
+        if key not in seen_keys:
+            monitors_out.append({
+                'id': None,
+                'name': key,
+                'selector': key,
+                'label': key.removeprefix('desc:'),
+                'width': 0,
+                'height': 0,
+                'scale': 1.0,
+                'inches': 0.0,
+                'ppi': 0,
+                'configured_size': size,
+                'effective_size': size,
+                'connected': False,
+            })
+    socks = kitty_sockets()
+    return {
+        'enabled': cfg['enabled'],
+        'default_size': cfg['default_size'],
+        'auto_on_move': cfg['auto_on_move'],
+        'reload_on_fontctl': cfg['reload_on_fontctl'],
+        'kitty_conf_size': conf_size,
+        'live_kitty_count': len(socks),
+        'hyprland_available': hypr_available,
+        'config_path': str(state_path()),
+        'monitors': monitors_out,
+    }
+
+
+def apply_live(cfg, target_pid=None, reload_config=False, on_event=False, wait_socket=False, force=False):
+    if not force and not cfg['enabled']:
+        return {'applied': 0, 'skipped': 'disabled', 'errors': []}
+    if on_event and not cfg['auto_on_move']:
+        return {'applied': 0, 'skipped': 'auto_on_move_off', 'errors': []}
+    if reload_config and not force and not cfg['reload_on_fontctl']:
+        return {'applied': 0, 'skipped': 'reload_on_fontctl_off', 'errors': []}
+
+    conf_size = read_kitty_conf_size()
+    raw_monitors = hyprctl_json('monitors') or []
+    monitors_by_id = {m.get('id'): m for m in raw_monitors if 'id' in m}
+    raw_clients = hyprctl_json('clients') or []
+
+    # Map Kitty PID -> list of monitor dicts (focus order: focused first)
+    pid_monitors = {}
+    for client in raw_clients:
+        if client.get('class') != 'kitty':
+            continue
+        pid = client.get('pid')
+        mon = monitors_by_id.get(client.get('monitor'))
+        if pid is None:
+            continue
+        pid_monitors.setdefault(pid, []).append((bool(client.get('focused')), mon))
+
+    if target_pid is not None:
+        addr = wait_for_kitty_socket(target_pid) if wait_socket else kitty_sockets().get(target_pid)
+        socks = {target_pid: addr} if addr else {}
+    else:
+        socks = kitty_sockets()
+
+    jobs = []
+    for pid, address in sorted(socks.items()):
+        entries = pid_monitors.get(pid, [])
+        # If one PID spans multiple distinct monitors, prefer the focused one (or skip if ambiguous).
+        distinct_ids = {m.get('id') for _, m in entries if m is not None}
+        monitor = None
+        if len(distinct_ids) == 1:
+            monitor = next(m for _, m in entries if m is not None)
+        elif len(distinct_ids) > 1:
+            focused = [m for is_f, m in entries if is_f and m is not None]
+            if not focused:
+                continue
+            monitor = focused[0]
+        target_size = effective_size_for_monitor(cfg, monitor, conf_size)
+        jobs.append((pid, address, target_size))
+
+    applied = 0
+    errors = []
+    if jobs:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {
+                pool.submit(send_kitty_size, addr, sz, reload_config): (pid, addr, sz)
+                for pid, addr, sz in jobs
+            }
+            for future, (pid, addr, sz) in futures.items():
+                try:
+                    res = future.result()
+                    if res.returncode == 0:
+                        applied += 1
+                    else:
+                        errors.append(f'{addr}: {res.stderr.strip() or res.stdout.strip()}')
+                except (OSError, subprocess.SubprocessError) as exc:
+                    errors.append(f'{addr}: {exc}')
+    return {'applied': applied, 'total': len(jobs), 'errors': errors}
+
+
+def reset_live():
+    socks = kitty_sockets()
+    applied = 0
+    errors = []
+    if socks:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(reset_kitty_window, addr): addr for addr in socks.values()}
+            for future, addr in futures.items():
+                try:
+                    res = future.result()
+                    if res.returncode == 0:
+                        applied += 1
+                    else:
+                        errors.append(f'{addr}: {res.stderr.strip() or res.stdout.strip()}')
+                except (OSError, subprocess.SubprocessError) as exc:
+                    errors.append(f'{addr}: {exc}')
+    return {'reset': applied, 'total': len(socks), 'errors': errors}
+
+
+def parse_bool(text):
+    val = str(text).strip().lower()
+    if val in ('1', 'true', 'yes', 'on'):
+        return True
+    if val in ('0', 'false', 'no', 'off'):
+        return False
+    raise argparse.ArgumentTypeError(f'Expected true/false, got {text!r}')
+
+
+def print_status_text(status):
+    state = 'enabled' if status['enabled'] else 'disabled'
+    default_desc = f"{format_pt(status['default_size'])} pt" if status['default_size'] > 0 else 'follow preset'
+    conf_desc = f"{format_pt(status['kitty_conf_size'])} pt" if status['kitty_conf_size'] else 'unknown'
+    print(f'Kitty per-monitor font sizing: {state}')
+    print(f'  Default override: {default_desc} (kitty.conf: {conf_desc})')
+    print(f"  Auto on open/move: {'on' if status['auto_on_move'] else 'off'}  ·  Reload on fontctl: {'on' if status['reload_on_fontctl'] else 'off'}")
+    print(f"  Open Kitty windows: {status['live_kitty_count']}")
+    for m in status['monitors']:
+        geom = f"{m['width']}x{m['height']}" if m['width'] else 'disconnected'
+        phys = f", {m['inches']} in, {m['ppi']} PPI" if m['inches'] else ''
+        cfg_pt = f"{format_pt(m['configured_size'])} pt" if m['configured_size'] > 0 else 'default'
+        print(f"  - {m['label']} [{m['selector']}] ({geom}{phys}): configured={cfg_pt}, effective={format_pt(m['effective_size'])} pt")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    p_status = sub.add_parser('status', help='Show current per-monitor Kitty font sizing status')
+    p_status.add_argument('--json', action='store_true', dest='as_json')
+
+    sub.add_parser('kitty-size', help='Print configured default Kitty size if enabled, else empty')
+
+    p_set = sub.add_parser('set', help='Update per-monitor Kitty font settings')
+    p_set.add_argument('--enabled', type=parse_bool)
+    p_set.add_argument('--auto-on-move', type=parse_bool)
+    p_set.add_argument('--reload-on-fontctl', type=parse_bool)
+    p_set.add_argument('--default', type=str, help='Default/fallback Kitty size in pt (0 = follow preset)')
+    p_set.add_argument('--monitor', action='append', default=[], help='Set KEY=PT (0 clears override)')
+    p_set.add_argument('--clear-monitor', action='append', default=[], help='Remove saved override for KEY')
+    p_set.add_argument('--apply', action='store_true', help='Also apply to kitty.conf and open Kitty windows')
+    p_set.add_argument('--reset-live', action='store_true', help='Reset open Kitty windows to kitty.conf default when disabling')
+    p_set.add_argument('--json', action='store_true', dest='as_json')
+
+    p_apply = sub.add_parser('apply', help='Apply per-monitor font sizes to open Kitty windows')
+    p_apply.add_argument('--pid', type=int, help='Only update a single Kitty PID')
+    p_apply.add_argument('--reload', action='store_true', help='Reload kitty.conf (font family) + apply monitor size')
+    p_apply.add_argument('--on-event', action='store_true', help='Respect auto_on_move setting (used by Hyprland hook)')
+    p_apply.add_argument('--wait-socket', action='store_true', help='Briefly wait for new Kitty PID control socket')
+    p_apply.add_argument('--force', action='store_true', help='Apply even if disabled')
+    p_apply.add_argument('--json', action='store_true', dest='as_json')
+
+    p_reset = sub.add_parser('reset', help='Reset open Kitty windows to kitty.conf font_size')
+    p_reset.add_argument('--json', action='store_true', dest='as_json')
+
+    args = parser.parse_args(argv)
+
+    if args.command == 'status':
+        status = build_status(load_config())
+        if args.as_json:
+            print(json.dumps(status, ensure_ascii=False))
+        else:
+            print_status_text(status)
+        return 0
+
+    if args.command == 'kitty-size':
+        cfg = load_config()
+        if cfg['enabled'] and cfg['default_size'] > 0:
+            print(format_pt(cfg['default_size']))
+        return 0
+
+    if args.command == 'set':
+        with state_lock():
+            cfg = load_config()
+            if args.enabled is not None:
+                cfg['enabled'] = args.enabled
+            if args.auto_on_move is not None:
+                cfg['auto_on_move'] = args.auto_on_move
+            if args.reload_on_fontctl is not None:
+                cfg['reload_on_fontctl'] = args.reload_on_fontctl
+            if args.default is not None:
+                try:
+                    cfg['default_size'] = clean_pt(args.default)
+                except ValueError as err:
+                    print(err, file=sys.stderr)
+                    return 2
+            for item in args.monitor:
+                if '=' not in item:
+                    print(f'Expected KEY=PT, got {item!r}', file=sys.stderr)
+                    return 2
+                key, raw_val = item.rsplit('=', 1)
+                key = key.strip()
+                if not key:
+                    print(f'Empty monitor key in {item!r}', file=sys.stderr)
+                    return 2
+                try:
+                    pt = clean_pt(raw_val)
+                except ValueError as err:
+                    print(err, file=sys.stderr)
+                    return 2
+                if pt == 0:
+                    cfg['monitors'].pop(key, None)
+                else:
+                    cfg['monitors'][key] = pt
+            for key in args.clear_monitor:
+                cfg['monitors'].pop(key.strip(), None)
+            cfg = save_config(cfg)
+
+        action_result = None
+        if args.apply:
+            if cfg['enabled']:
+                if cfg['default_size'] > 0:
+                    update_kitty_conf_size(cfg['default_size'])
+                action_result = apply_live(cfg)
+            elif args.reset_live:
+                action_result = reset_live()
+        elif args.reset_live and not cfg['enabled']:
+            action_result = reset_live()
+
+        status = build_status(cfg)
+        if action_result is not None:
+            status['action'] = action_result
+        if args.as_json:
+            print(json.dumps(status, ensure_ascii=False))
+        else:
+            print_status_text(status)
+        return 0
+
+    if args.command == 'apply':
+        cfg = load_config()
+        res = apply_live(
+            cfg,
+            target_pid=args.pid,
+            reload_config=args.reload,
+            on_event=args.on_event,
+            wait_socket=args.wait_socket,
+            force=args.force,
+        )
+        if args.as_json:
+            print(json.dumps(res, ensure_ascii=False))
+        elif res.get('errors'):
+            for err in res['errors']:
+                print(err, file=sys.stderr)
+            return 1
+        return 0
+
+    if args.command == 'reset':
+        res = reset_live()
+        if args.as_json:
+            print(json.dumps(res, ensure_ascii=False))
+        elif res.get('errors'):
+            for err in res['errors']:
+                print(err, file=sys.stderr)
+            return 1
+        return 0
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

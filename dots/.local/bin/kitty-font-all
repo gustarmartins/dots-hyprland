@@ -33,6 +33,17 @@ def resize(address, amount):
 def main():
     if len(sys.argv) != 2 or sys.argv[1] not in ('+1', '-1', '0'):
         raise SystemExit('Usage: kitty-font-all +1|-1|0')
+    if sys.argv[1] == '0':
+        helper = Path(__file__).resolve().with_name('kitty-font-monitor')
+        if helper.is_file():
+            status = subprocess.run([sys.executable, str(helper), 'status', '--json'],
+                                    capture_output=True, text=True, timeout=3)
+            if status.returncode == 0 and '"enabled": true' in status.stdout:
+                result = subprocess.run([sys.executable, str(helper), 'apply'],
+                                        capture_output=True, text=True, timeout=5)
+                if result.stderr:
+                    print(result.stderr.strip(), file=sys.stderr)
+                raise SystemExit(result.returncode)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(resize, address, sys.argv[1]): address for address in targets()}
         for future, address in futures.items():

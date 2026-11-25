@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Temporary Eden-only gain stage feeding the current EasyEffects pipeline."""
+"""Temporary current-app +12 dB gain stage feeding the current EasyEffects pipeline."""
 import argparse
 import fcntl
 import json
@@ -17,7 +17,36 @@ STATE = Path(os.environ.get('XDG_STATE_HOME', Path.home()/'.local/state'))/'eden
 RUNTIME = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
 UNIT = 'eden-audio-boost.service'
 GRAPH_KEY = 'audioconvert.filter-graph.777'
-GAIN_KEY = 'eden_boost_gain:Mult'
+GAIN_KEY = 'app_boost_gain:Mult'
+LEGACY_GAIN_KEY = 'eden_boost_gain:Mult'
+
+INFRA_BINARIES = {
+    'easyeffects', 'pipewire', 'pipewire-pulse', 'wireplumber',
+    'sd_dummy', 'speech-dispatcher', 'quickshell', 'qs',
+}
+GENERIC_PARENTS = {
+    'systemd', 'init', 'hyprland', 'bash', 'zsh', 'fish', 'sh',
+    'kitty', 'alacritty', 'foot', 'ghostty', 'tmux', 'screen', 'quickshell', 'qs',
+}
+FRIENDLY_NAMES = {
+    'firefox': 'Firefox',
+    'brave': 'Brave',
+    'chromium': 'Chromium',
+    'google-chrome': 'Chrome',
+    'chrome': 'Chrome',
+    'spotify': 'Spotify',
+    'mpv': 'mpv',
+    'osu!': 'osu!',
+    'eden': 'Eden',
+    'eglantine': 'Eglantine',
+    'vlc': 'VLC',
+    'discord': 'Discord',
+    'vesktop': 'Vesktop',
+    'zen-bin': 'Zen Browser',
+    'zen': 'Zen Browser',
+    'obs': 'OBS',
+    'steam': 'Steam',
+}
 
 
 def call(argv, **kw):
@@ -25,205 +54,509 @@ def call(argv, **kw):
 
 
 def read(path, default):
-    return json.loads(path.read_text()) if path.exists() else default
+    try:
+        return json.loads(path.read_text()) if path.exists() else default
+    except (OSError, ValueError):
+        return default
 
 
 def write(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(value,indent=2));tmp.chmod(0o600);tmp.replace(path)
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(value, indent=2) + '\n')
+    tmp.chmod(0o600)
+    tmp.replace(path)
 
 
 def config():
-    return read(STATE/'config.json', {'enabled':True, 'db':12.0})
+    return read(STATE/'config.json', {'enabled': True, 'db': 12.0})
+
+
+def _proc_info(pid):
+    """Return (exe_basename, start_time, ppid) for a verified owner process, or None."""
+    p = Path('/proc') / str(pid)
+    try:
+        if p.stat().st_uid != os.getuid():
+            return None
+        exe = Path(os.readlink(p / 'exe')).name
+        stat_tail = (p / 'stat').read_text().rsplit(')', 1)[1].split()
+        ppid = int(stat_tail[1])
+        start = int(stat_tail[19])
+        return exe, start, ppid
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _ancestors(pid, max_depth=8):
+    """Non-generic ancestor PIDs of pid (including pid itself)."""
+    chain = []
+    cur = pid
+    seen = set()
+    for _ in range(max_depth):
+        if cur <= 1 or cur in seen:
+            break
+        seen.add(cur)
+        info = _proc_info(cur)
+        if not info:
+            break
+        exe, _, ppid = info
+        if cur != pid and exe.lower() in GENERIC_PARENTS:
+            break
+        chain.append((cur, exe.lower()))
+        cur = ppid
+    return chain
+
+
+def _canonical_exe(exe):
+    low = (exe or '').lower()
+    if low in ('firefox-bin', 'firefox-esr'):
+        return 'firefox'
+    if low in ('brave-bin', 'brave-browser'):
+        return 'brave'
+    if low in ('chrome', 'google-chrome-stable'):
+        return 'google-chrome'
+    if re.fullmatch(r'eden(?:[-_.][a-z0-9_.-]+)?', low):
+        return 'eden'
+    if re.fullmatch(r'eglantine(?:[-_.][a-z0-9_.-]+)?', low):
+        return 'eglantine'
+    if low in ('osu!.exe', 'osu.appimage'):
+        return 'osu!'
+    return low
+
+
+def _display_name(exe, app_name, pid=None):
+    canon = _canonical_exe(exe)
+    if canon == 'mpv' and pid:
+        try:
+            raw = (Path('/proc') / str(pid) / 'cmdline').read_bytes()
+            if b'jukebox' in raw:
+                return 'Jukebox'
+        except OSError:
+            pass
+    if canon in FRIENDLY_NAMES:
+        return FRIENDLY_NAMES[canon]
+    cleaned = (app_name or '').strip()
+    if cleaned and not cleaned.lower().startswith(('pipewire alsa [', 'alsa plug-in [')):
+        return cleaned
+    if cleaned.endswith(']') and '[' in cleaned:
+        inner = cleaned[cleaned.find('[') + 1:-1].strip()
+        if inner:
+            return inner
+    return exe or 'App'
+
+
+def _norm_token(value):
+    return re.sub(r'[^a-z0-9]+', '', (value or '').lower())
+
+
+def focused_window():
+    """Return active Hyprland window metadata, or {} if unavailable."""
+    try:
+        out = subprocess.check_output(['hyprctl', 'activewindow', '-j'], text=True, stderr=subprocess.DEVNULL, timeout=1.5)
+        data = json.loads(out)
+        if not isinstance(data, dict) or not data.get('pid'):
+            return {}
+        pid = int(data['pid'])
+        info = _proc_info(pid)
+        return {
+            'pid': pid,
+            'exe': info[0] if info else '',
+            'class': str(data.get('class', '') or ''),
+            'initialClass': str(data.get('initialClass', '') or ''),
+            'title': str(data.get('title', '') or ''),
+        }
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
 
 
 def inventory():
-    pw=json.loads(subprocess.check_output(['pw-dump'],text=True))
-    inputs=json.loads(subprocess.check_output(['pactl','--format=json','list','sink-inputs'],text=True))
-    sinks=json.loads(subprocess.check_output(['pactl','--format=json','list','sinks'],text=True))
-    clients={o['id']:o.get('info',{}).get('props',{}) for o in pw if o['type'].endswith(':Client')}
-    nodes={str(o.get('info',{}).get('props',{}).get('object.serial')):o.get('info',{}).get('props',{}) for o in pw if o['type'].endswith(':Node')}
+    pw = json.loads(subprocess.check_output(['pw-dump'], text=True))
+    inputs = json.loads(subprocess.check_output(['pactl', '--format=json', 'list', 'sink-inputs'], text=True))
+    sinks = json.loads(subprocess.check_output(['pactl', '--format=json', 'list', 'sinks'], text=True))
+    clients = {o['id']: o.get('info', {}).get('props', {}) for o in pw if o['type'].endswith(':Client')}
+    nodes = {}
     for o in pw:
         if o['type'].endswith(':Node'):
-            serial=str(o.get('info',{}).get('props',{}).get('object.serial'))
-            params={}
-            for item in o.get('info',{}).get('params',{}).get('Props',[]):
-                arr=item.get('params',[])
-                params.update(zip(arr[::2],arr[1::2]))
-            if serial in nodes:nodes[serial]['_params']=params
-    cookie=next(o['info']['cookie'] for o in pw if o['type'].endswith(':Core'))
+            info = o.get('info', {})
+            props = dict(info.get('props', {}))
+            serial = str(props.get('object.serial', ''))
+            if not serial:
+                continue
+            params = {}
+            for item in info.get('params', {}).get('Props', []):
+                arr = item.get('params', [])
+                params.update(zip(arr[::2], arr[1::2]))
+            props['_params'] = params
+            props['_state'] = info.get('state', '')
+            nodes[serial] = props
+    cookie = next(o['info']['cookie'] for o in pw if o['type'].endswith(':Core'))
     return cookie, inputs, sinks, clients, nodes
 
 
-def identity(stream, clients, nodes):
-    props=stream['properties'];serial=str(props.get('object.serial',''))
-    node=nodes.get(serial,props)
-    client=clients.get(int(node.get('client.id',-1)),{})
-    # Native ALSA/PipeWire streams often omit process metadata on the stream itself.
-    raw=props.get('application.process.id') or client.get('pipewire.sec.pid') or client.get('application.process.id')
+def stream_identity(stream, clients, nodes):
+    """Build a verified owner-process identity for any eligible playback stream."""
+    props = stream.get('properties', {})
+    serial = str(props.get('object.serial', ''))
+    node = nodes.get(serial, props)
+    node_name = str(node.get('node.name', '') or props.get('node.name', ''))
+    if node_name.startswith(('effect_output.', 'ee_', 'easyeffects')):
+        return None
+    if node.get('_params', {}).get('audioconvert.filter-graph.disable'):
+        return None
+    client_id = node.get('client.id', -1)
+    try:
+        client = clients.get(int(client_id), {})
+    except (TypeError, ValueError):
+        client = {}
+    raw = props.get('application.process.id') or client.get('pipewire.sec.pid') or client.get('application.process.id')
     if raw is None:
         return None
     try:
-        pid=int(raw);p=Path('/proc')/str(pid)
-        exe=Path(os.readlink(p/'exe')).name
-        if not re.fullmatch(r'eden(?:[-_.][A-Za-z0-9_.-]+)?',exe,re.I):
-            return None
-        start=int((p/'stat').read_text().rsplit(')',1)[1].split()[19])
-        return {'pid':pid,'start':start,'serial':serial,'index':stream['index']}
-    except (OSError,ValueError):
+        pid = int(raw)
+    except (TypeError, ValueError):
         return None
+    info = _proc_info(pid)
+    if not info:
+        return None
+    exe, start, _ = info
+    exe_low = exe.lower()
+    if exe_low in INFRA_BINARIES:
+        return None
+    canon = _canonical_exe(exe)
+    app_name = str(props.get('application.name') or node.get('application.name') or '')
+    running = node.get('_state') == 'running' or (stream.get('corked') is False)
+    return {
+        'pid': pid,
+        'start': start,
+        'serial': serial,
+        'index': stream.get('index', 0),
+        'exe': exe,
+        'app_key': 'exe:' + canon,
+        'app_name': _display_name(exe, app_name, pid=pid),
+        'raw_app': app_name,
+        'running': bool(running),
+    }
+
+
+def identity(stream, clients, nodes):
+    """Legacy-compatible alias returning verified stream identity."""
+    return stream_identity(stream, clients, nodes)
+
+
+def resolve_target(inv, focused=None, preferred_key=None):
+    """Select the audio app to boost: explicit key > focused Hyprland window > active running audio."""
+    _, streams, _, clients, nodes = inv
+    eligible = []
+    for stream in streams:
+        ident = stream_identity(stream, clients, nodes)
+        if ident:
+            eligible.append(ident)
+    if not eligible:
+        return None
+
+    groups = {}
+    for ident in eligible:
+        groups.setdefault(ident['app_key'], []).append(ident)
+
+    if preferred_key:
+        matched = groups.get(preferred_key)
+        if matched:
+            return {
+                'key': preferred_key,
+                'name': matched[0]['app_name'],
+                'reason': 'selected',
+                'streams': matched,
+            }
+        return None
+
+    win = focused if focused is not None else focused_window()
+    if win and win.get('pid'):
+        win_pid = win['pid']
+        win_anc = _ancestors(win_pid)
+        win_pids = {p for p, _ in win_anc} | {win_pid}
+        win_canon = _canonical_exe(win.get('exe', ''))
+        win_tokens = {_norm_token(win.get('class')), _norm_token(win.get('initialClass')), _norm_token(win_canon)} - {''}
+
+        # Tier 1: exact PID or shared non-generic process lineage
+        for ident in eligible:
+            s_pids = {p for p, _ in _ancestors(ident['pid'])} | {ident['pid']}
+            if s_pids & win_pids:
+                key = ident['app_key']
+                return {'key': key, 'name': groups[key][0]['app_name'], 'reason': 'focused', 'streams': groups[key]}
+
+        # Tier 2: same canonical executable or Hyprland window class match
+        for key, group in groups.items():
+            g_canon = key.split(':', 1)[1]
+            if win_canon and g_canon == win_canon:
+                return {'key': key, 'name': group[0]['app_name'], 'reason': 'focused', 'streams': group}
+            g_tokens = {_norm_token(g_canon), _norm_token(group[0]['app_name']), _norm_token(group[0]['raw_app'])} - {''}
+            if win_tokens & g_tokens:
+                return {'key': key, 'name': group[0]['app_name'], 'reason': 'focused', 'streams': group}
+
+    # Tier 3: most recently created actively running playback stream
+    running = [ident for ident in eligible if ident['running']]
+    if running:
+        best = max(running, key=lambda i: int(i['serial']) if i['serial'].isdigit() else 0)
+        key = best['app_key']
+        return {'key': key, 'name': groups[key][0]['app_name'], 'reason': 'playing', 'streams': groups[key]}
+
+    # Tier 4: single open app stream (paused/ready)
+    if len(groups) == 1:
+        key, group = next(iter(groups.items()))
+        return {'key': key, 'name': group[0]['app_name'], 'reason': 'ready', 'streams': group}
+
+    # Multiple idle/paused apps, none focused or running: pick most recent stream
+    best = max(eligible, key=lambda i: int(i['serial']) if i['serial'].isdigit() else 0)
+    key = best['app_key']
+    return {'key': key, 'name': groups[key][0]['app_name'], 'reason': 'ready', 'streams': groups[key]}
 
 
 def preset():
     try:
         with socket.socket(socket.AF_UNIX) as s:
-            s.settimeout(1);s.connect(str(RUNTIME/'EasyEffectsServer'))
-            s.sendall(b'get_last_loaded_preset:output\n');s.shutdown(socket.SHUT_WR)
+            s.settimeout(1)
+            s.connect(str(RUNTIME/'EasyEffectsServer'))
+            s.sendall(b'get_last_loaded_preset:output\n')
+            s.shutdown(socket.SHUT_WR)
             return s.recv(8192).decode().strip()
     except OSError:
         return ''
 
 
 def status():
-    conf=config();receipt=read(STATE/'active.json',{})
-    running=subprocess.run(['systemctl','--user','is-active','--quiet',UNIT]).returncode==0
+    conf = config()
+    receipt = read(STATE/'active.json', {})
+    running = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', UNIT]).returncode == 0
+    target = None
+    cookie = None
     try:
-        cookie,streams,sinks,clients,nodes=inventory()
-        matches=[identity(s,clients,nodes) for s in streams]
-        count=sum(m is not None for m in matches)
-    except (OSError,ValueError,subprocess.CalledProcessError):
-        cookie=None;count=0
-    return dict(conf, active=running and receipt.get('cookie')==cookie and receipt.get('active',False),
-                streams=count,preset=preset(),message=receipt.get('message',''),pid=receipt.get('worker'))
+        inv = inventory()
+        cookie = inv[0]
+        target = resolve_target(inv)
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        pass
+    is_active = bool(running and receipt.get('cookie') == cookie and receipt.get('active', False))
+    active_app = receipt.get('target_name', '') if is_active else ''
+    active_key = receipt.get('target_key', '') if is_active else ''
+    return dict(
+        conf,
+        active=is_active,
+        streams=len(target['streams']) if target else 0,
+        target_key=target['key'] if target else '',
+        target_name=target['name'] if target else '',
+        target_reason=target['reason'] if target else '',
+        active_app=active_app,
+        active_key=active_key,
+        preset=preset(),
+        message=receipt.get('message', ''),
+        pid=receipt.get('worker'),
+    )
 
 
 def graph(db, channels=2):
-    return {'nodes':[{'type':'builtin','name':'eden_boost_gain','label':'linear',
-                       'control':{'Mult':10**(db/20),'Add':0}}],
-            'n_inputs':channels,'n_outputs':channels}
+    return {
+        'nodes': [{
+            'type': 'builtin',
+            'name': 'app_boost_gain',
+            'label': 'linear',
+            'control': {'Mult': 10 ** (db / 20), 'Add': 0},
+        }],
+        'n_inputs': channels,
+        'n_outputs': channels,
+    }
+
+
+def _read_gain(params):
+    if GAIN_KEY in params:
+        return params[GAIN_KEY]
+    if LEGACY_GAIN_KEY in params:
+        return params[LEGACY_GAIN_KEY]
+    return -1
 
 
 def matching(ident, inv):
-    _,streams,_,clients,nodes=inv
+    _, streams, _, clients, nodes = inv
     for stream in streams:
-        current=identity(stream,clients,nodes)
-        if current and all(current[k]==ident[k] for k in ('pid','start','serial')):
-            return stream,nodes[ident['serial']]
-    return None,None
+        current = stream_identity(stream, clients, nodes)
+        if current and all(current[k] == ident[k] for k in ('pid', 'start', 'serial')):
+            return stream, nodes[ident['serial']]
+    return None, None
 
 
 def set_graph(ident, value, cookie):
-    inv=inventory()
-    if inv[0]!=cookie:raise ValueError('Audio server changed')
-    stream,node=matching(ident,inv)
-    if stream is None:raise ValueError('Eden stream exited or changed')
-    call(['pw-cli','set-param',str(node['object.id']),'Props',
-          json.dumps({'params':[GRAPH_KEY,value]})],stdout=subprocess.DEVNULL)
+    inv = inventory()
+    if inv[0] != cookie:
+        raise ValueError('Audio server changed')
+    stream, node = matching(ident, inv)
+    if stream is None:
+        raise ValueError('App stream exited or changed')
+    call(['pw-cli', 'set-param', str(node['object.id']), 'Props',
+          json.dumps({'params': [GRAPH_KEY, value]})], stdout=subprocess.DEVNULL)
 
 
 def cleanup(receipt=None):
-    receipt=receipt or read(STATE/'active.json',{})
-    if not receipt:return
-    cookie=receipt.get('cookie');expected=10**(receipt.get('db',12)/20)
-    inv=inventory()
-    if inv[0]==cookie:
-        for ident in receipt.get('original',{}).values():
-            stream,node=matching(ident,inv)
-            if stream and math.isclose(node['_params'].get(GAIN_KEY,-1),expected,rel_tol=1e-5):
-                set_graph(ident,'',cookie)
-    receipt.update(active=False,message='Boost off; temporary Eden gain removed')
-    write(STATE/'active.json',receipt)
+    receipt = receipt or read(STATE/'active.json', {})
+    if not receipt:
+        return
+    cookie = receipt.get('cookie')
+    expected = 10 ** (receipt.get('db', 12) / 20)
+    try:
+        inv = inventory()
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        inv = None
+    if inv and inv[0] == cookie:
+        for ident in receipt.get('original', {}).values():
+            stream, node = matching(ident, inv)
+            if stream and math.isclose(_read_gain(node.get('_params', {})), expected, rel_tol=1e-5):
+                set_graph(ident, '', cookie)
+    app_label = receipt.get('target_name') or 'App'
+    receipt.update(active=False, message=f'Boost off; temporary {app_label} gain removed')
+    write(STATE/'active.json', receipt)
 
 
 def serve():
-    STATE.mkdir(mode=0o700,parents=True,exist_ok=True)
-    guard=(STATE/'worker.lock').open('a');fcntl.flock(guard,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    conf=config()
-    if not conf['enabled']:return
+    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    guard = (STATE/'worker.lock').open('a')
+    fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    conf = config()
+    if not conf['enabled']:
+        return
     cleanup()
-    cookie,streams,sinks,clients,nodes=inventory()
-    original={}
-    for stream in streams:
-        ident=identity(stream,clients,nodes)
-        if ident:original[ident['serial']]=ident
-    if not original:raise ValueError('Start Eden audio first, then double-click Boost')
-    stopped=False
+    inv = inventory()
+    cookie, _, _, _, _ = inv
+    pending = read(STATE/'target.json', {})
+    preferred = pending.get('target_key') if isinstance(pending, dict) else None
+    target = resolve_target(inv, preferred_key=preferred) or resolve_target(inv)
+    if not target:
+        raise ValueError('Start audio in an app first, then press and hold Boost')
+    target_key = target['key']
+    target_name = target['name']
+    original = {ident['serial']: ident for ident in target['streams']}
+    stopped = False
+
     def stop(*_):
         nonlocal stopped
-        stopped=True
-    signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
-    receipt={'cookie':cookie,'worker':os.getpid(),'active':False,'original':original,
-             'message':'Adding temporary Eden gain','db':conf['db'],'preset_at_start':preset()}
-    write(STATE/'active.json',receipt)
-    applied=set();expected=10**(conf['db']/20)
+        stopped = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    receipt = {
+        'cookie': cookie,
+        'worker': os.getpid(),
+        'active': False,
+        'target_key': target_key,
+        'target_name': target_name,
+        'original': original,
+        'message': f'Boosting {target_name}…',
+        'db': conf['db'],
+        'preset_at_start': preset(),
+    }
+    write(STATE/'active.json', receipt)
+    applied = set()
+    expected = 10 ** (conf['db'] / 20)
     try:
         while not stopped:
-            inv=inventory();current,streams,_,clients,nodes=inv
-            if current!=cookie:raise ValueError('Audio server changed; boost ended')
-            allowed=[]
+            inv = inventory()
+            current, streams, _, clients, nodes = inv
+            if current != cookie:
+                raise ValueError('Audio server changed; boost ended')
+            allowed = []
             for stream in streams:
-                ident=identity(stream,clients,nodes)
-                known=ident and any(ident['pid']==r['pid'] and ident['start']==r['start'] for r in original.values())
-                if not known:continue
+                ident = stream_identity(stream, clients, nodes)
+                if not ident or ident['app_key'] != target_key:
+                    continue
                 allowed.append(ident)
                 if ident['serial'] not in applied:
-                    original[ident['serial']]=ident
-                    receipt['original']=original;write(STATE/'active.json',receipt)
-                    node=nodes[ident['serial']]
+                    original[ident['serial']] = ident
+                    receipt['original'] = original
+                    write(STATE/'active.json', receipt)
+                    node = nodes[ident['serial']]
                     if node['_params'].get('audioconvert.filter-graph.disable'):
                         raise ValueError('This stream disabled filter updates')
-                    set_graph(ident,json.dumps(graph(conf['db'],len(stream['volume']))),cookie)
-                    deadline=time.monotonic()+2
+                    channels = max(1, len(stream.get('volume', {})) or 2)
+                    set_graph(ident, json.dumps(graph(conf['db'], channels)), cookie)
+                    deadline = time.monotonic() + 2
                     while True:
-                        _,check=matching(ident,inventory())
-                        if check and math.isclose(check['_params'].get(GAIN_KEY,-1),expected,rel_tol=1e-5):break
-                        if time.monotonic()>deadline:raise ValueError('Stream did not accept the temporary gain graph')
+                        _, check = matching(ident, inventory())
+                        if check and math.isclose(_read_gain(check.get('_params', {})), expected, rel_tol=1e-5):
+                            break
+                        if time.monotonic() > deadline:
+                            raise ValueError('Stream did not accept the temporary gain graph')
                         time.sleep(.05)
                     applied.add(ident['serial'])
                 else:
-                    if not math.isclose(nodes[ident['serial']]['_params'].get(GAIN_KEY,-1),expected,rel_tol=1e-5):
+                    if not math.isclose(_read_gain(nodes[ident['serial']].get('_params', {})), expected, rel_tol=1e-5):
                         raise ValueError('Gain changed externally; stopping without replacing it')
-            if not allowed:break
-            receipt.update(active=True,message='Eden only +%g dB'%conf['db'])
-            write(STATE/'active.json',receipt)
+            if not allowed:
+                break
+            receipt.update(active=True, message=f'{target_name} · +{conf["db"]:g} dB')
+            write(STATE/'active.json', receipt)
             time.sleep(.75)
     finally:
         cleanup(receipt)
+        try:
+            (STATE/'target.json').unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action',choices=['status','enable','disable','boost','reset','serve','cleanup'])
-    p.add_argument('--confirmed',action='store_true',help='UI supplies this only on double-click; explicit CLI acknowledgement')
-    args=p.parse_args()
-    if args.action=='status':print(json.dumps(status()));return
-    if args.action=='serve':serve();return
-    if args.action=='cleanup':cleanup();return
-    if args.action in ('reset','disable'):
-        call(['systemctl','--user','stop',UNIT])
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('action', choices=['status', 'enable', 'disable', 'boost', 'reset', 'serve', 'cleanup'])
+    p.add_argument('--confirmed', action='store_true', help='UI supplies this only after press-and-hold; explicit CLI acknowledgement')
+    p.add_argument('--target', default='', help='Explicit app_key locked by the UI when hold began')
+    args = p.parse_args()
+    if args.action == 'status':
+        print(json.dumps(status()))
+        return
+    if args.action == 'serve':
+        serve()
+        return
+    if args.action == 'cleanup':
         cleanup()
-    if args.action in ('enable','disable'):
-        d=config();d['enabled']=args.action=='enable';write(STATE/'config.json',d)
-    if args.action=='boost':
-        if not args.confirmed:raise ValueError('Double-click the widget, or use boost --confirmed (+12 dB, Eden only)')
-        if not config()['enabled']:raise ValueError('Enable Eden boost in Super+I → Audio first')
-        current=status()
-        if current['active']:print('Already boosted; gain is not stacked');return
-        if current['streams']==0:raise ValueError('Start Eden audio first, then double-click Boost')
-        print('Eden only: +12 dB before the current effects; loud peaks may engage the limiter.',flush=True)
-        call(['systemctl','--user','start',UNIT])
-        deadline=time.monotonic()+7
-        while time.monotonic()<deadline:
-            d=status()
-            if d['active']:print(json.dumps(d));return
-            if subprocess.run(['systemctl','--user','is-failed','--quiet',UNIT]).returncode==0:
-                raise ValueError('Boost failed; inspect journalctl --user -u '+UNIT)
+        return
+    if args.action in ('reset', 'disable'):
+        call(['systemctl', '--user', 'stop', UNIT])
+        cleanup()
+        try:
+            (STATE/'target.json').unlink(missing_ok=True)
+        except OSError:
+            pass
+    if args.action in ('enable', 'disable'):
+        d = config()
+        d['enabled'] = args.action == 'enable'
+        write(STATE/'config.json', d)
+    if args.action == 'boost':
+        if not args.confirmed:
+            raise ValueError('Press and hold the widget, or use boost --confirmed (+12 dB, current app)')
+        if not config()['enabled']:
+            raise ValueError('Enable Boost current app in Super+I → Audio first')
+        current = status()
+        if current['active']:
+            print('Already boosted; gain is not stacked')
+            return
+        target_key = args.target or current.get('target_key', '')
+        if not target_key or current['streams'] == 0:
+            raise ValueError('Start audio in an app first, then press and hold Boost')
+        write(STATE/'target.json', {'target_key': target_key, 'ts': time.time()})
+        print(f'Current app ({current.get("target_name") or target_key}): +{config()["db"]:g} dB before current effects.', flush=True)
+        call(['systemctl', '--user', 'start', UNIT])
+        deadline = time.monotonic() + 7
+        while time.monotonic() < deadline:
+            d = status()
+            if d['active']:
+                print(json.dumps(d))
+                return
+            if subprocess.run(['systemctl', '--user', 'is-failed', '--quiet', UNIT]).returncode == 0:
+                raise ValueError('Boost failed; inspect journalctl --user -u ' + UNIT)
             time.sleep(.15)
         raise ValueError('Boost did not become active; inspect its service log')
     print(json.dumps(status()))
 
 
-if __name__=='__main__':
-    try:main()
-    except (OSError,ValueError,subprocess.CalledProcessError) as e:
-        print('eden-audio-boost:',e,file=sys.stderr);sys.exit(1)
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, subprocess.CalledProcessError) as e:
+        print('eden-audio-boost:', e, file=sys.stderr)
+        sys.exit(1)

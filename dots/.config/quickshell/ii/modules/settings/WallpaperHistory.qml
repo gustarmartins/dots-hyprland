@@ -129,8 +129,8 @@ ColumnLayout {
     StyledText {
         Layout.fillWidth: true
         text: WallpaperDiscovery.libraryError || (WallpaperDiscovery.library.overBudget || WallpaperDiscovery.library.lowSpace
-            ? "Storage is full. Current and kept wallpapers stay protected. Increase the limit or unkeep an older image to make room."
-            : "Restore any saved image. Keep protects favorites from automatic cleanup. Storage limits are below.")
+            ? "Storage is full. Current and kept wallpapers stay protected, and past URLs remain in the rotation log. Increase the limit or unkeep an older image to make room."
+            : "Restore any saved image. Keep protects favorites from automatic cleanup; every rotation URL is also saved to the rotation log.")
         font.pixelSize: 12
         wrapMode: Text.WordWrap
         color: WallpaperDiscovery.libraryError ? Appearance.m3colors.m3error : Appearance.m3colors.m3onSurfaceVariant

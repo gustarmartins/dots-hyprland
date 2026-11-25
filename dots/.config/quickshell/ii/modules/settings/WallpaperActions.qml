@@ -10,6 +10,7 @@ ColumnLayout {
     id: root
     property bool libraryOpen: false
     spacing: 12
+    function fileUrl(path) { return "file://" + encodeURIComponent(path).replace(/%2F/g, "/"); }
     StyledText { text: root.libraryOpen ? "Saved wallpapers" : "Wallpaper actions"; font.pixelSize: 22; font.weight: Font.Medium }
     StyledText { Layout.fillWidth: true; text: "Choose or fetch an image. Prefetch prepares offline choices without changing your colors."; wrapMode: Text.WordWrap; font.pixelSize: 13; color: Appearance.m3colors.m3onSurfaceVariant }
     Flow {
@@ -19,6 +20,7 @@ ColumnLayout {
         SettingsButton { objectName: "wallpaperPrefetch"; text: WallpaperDiscovery.busy ? "Working…" : "Prefetch " + Config.options.background.discovery.prefetchCount; enabled: !WallpaperDiscovery.busy; onClicked: WallpaperDiscovery.prefetch() }
         SettingsButton { text: WallpaperDiscovery.busy ? "Discovering…" : "Discover wallpaper"; enabled: !WallpaperDiscovery.busy; onClicked: WallpaperDiscovery.fetch() }
         SettingsButton { text: "Wallpaper source"; visible: !!WallpaperDiscovery.current.url; onClicked: Qt.openUrlExternally(WallpaperDiscovery.current.url) }
+        SettingsButton { objectName: "wallpaperRotationLog"; text: "Rotation log"; visible: (WallpaperDiscovery.library.rotationLogCount || 0) > 0; onClicked: Qt.openUrlExternally(root.fileUrl(WallpaperDiscovery.library.rotationLogPath || WallpaperDiscovery.rotationLogPath)) }
     }
     StyledText { Layout.fillWidth: true; text: WallpaperDiscovery.status || "Every discovered and rotation wallpaper is saved below."; wrapMode: Text.WordWrap; font.pixelSize: 12; color: Appearance.m3colors.m3onSurfaceVariant }
     SettingsButton {

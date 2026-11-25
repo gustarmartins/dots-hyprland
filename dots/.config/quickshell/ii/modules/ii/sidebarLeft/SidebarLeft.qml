@@ -58,35 +58,64 @@ Scope { // Scope
         else root.pin = !root.pin;
     }
 
-    Component.onCompleted: {
-        root.sidebarContent = contentComponent.createObject(null, {
-            "scopeRoot": root,
-        });
-        sidebarLoader.item.contentParent.children = [root.sidebarContent];
+    function ensureSidebarContent() {
+        if (!root.sidebarContent) {
+            root.sidebarContent = contentComponent.createObject(null, {
+                "scopeRoot": root,
+            });
+        }
+        return root.sidebarContent;
+    }
+
+    function attachContent(targetParent) {
+        if (!targetParent) return;
+        const content = ensureSidebarContent();
+        if (content.parent !== targetParent) {
+            content.parent = null;
+            targetParent.children = [content];
+        }
+    }
+
+    Connections {
+        target: GlobalStates
+        function onSidebarLeftOpenChanged() {
+            if (!GlobalStates.sidebarLeftOpen && !root.detach && HyprlandData.allMonitorsHaveFullscreen() && root.sidebarContent) {
+                root.sidebarContent.parent = null;
+                root.sidebarContent.destroy();
+                root.sidebarContent = null;
+            }
+        }
     }
 
     onDetachChanged: {
         if (root.detach) {
-            GlobalFocusGrab.removeDismissable(sidebarLoader.item) // Remove sidebar from the focus grab system
-            sidebarContent.parent = null; // Detach content from sidebar
-            sidebarLoader.active = false; // Unload sidebar
-            detachedSidebarLoader.active = true; // Load detached window
-            detachedSidebarLoader.item.contentParent.children = [sidebarContent];
+            if (sidebarLoader.item) GlobalFocusGrab.removeDismissable(sidebarLoader.item);
+            if (root.sidebarContent) root.sidebarContent.parent = null;
+            sidebarLoader.active = false;
+            detachedSidebarLoader.active = true;
+            if (detachedSidebarLoader.item) root.attachContent(detachedSidebarLoader.item.contentParent);
         } else {
-            sidebarContent.parent = null; // Detach content from window
-            detachedSidebarLoader.active = false; // Unload detached window
-            sidebarLoader.active = true; // Load sidebar
-            sidebarLoader.item.contentParent.children = [sidebarContent];
+            if (root.sidebarContent) root.sidebarContent.parent = null;
+            detachedSidebarLoader.active = false;
+            sidebarLoader.active = Qt.binding(() => GlobalStates.sidebarLeftOpen && !root.detach);
+            if (sidebarLoader.item) root.attachContent(sidebarLoader.item.contentParent);
         }
     }
 
     Loader {
         id: sidebarLoader
-        active: true
+        active: GlobalStates.sidebarLeftOpen && !root.detach
+        onLoaded: if (item) root.attachContent(item.contentParent)
         
         sourceComponent: PanelWindow { // Window
             id: panelWindow
             visible: GlobalStates.sidebarLeftOpen
+            Component.onCompleted: {
+                if (visible) GlobalFocusGrab.addDismissable(panelWindow);
+            }
+            Component.onDestruction: {
+                GlobalFocusGrab.removeDismissable(panelWindow);
+            }
             
             property bool extend: false
             property real sidebarWidth: panelWindow.extend ? Appearance.sizes.sidebarWidthExtended : Appearance.sizes.sidebarWidth

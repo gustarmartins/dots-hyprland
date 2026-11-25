@@ -165,4 +165,73 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(self.current, 'automatic')
         self.assertFalse(self.w.held)
 
+    def test_closing_osu_with_paused_jukebox_restores_baseline_and_re_switches_repeatedly(self):
+        # Play Jukebox -> pause -> open osu! -> close osu! (Jukebox still paused!) ->
+        # must restore baseline (NOT stay stuck on astra-osu!), then alternate repeatedly.
+        jukebox = dict(source='jukebox', player='mpv.jukebox', url='file:///music/a.flac',
+                       title='A', artists=['Artist'], genres=[], playing=True)
+        self.tracks = [jukebox]
+        self.osu_active = False
+        self.w.update()
+        self.assertEqual(self.current, 'automatic')
+
+        for cycle in range(3):
+            # Pause Jukebox, open osu! -> switches to astra-osu
+            jukebox['playing'] = False
+            self.osu_active = True
+            self.w.update()
+            self.assertEqual(self.current, 'astra-osu', f'cycle {cycle}: enter osu')
+
+            # Close osu! while Jukebox stays paused -> restores baseline
+            self.osu_active = False
+            self.w.update()
+            self.assertEqual(self.current, 'baseline', f'cycle {cycle}: exit osu with paused jukebox')
+
+            # Re-open osu! (still paused Jukebox) -> switches back to astra-osu
+            self.osu_active = True
+            self.w.update()
+            self.assertEqual(self.current, 'astra-osu', f'cycle {cycle}: re-enter osu')
+
+            # Resume Jukebox while osu! is still open -> music takes priority
+            jukebox['playing'] = True
+            self.w.update()
+            self.assertEqual(self.current, 'automatic', f'cycle {cycle}: music over osu')
+
+        # Finally stop music and osu! -> restores baseline cleanly
+        jukebox['playing'] = False
+        self.osu_active = False
+        self.tracks = []
+        self.w.update()
+        self.assertEqual(self.current, 'baseline')
+
+    def test_manual_override_in_osu_clears_when_osu_exits(self):
+        self.tracks = []
+        self.osu_active = True
+        self.w.update()
+        self.assertEqual(self.current, 'astra-osu')
+        self.manual()
+        self.assertTrue(self.w.held)
+        # Close osu! -> keep user's manual preset, clear osu key/hold
+        self.osu_active = False
+        self.w.update()
+        self.assertEqual(self.current, 'manual')
+        self.assertFalse(self.w.held)
+        # Re-open osu! -> switches back to astra-osu and later restores manual
+        self.osu_active = True
+        self.w.update()
+        self.assertEqual(self.current, 'astra-osu')
+        self.osu_active = False
+        self.w.update()
+        self.assertEqual(self.current, 'manual')
+
+    def test_idle_spatial_sink_triggers_orphan_cleanup(self):
+        self.tracks = []
+        self.w = self.watcher()
+        del self.w.__dict__['check_osu_active']
+        self.w.check_audio_graph = lambda: (True, True, False)
+        with patch.object(self.w, 'cleanup_idle_spatial_sink') as cleanup:
+            self.w.update()
+            cleanup.assert_called_once()
+        self.assertEqual(self.current, 'astra-osu')
+
 if __name__=='__main__':unittest.main()

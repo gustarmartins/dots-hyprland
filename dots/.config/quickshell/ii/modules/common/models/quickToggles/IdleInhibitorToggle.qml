@@ -11,8 +11,11 @@ QuickToggleModel {
 
     toggled: Idle.inhibit
     icon: "coffee"
+    statusText: Idle.error || (Idle.inhibit
+        ? Translation.tr("Always awake")
+        : (Idle.onAc ? "AC · " : "Bat · ") + Idle.formatMinutes(Idle.effectiveSleepMinutes))
     mainAction: () => {
         Idle.toggleInhibit()
     }
-    tooltipText: Translation.tr("Keep system awake")
+    tooltipText: Translation.tr("Configure auto-sleep (plugged in & battery) and Keep awake")
 }

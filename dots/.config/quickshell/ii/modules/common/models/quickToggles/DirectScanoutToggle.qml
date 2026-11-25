@@ -1,33 +1,18 @@
 import QtQuick
-import Quickshell
-import Quickshell.Io
-import qs
 import qs.services
-import qs.modules.common
-import qs.modules.common.functions
-import qs.modules.common.widgets
+import qs.modules.common.models.hyprland
 
 QuickToggleModel {
     id: root
     name: Translation.tr("Direct scanout")
-    toggled: toggled
     icon: "desktop_windows"
+    available: policy.value !== undefined
+    toggled: policy.value === 1 || policy.value === 2
+    mainAction: () => policy.setValue(root.toggled ? 0 : 1)
+    tooltipText: Translation.tr("Allow eligible fullscreen windows to scan out directly")
 
-    mainAction: () => {
-        root.toggled = !root.toggled
-        if (root.toggled) {
-            HyprlandConfig.set("render:direct_scanout", 2)
-        } else {
-            HyprlandConfig.set("render:direct_scanout", 0)
-        }
+    HyprlandConfigOption {
+        id: policy
+        key: "render:direct_scanout"
     }
-    Process {
-        id: fetchActiveState
-        running: true
-        command: ["bash", "-c", `test "$(hyprctl getoption render:direct_scanout -j | jq ".int")" -ne 0`]
-        onExited: (exitCode, exitStatus) => {
-            root.toggled = exitCode === 0
-        }
-    }
-    tooltipText: Translation.tr("Bypass compositor for fullscreen apps")
 }

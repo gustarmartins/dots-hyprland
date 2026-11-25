@@ -50,3 +50,6 @@ require("custom.cinematic-effects")
 
 -- Preserve floating coordinates when an output is powered off and reconnected.
 require("custom.float-hotplug")
+
+-- Unified touchpad physics and multi-finger gesture system.
+require("custom.gestures")

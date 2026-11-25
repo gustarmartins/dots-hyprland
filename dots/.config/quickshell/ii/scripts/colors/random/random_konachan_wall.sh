@@ -30,6 +30,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$PICTURES_DIR/Wallpapers"
 page=$((1 + RANDOM % 1000));
 response=$(curl "https://konachan.net/post.json?tags=rating%3Asafe&limit=1&page=$page")
+post_id=$(echo "$response" | jq -r '.[0].id // empty')
+post_source=$(echo "$response" | jq -r '.[0].source // empty')
+page_url=""
+if [ -n "$post_id" ]; then
+    page_url="https://konachan.net/post/show/$post_id"
+fi
 link=$(echo "$response" | jq '.[0].file_url' -r);
 ext=$(echo "$link" | awk -F. '{print $NF}')
 downloadPath="$PICTURES_DIR/Wallpapers/random_wallpaper.$ext"
@@ -39,4 +45,9 @@ if [ "$downloadPath" == "$currentWallpaperPath" ]; then
     downloadPath="$PICTURES_DIR/Wallpapers/random_wallpaper-1.$ext"
 fi
 curl "$link" -o "$downloadPath"
-"$SCRIPT_DIR/../switchwall.sh" --image "$downloadPath"
+if "$SCRIPT_DIR/../switchwall.sh" --image "$downloadPath"; then
+    python3 -B "$SCRIPT_DIR/wallpaper_library.py" log-rotation \
+        --event random --theme konachan \
+        --url "$page_url" --file-url "$link" --source "$post_source" \
+        --path "$downloadPath" "${post_id:+konachan-$post_id}" >/dev/null 2>&1 || true
+fi

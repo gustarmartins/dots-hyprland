@@ -1,5 +1,87 @@
 // A sparse grid: saved positions are preferred, collisions flow into free cells.
 // Keep legacy `size` as the horizontal span; missing height means one row.
+var TILE_CATEGORIES = {
+    network: "essentials",
+    bluetooth: "essentials",
+    audio: "essentials",
+    mic: "essentials",
+    easyEffects: "essentials",
+    powerProfile: "essentials",
+    darkMode: "comfort",
+    nightLight: "comfort",
+    idleInhibitor: "comfort",
+    notifications: "comfort",
+    screenSnip: "comfort",
+    colorPicker: "comfort",
+    musicRecognition: "comfort",
+    antiFlashbang: "comfort",
+    onScreenKeyboard: "comfort",
+    focusMode: "performance",
+    directScanout: "performance",
+    tearing: "performance",
+    gameMode: "performance",
+    vrr: "performance",
+    lsfg: "performance",
+    tripleBuffer: "performance",
+    memoryMode: "advanced",
+    gpuMemory: "advanced",
+    zramAlgo: "advanced",
+    zramWriteback: "advanced",
+    zramRecompress: "advanced",
+    memoryCompact: "advanced",
+    dropCaches: "advanced",
+    buildCache: "advanced"
+};
+
+function categoryOf(type) {
+    return TILE_CATEGORIES[type] || "comfort";
+}
+
+function defaultColumns() {
+    return 8;
+}
+
+function defaultToggles() {
+    return [
+        // Row 0: Daily connectivity & audio
+        { column: 0, row: 0, size: 2, height: 1, type: "network" },
+        { column: 2, row: 0, size: 2, height: 1, type: "bluetooth" },
+        { column: 4, row: 0, size: 2, height: 1, type: "audio" },
+        { column: 6, row: 0, size: 2, height: 1, type: "mic" },
+        // Row 1: Power, audio engine & display comfort
+        { column: 0, row: 1, size: 2, height: 1, type: "powerProfile" },
+        { column: 2, row: 1, size: 2, height: 1, type: "easyEffects" },
+        { column: 4, row: 1, size: 2, height: 1, type: "darkMode" },
+        { column: 6, row: 1, size: 2, height: 1, type: "nightLight" },
+        // Row 2: Compact 1-tap utilities strip
+        { column: 0, row: 2, size: 1, height: 1, type: "idleInhibitor" },
+        { column: 1, row: 2, size: 1, height: 1, type: "notifications" },
+        { column: 2, row: 2, size: 1, height: 1, type: "screenSnip" },
+        { column: 3, row: 2, size: 1, height: 1, type: "colorPicker" },
+        { column: 4, row: 2, size: 1, height: 1, type: "musicRecognition" },
+        { column: 5, row: 2, size: 1, height: 1, type: "antiFlashbang" },
+        { column: 6, row: 2, size: 1, height: 1, type: "onScreenKeyboard" },
+        { column: 7, row: 2, size: 1, height: 1, type: "vrr" },
+        // Row 3: Performance & compositor graphics tweaks
+        { column: 0, row: 3, size: 2, height: 1, type: "focusMode" },
+        { column: 2, row: 3, size: 2, height: 1, type: "directScanout" },
+        { column: 4, row: 3, size: 2, height: 1, type: "tearing" },
+        { column: 6, row: 3, size: 2, height: 1, type: "gameMode" },
+        // Row 4: Memory & VRAM controls (safe left-click, hold right-click)
+        { column: 0, row: 4, size: 2, height: 1, type: "memoryMode" },
+        { column: 2, row: 4, size: 3, height: 1, type: "gpuMemory" },
+        { column: 5, row: 4, size: 3, height: 1, type: "zramAlgo" },
+        // Row 5: ZRAM writeback & tier recompression
+        { column: 0, row: 5, size: 4, height: 1, type: "zramWriteback" },
+        { column: 4, row: 5, size: 4, height: 1, type: "zramRecompress" },
+        // Row 6: Press-and-hold heavy system actions
+        { column: 0, row: 6, size: 2, height: 1, type: "memoryCompact" },
+        { column: 2, row: 6, size: 2, height: 1, type: "dropCaches" },
+        { column: 4, row: 6, size: 2, height: 1, type: "buildCache" },
+        { column: 6, row: 6, size: 2, height: 1, type: "tripleBuffer" }
+    ];
+}
+
 function span(value, limit) {
     return Math.max(1, Math.min(limit, Math.round(Number(value) || 1)));
 }

@@ -19,6 +19,6 @@ RippleButton {
     contentItem: StyledText {
         horizontalAlignment: Text.AlignHCenter
         text: buttonText
-        color: (urgency == NotificationUrgency.Critical) ? Appearance.m3colors.m3onSurfaceVariant : Appearance.m3colors.m3onSurface
+        color: (urgency == NotificationUrgency.Critical) ? Appearance.m3colors.m3onSecondaryContainer : Appearance.m3colors.m3onSurface
     }
 }

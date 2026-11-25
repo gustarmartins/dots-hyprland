@@ -24,6 +24,13 @@ ColumnLayout {
         objectName: "musicLoudnessSettings"
         visible: MusicLoudness.enabled
         Layout.fillWidth: true
+        SettingsCheckBox {
+            objectName: "musicLoudnessEdenDefault"
+            text: "Start Eden and Eglantine unmuted at +10 dB"
+            checked: MusicLoudness.edenDefault
+            enabled: !MusicLoudness.busy
+            onToggled: MusicLoudness.setEdenDefault(checked)
+        }
         RowLayout {
             Layout.fillWidth: true
             StyledText { text: "App to adjust" }
@@ -80,13 +87,11 @@ ColumnLayout {
             SettingsButton { text: "Save"; palette.buttonText: Appearance.m3colors.m3onSurface; enabled: target.acceptableInput && !MusicLoudness.busy; onClicked: MusicLoudness.setTarget(Number.fromLocaleString(Qt.locale(), target.text)) }
         }
         StyledText { Layout.fillWidth: true; text: "Match loudness measures 8 seconds through the current effects, using available peak headroom. Pause other audio first so it measures only your selected app. Manual − / + still works with other apps playing. Known song changes, closed streams or a disconnected effects pipeline reset the gain."; wrapMode: Text.WordWrap; font.pixelSize: 12 }
-        CheckBox {
+        SettingsCheckBox {
             objectName: "musicLoudnessSettingsAutoMatch"
             text: "Auto match loudness"
             checked: MusicLoudness.autoMatch
             enabled: !MusicLoudness.busy || MusicLoudness.autoMatch
-            palette.windowText: Appearance.m3colors.m3onSurface
-            palette.text: Appearance.m3colors.m3onSurface
             Accessible.name: "Auto match loudness"
             onToggled: MusicLoudness.setAutoMatch(checked)
         }

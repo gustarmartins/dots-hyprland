@@ -19,8 +19,9 @@ Scope {
             readonly property bool forceMonitorEnabled: Config?.options?.notifications?.monitor?.enable === true
             readonly property string forcedScreenName: Config?.options?.notifications?.monitor?.name ?? ""
             readonly property bool enabledForScreen: !forceMonitorEnabled || modelData.name === forcedScreenName
+            readonly property bool monitorFullscreen: HyprlandData.monitorHasFullscreen(modelData?.name ?? "")
             screen: modelData
-            visible: enabledForScreen && (Notifications.popupList.length > 0) && !GlobalStates.screenLocked
+            visible: enabledForScreen && !monitorFullscreen && (Notifications.popupList.length > 0) && !GlobalStates.screenLocked
 
             WlrLayershell.namespace: "quickshell:notificationPopup"
             WlrLayershell.layer: WlrLayer.Overlay
@@ -33,7 +34,7 @@ Scope {
             }
 
             mask: listview.surfaceRegion
-            BackgroundEffect.blurRegion: Config.options.appearance.transparency.enable
+            BackgroundEffect.blurRegion: !monitorFullscreen && Config.options.appearance.transparency.enable
                 && DesktopEffects.settings.blur !== false ? listview.surfaceRegion : null
 
             color: "transparent"

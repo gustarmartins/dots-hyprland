@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Explicit mpv-only binaural surround control. Never changes EQ, gain or playback."""
+"""Explicit mpv-only binaural surround & optional Dolby HDMI passthrough control. Never changes EQ, gain or playback."""
 import argparse
 import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import stat
 import struct
@@ -13,14 +14,380 @@ import sys
 import tempfile
 import time
 
-CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'mpv/spatial.json'
+CONFIG_HOME = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config')))
+CONFIG = CONFIG_HOME / 'mpv/spatial.json'
+PIPEWIRE_CONF = CONFIG_HOME / 'pipewire/mpv-spatial.conf'
+HRIR_PATH = CONFIG_HOME / 'pipewire/hrir/spatial-atmos-7.1-48k.wav'
+SOFA_CANDIDATES = (
+    Path('/usr/share/libmysofa/MIT_KEMAR_normal_pinna.sofa'),
+    Path('/usr/share/libmysofa/default.sofa'),
+)
 RUNTIME = Path(os.environ.get('XDG_RUNTIME_DIR', '/run/user/' + str(os.getuid()))) / 'mpv-spatial'
+ASOUND_ROOT = Path('/proc/asound')
 UNIT = 'mpv-spatial.service'
 TARGET = 'effect_input.spatial-surround'
 DEVICE = 'pipewire/' + TARGET
+DEFAULT_PROFILE = 'atmos-7.1'
+DOLBY_CODEC_TOKENS = ('AC-3', 'E-AC-3', 'MLP', 'TRUEHD', 'DTS', 'DTS-HD')
+
 
 def run(args, check=True):
     return subprocess.run(args, text=True, capture_output=True, check=check, timeout=12)
+
+
+def sofa_path():
+    for candidate in SOFA_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def available_profiles():
+    sofa = sofa_path()
+    return [
+        {
+            'id': 'atmos-7.1',
+            'label': 'Dolby Atmos 7.1 HRIR',
+            'detail': '14-channel HeSuVi binaural convolution (48 kHz)',
+            'available': HRIR_PATH.is_file(),
+        },
+        {
+            'id': 'sofa-kemar',
+            'label': 'PipeWire SOFA 3D (KEMAR)',
+            'detail': 'Native libmysofa spherical HRTF spatializer',
+            'available': sofa is not None,
+        },
+    ]
+
+
+def selected_profile(settings):
+    profile = settings.get('profile', DEFAULT_PROFILE)
+    valid = {p['id'] for p in available_profiles()}
+    return profile if profile in valid else DEFAULT_PROFILE
+
+
+def passthrough_enabled(settings):
+    return bool(settings.get('passthrough', False))
+
+
+def hdmi_dolby_info(asound_root=None):
+    """Inspect ALSA ELD files for connected HDMI/DP sinks advertising Dolby/DTS bitstreams."""
+    root = asound_root or ASOUND_ROOT
+    outputs = []
+    dolby_codecs = []
+    if root.is_dir():
+        for eld in sorted(root.glob('card*/eld#*')):
+            try:
+                text = eld.read_text(errors='replace')
+            except OSError:
+                continue
+            fields = {}
+            for line in text.splitlines():
+                if not line.strip():
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    fields[parts[0].strip()] = parts[1].strip()
+            if fields.get('monitor_present') != '1' or fields.get('eld_valid') != '1':
+                continue
+            name = fields.get('monitor_name') or eld.name
+            conn = fields.get('connection_type') or 'HDMI'
+            codecs = []
+            max_channels = 2
+            for key, val in sorted(fields.items()):
+                if re.match(r'^sad\d+_coding_type$', key):
+                    codec = re.sub(r'^\[[^\]]+\]\s*', '', val).strip()
+                    if codec and codec not in codecs:
+                        codecs.append(codec)
+                elif re.match(r'^sad\d+_channels$', key):
+                    try:
+                        max_channels = max(max_channels, int(val.split()[0]))
+                    except (ValueError, IndexError):
+                        pass
+            sink_dolby = [c for c in codecs if any(tok in c.upper() for tok in DOLBY_CODEC_TOKENS)]
+            for c in sink_dolby:
+                if c not in dolby_codecs:
+                    dolby_codecs.append(c)
+            outputs.append({
+                'name': name,
+                'connection': conn,
+                'max_channels': max_channels,
+                'codecs': codecs,
+                'dolby': bool(sink_dolby),
+            })
+    has_dolby = bool(dolby_codecs)
+    if has_dolby:
+        dolby_names = ', '.join(o['name'] for o in outputs if o['dolby'])
+        summary = f"Dolby HDMI AVR ready ({dolby_names}: {', '.join(dolby_codecs)})"
+    elif outputs:
+        names = ', '.join(f"{o['name']} ({o['max_channels']}ch LPCM)" for o in outputs)
+        summary = f"No Dolby HDMI AVR — connected displays are LPCM only ({names})"
+    else:
+        summary = 'No HDMI/DP audio receiver detected — using headphone spatial'
+    return {
+        'hdmi_dolby': has_dolby,
+        'hdmi_codecs': dolby_codecs,
+        'hdmi_outputs': outputs,
+        'hdmi_summary': summary,
+    }
+
+
+def render_pipewire_conf(profile):
+    """Build PipeWire filter-chain config for the requested spatial engine."""
+    header_common = f"""# Optional mpv surround, controlled by its own service.
+# spatial-profile: {profile}
+context.properties = {{
+    log.level = 0
+}}
+
+context.spa-libs = {{
+    audio.convert.* = audioconvert/libspa-audioconvert
+    support.*       = support/libspa-support
+}}
+
+context.modules = [
+    {{ name = libpipewire-module-rt
+        args = {{
+            nice.level       = -10
+            rt.prio          = 83
+            rt.time.soft     = -1
+            rt.time.hard     = -1
+            rlimits.enabled  = true
+            rtportal.enabled = false
+            rtkit.enabled    = false
+        }}
+        flags = [ ifexists nofail ]
+    }}
+    {{ name = libpipewire-module-protocol-native }}
+    {{ name = libpipewire-module-client-node }}
+    {{ name = libpipewire-module-adapter }}
+"""
+    capture_playback = """            capture.props = {
+                node.name        = "effect_input.spatial-surround"
+                media.class      = Audio/Sink
+                audio.channels   = 8
+                audio.position   = [ FL FR FC LFE RL RR SL SR ]
+                priority.driver  = 0
+                priority.session = 0
+                node.virtual     = true
+            }
+            playback.props = {
+                node.name          = "effect_output.spatial-surround"
+                node.passive       = true
+                stream.dont-remix  = true
+                target.object      = "easyeffects_sink"
+                audio.channels     = 2
+                audio.position     = [ FL FR ]
+            }
+        }
+    }
+]
+"""
+    if profile == 'sofa-kemar':
+        sofa = sofa_path()
+        if sofa is None:
+            raise RuntimeError('SOFA HRTF file not found under /usr/share/libmysofa/')
+        sofa_str = str(sofa).replace('"', '\\"')
+        body = f"""    {{ name = libpipewire-module-filter-chain
+        flags = [ nofail ]
+        args = {{
+            node.description = "MPV Spatial Audio (SOFA 3D KEMAR)"
+            media.name       = "MPV Spatial Audio (SOFA 3D KEMAR)"
+            filter.graph = {{
+                nodes = [
+                    {{ type = sofa label = spatializer name = sofaFL config = {{ filename = "{sofa_str}" }} control = {{ Azimuth =  30.0 Elevation = 0.0 Radius = 1.5 }} }}
+                    {{ type = sofa label = spatializer name = sofaFR config = {{ filename = "{sofa_str}" }} control = {{ Azimuth = -30.0 Elevation = 0.0 Radius = 1.5 }} }}
+                    {{ type = sofa label = spatializer name = sofaFC config = {{ filename = "{sofa_str}" }} control = {{ Azimuth =   0.0 Elevation = 0.0 Radius = 1.5 }} }}
+                    {{ type = sofa label = spatializer name = sofaSL config = {{ filename = "{sofa_str}" }} control = {{ Azimuth =  90.0 Elevation = 0.0 Radius = 1.5 }} }}
+                    {{ type = sofa label = spatializer name = sofaSR config = {{ filename = "{sofa_str}" }} control = {{ Azimuth = -90.0 Elevation = 0.0 Radius = 1.5 }} }}
+                    {{ type = sofa label = spatializer name = sofaRL config = {{ filename = "{sofa_str}" }} control = {{ Azimuth = 135.0 Elevation = 0.0 Radius = 1.5 }} }}
+                    {{ type = sofa label = spatializer name = sofaRR config = {{ filename = "{sofa_str}" }} control = {{ Azimuth = -135.0 Elevation = 0.0 Radius = 1.5 }} }}
+                    {{ type = builtin label = copy name = copyLFE }}
+                    {{
+                        type  = builtin
+                        label = mixer
+                        name  = mixL
+                        control = {{
+                            "Gain 1" = 1.0
+                            "Gain 2" = 1.0
+                            "Gain 3" = 1.0
+                            "Gain 4" = 1.0
+                            "Gain 5" = 1.0
+                            "Gain 6" = 1.0
+                            "Gain 7" = 1.0
+                            "Gain 8" = 0.55
+                        }}
+                    }}
+                    {{
+                        type  = builtin
+                        label = mixer
+                        name  = mixR
+                        control = {{
+                            "Gain 1" = 1.0
+                            "Gain 2" = 1.0
+                            "Gain 3" = 1.0
+                            "Gain 4" = 1.0
+                            "Gain 5" = 1.0
+                            "Gain 6" = 1.0
+                            "Gain 7" = 1.0
+                            "Gain 8" = 0.55
+                        }}
+                    }}
+                ]
+                links = [
+                    {{ output = "sofaFL:Out L" input = "mixL:In 1" }}
+                    {{ output = "sofaFL:Out R" input = "mixR:In 1" }}
+                    {{ output = "sofaSL:Out L" input = "mixL:In 2" }}
+                    {{ output = "sofaSL:Out R" input = "mixR:In 2" }}
+                    {{ output = "sofaRL:Out L" input = "mixL:In 3" }}
+                    {{ output = "sofaRL:Out R" input = "mixR:In 3" }}
+                    {{ output = "sofaFC:Out L" input = "mixL:In 4" }}
+                    {{ output = "sofaFC:Out R" input = "mixR:In 4" }}
+                    {{ output = "sofaFR:Out L" input = "mixL:In 5" }}
+                    {{ output = "sofaFR:Out R" input = "mixR:In 5" }}
+                    {{ output = "sofaSR:Out L" input = "mixL:In 6" }}
+                    {{ output = "sofaSR:Out R" input = "mixR:In 6" }}
+                    {{ output = "sofaRR:Out L" input = "mixL:In 7" }}
+                    {{ output = "sofaRR:Out R" input = "mixR:In 7" }}
+                    {{ output = "copyLFE:Out"  input = "mixL:In 8" }}
+                    {{ output = "copyLFE:Out"  input = "mixR:In 8" }}
+                ]
+                inputs  = [ "sofaFL:In" "sofaFR:In" "sofaFC:In" "copyLFE:In" "sofaRL:In" "sofaRR:In" "sofaSL:In" "sofaSR:In" ]
+                outputs = [ "mixL:Out" "mixR:Out" ]
+            }}
+"""
+        return header_common + body + capture_playback
+
+    hrir_str = str(HRIR_PATH).replace('"', '\\"')
+    if not HRIR_PATH.is_file():
+        raise RuntimeError(f'HRIR file not found: {HRIR_PATH}')
+    body = f"""    {{ name = libpipewire-module-filter-chain
+        flags = [ nofail ]
+        args = {{
+            node.description = "MPV Spatial Audio (Binaural Surround)"
+            media.name       = "MPV Spatial Audio (Binaural Surround)"
+            filter.graph = {{
+                nodes = [
+                    {{ type = builtin label = copy name = copyFL  }}
+                    {{ type = builtin label = copy name = copyFR  }}
+                    {{ type = builtin label = copy name = copyFC  }}
+                    {{ type = builtin label = copy name = copyRL  }}
+                    {{ type = builtin label = copy name = copyRR  }}
+                    {{ type = builtin label = copy name = copySL  }}
+                    {{ type = builtin label = copy name = copySR  }}
+                    {{ type = builtin label = copy name = copyLFE }}
+
+                    {{ type = builtin label = convolver name = convFL_L config = {{ filename = "{hrir_str}" channel =  0 }} }}
+                    {{ type = builtin label = convolver name = convFL_R config = {{ filename = "{hrir_str}" channel =  1 }} }}
+                    {{ type = builtin label = convolver name = convSL_L config = {{ filename = "{hrir_str}" channel =  2 }} }}
+                    {{ type = builtin label = convolver name = convSL_R config = {{ filename = "{hrir_str}" channel =  3 }} }}
+                    {{ type = builtin label = convolver name = convRL_L config = {{ filename = "{hrir_str}" channel =  4 }} }}
+                    {{ type = builtin label = convolver name = convRL_R config = {{ filename = "{hrir_str}" channel =  5 }} }}
+                    {{ type = builtin label = convolver name = convFC_L config = {{ filename = "{hrir_str}" channel =  6 }} }}
+                    {{ type = builtin label = convolver name = convFR_R config = {{ filename = "{hrir_str}" channel =  7 }} }}
+                    {{ type = builtin label = convolver name = convFR_L config = {{ filename = "{hrir_str}" channel =  8 }} }}
+                    {{ type = builtin label = convolver name = convSR_R config = {{ filename = "{hrir_str}" channel =  9 }} }}
+                    {{ type = builtin label = convolver name = convSR_L config = {{ filename = "{hrir_str}" channel = 10 }} }}
+                    {{ type = builtin label = convolver name = convRR_R config = {{ filename = "{hrir_str}" channel = 11 }} }}
+                    {{ type = builtin label = convolver name = convRR_L config = {{ filename = "{hrir_str}" channel = 12 }} }}
+                    {{ type = builtin label = convolver name = convFC_R config = {{ filename = "{hrir_str}" channel = 13 }} }}
+
+                    {{
+                        type  = builtin
+                        label = mixer
+                        name  = mixL
+                        control = {{
+                            "Gain 1" = 1.0
+                            "Gain 2" = 1.0
+                            "Gain 3" = 1.0
+                            "Gain 4" = 1.0
+                            "Gain 5" = 1.0
+                            "Gain 6" = 1.0
+                            "Gain 7" = 1.0
+                            "Gain 8" = 0.55
+                        }}
+                    }}
+                    {{
+                        type  = builtin
+                        label = mixer
+                        name  = mixR
+                        control = {{
+                            "Gain 1" = 1.0
+                            "Gain 2" = 1.0
+                            "Gain 3" = 1.0
+                            "Gain 4" = 1.0
+                            "Gain 5" = 1.0
+                            "Gain 6" = 1.0
+                            "Gain 7" = 1.0
+                            "Gain 8" = 0.55
+                        }}
+                    }}
+                ]
+                links = [
+                    {{ output = "copyFL:Out"  input = "convFL_L:In" }}
+                    {{ output = "copyFL:Out"  input = "convFL_R:In" }}
+                    {{ output = "copySL:Out"  input = "convSL_L:In" }}
+                    {{ output = "copySL:Out"  input = "convSL_R:In" }}
+                    {{ output = "copyRL:Out"  input = "convRL_L:In" }}
+                    {{ output = "copyRL:Out"  input = "convRL_R:In" }}
+                    {{ output = "copyFC:Out"  input = "convFC_L:In" }}
+                    {{ output = "copyFR:Out"  input = "convFR_R:In" }}
+                    {{ output = "copyFR:Out"  input = "convFR_L:In" }}
+                    {{ output = "copySR:Out"  input = "convSR_R:In" }}
+                    {{ output = "copySR:Out"  input = "convSR_L:In" }}
+                    {{ output = "copyRR:Out"  input = "convRR_R:In" }}
+                    {{ output = "copyRR:Out"  input = "convRR_L:In" }}
+                    {{ output = "copyFC:Out"  input = "convFC_R:In" }}
+
+                    {{ output = "convFL_L:Out" input = "mixL:In 1" }}
+                    {{ output = "convFL_R:Out" input = "mixR:In 1" }}
+                    {{ output = "convSL_L:Out" input = "mixL:In 2" }}
+                    {{ output = "convSL_R:Out" input = "mixR:In 2" }}
+                    {{ output = "convRL_L:Out" input = "mixL:In 3" }}
+                    {{ output = "convRL_R:Out" input = "mixR:In 3" }}
+                    {{ output = "convFC_L:Out" input = "mixL:In 4" }}
+                    {{ output = "convFC_R:Out" input = "mixR:In 4" }}
+                    {{ output = "convFR_R:Out" input = "mixR:In 5" }}
+                    {{ output = "convFR_L:Out" input = "mixL:In 5" }}
+                    {{ output = "convSR_R:Out" input = "mixR:In 6" }}
+                    {{ output = "convSR_L:Out" input = "mixL:In 6" }}
+                    {{ output = "convRR_R:Out" input = "mixR:In 7" }}
+                    {{ output = "convRR_L:Out" input = "mixL:In 7" }}
+                    {{ output = "copyLFE:Out"  input = "mixL:In 8" }}
+                    {{ output = "copyLFE:Out"  input = "mixR:In 8" }}
+                ]
+                inputs  = [ "copyFL:In" "copyFR:In" "copyFC:In" "copyLFE:In" "copyRL:In" "copyRR:In" "copySL:In" "copySR:In" ]
+                outputs = [ "mixL:Out" "mixR:Out" ]
+            }}
+"""
+    return header_common + body + capture_playback
+
+
+def write_pipewire_conf(profile):
+    content = render_pipewire_conf(profile)
+    PIPEWIRE_CONF.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.mpv-spatial-conf-', dir=PIPEWIRE_CONF.parent)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, PIPEWIRE_CONF)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def ensure_pipewire_conf(profile):
+    marker = f'# spatial-profile: {profile}'
+    try:
+        if PIPEWIRE_CONF.is_file() and marker in PIPEWIRE_CONF.read_text(errors='replace')[:256]:
+            return False
+    except OSError:
+        pass
+    write_pipewire_conf(profile)
+    return True
+
 
 def config():
     try:
@@ -31,15 +398,21 @@ def config():
     except FileNotFoundError:
         return {'enabled': False, 'automatic': True}
 
+
 def save(value):
     CONFIG.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix='.spatial-', dir=CONFIG.parent)
     try:
         with os.fdopen(fd, 'w') as f:
-            json.dump(value, f, indent=2);f.write('\n');f.flush();os.fsync(f.fileno())
+            json.dump(value, f, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(name, CONFIG)
     finally:
-        if os.path.exists(name): os.unlink(name)
+        if os.path.exists(name):
+            os.unlink(name)
+
 
 def runtime():
     RUNTIME.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -47,6 +420,7 @@ def runtime():
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise RuntimeError('Spatial audio runtime directory is not private')
     return RUNTIME
+
 
 def mpv_identity(pid):
     root = Path('/proc') / str(pid)
@@ -58,10 +432,12 @@ def mpv_identity(pid):
     except (OSError, IndexError):
         return None
 
+
 class Client:
     def __init__(self, path, pid):
         self.path, self.pid, self.birth = str(path), pid, mpv_identity(pid)
-        if self.birth is None: raise RuntimeError('Player identity changed')
+        if self.birth is None:
+            raise RuntimeError('Player identity changed')
         info = Path(path).lstat()
         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
             raise RuntimeError('Not an owner mpv socket')
@@ -70,39 +446,49 @@ class Client:
         self.sock.connect(self.path)
         peer, uid, _ = struct.unpack('3i', self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
         if peer != pid or uid != os.getuid():
-            self.sock.close();raise RuntimeError('Player socket identity mismatch')
+            self.sock.close()
+            raise RuntimeError('Player socket identity mismatch')
         self.buffer, self.sequence = b'', 0
 
-    def close(self): self.sock.close()
+    def close(self):
+        self.sock.close()
 
     def command(self, *args):
-        if mpv_identity(self.pid) != self.birth: raise RuntimeError('Player lifetime changed')
+        if mpv_identity(self.pid) != self.birth:
+            raise RuntimeError('Player lifetime changed')
         self.sequence += 1
         self.sock.sendall((json.dumps({'command': list(args), 'request_id': self.sequence}) + '\n').encode())
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             if b'\n' not in self.buffer:
                 chunk = self.sock.recv(65536)
-                if not chunk: raise RuntimeError('Player disconnected')
+                if not chunk:
+                    raise RuntimeError('Player disconnected')
                 self.buffer += chunk
             while b'\n' in self.buffer:
                 line, self.buffer = self.buffer.split(b'\n', 1)
                 reply = json.loads(line)
                 if reply.get('request_id') == self.sequence:
-                    if reply.get('error') != 'success': raise RuntimeError(reply.get('error', 'Player command failed'))
+                    if reply.get('error') != 'success':
+                        raise RuntimeError(reply.get('error', 'Player command failed'))
                     return reply.get('data')
         raise TimeoutError('Player reply timed out')
 
     def get(self, key, default=None):
-        try: return self.command('get_property', key)
-        except RuntimeError: return default
+        try:
+            return self.command('get_property', key)
+        except RuntimeError:
+            return default
+
 
 def clients():
     candidates = set()
     for proc in Path('/proc').iterdir():
-        if not proc.name.isdigit(): continue
+        if not proc.name.isdigit():
+            continue
         pid = int(proc.name)
-        if mpv_identity(pid) is None: continue
+        if mpv_identity(pid) is None:
+            continue
         try:
             args = (proc / 'cmdline').read_bytes().decode().split('\0')
             for index, arg in enumerate(args):
@@ -111,132 +497,323 @@ def clients():
                 elif arg == '--input-ipc-server' and index + 1 < len(args):
                     candidates.add((args[index + 1], pid))
             own = RUNTIME / (str(pid) + '.sock')
-            if own.exists(): candidates.add((str(own), pid))
-        except (OSError, UnicodeError): pass
+            if own.exists():
+                candidates.add((str(own), pid))
+        except (OSError, UnicodeError):
+            pass
     found = []
     for path, pid in sorted(candidates):
-        try: found.append(Client(path, pid))
-        except (OSError, RuntimeError, ValueError): pass
+        try:
+            found.append(Client(path, pid))
+        except (OSError, RuntimeError, ValueError):
+            pass
     return found
+
 
 def sink_names():
     return {row['name'] for row in json.loads(run(['pactl', '-f', 'json', 'list', 'sinks']).stdout)}
 
+
 def default_sink():
     return run(['pactl', 'get-default-sink']).stdout.strip()
 
+
 def active():
     return run(['systemctl', '--user', 'is-active', UNIT], check=False).returncode == 0
+
+
+def player_spatial_active(client):
+    """True only when this mpv instance is unpaused, non-idle, and actively using spatial."""
+    if client.get('pause', False) or client.get('idle-active', False):
+        return False
+    if client.get('audio-device') == DEVICE:
+        return True
+    state = client.get('user-data/mpv-spatial', {}) or {}
+    return bool(state.get('active') and not state.get('passthrough'))
+
+
+def any_active_spatial_player(exclude_pid=None):
+    for client in clients():
+        try:
+            if exclude_pid is not None and client.pid == exclude_pid:
+                continue
+            if player_spatial_active(client):
+                return True
+        except (OSError, RuntimeError):
+            pass
+        finally:
+            client.close()
+    return False
+
 
 def refresh_players(reason='refresh'):
     errors = []
     for client in clients():
         try:
             client.command('script-message-to', 'mpv_spatial', 'refresh', reason)
-        except (OSError, RuntimeError) as e: errors.append(f'mpv {client.pid}: {e}')
-        finally: client.close()
+        except (OSError, RuntimeError) as e:
+            errors.append(f'mpv {client.pid}: {e}')
+        finally:
+            client.close()
     return errors
 
-def restore_players():
+
+def restore_players(only_idle=False, exclude_pid=None):
     errors = []
     for client in clients():
         try:
-            client.command('script-message-to', 'mpv_spatial', 'refresh', 'disabled')
+            if exclude_pid is not None and client.pid == exclude_pid:
+                continue
+            if only_idle and player_spatial_active(client):
+                continue
+            if client.get('audio-device') != DEVICE:
+                continue
+            client.command('script-message-to', 'mpv_spatial', 'refresh', 'release' if only_idle else 'disabled')
             deadline = time.monotonic() + 2
             while client.get('audio-device') == DEVICE and time.monotonic() < deadline:
                 time.sleep(.04)
             if client.get('audio-device') == DEVICE:
                 owned = client.get('user-data/mpv-spatial', {}) or {}
                 previous = owned.get('previous_device', 'auto')
-                if previous == DEVICE: previous = 'auto'
+                if previous == DEVICE:
+                    previous = 'auto'
                 client.command('set_property', 'audio-device', previous)
                 if owned.get('previous_channels') and client.get('options/audio-channels') == '7.1,5.1,stereo':
                     client.command('set_property', 'audio-channels', owned['previous_channels'])
-            if client.get('audio-device') == DEVICE: raise RuntimeError('Spatial route did not release')
-        except (OSError, RuntimeError) as e: errors.append(f'mpv {client.pid}: {e}')
-        finally: client.close()
+            if client.get('audio-device') == DEVICE:
+                raise RuntimeError('Spatial route did not release')
+        except (OSError, RuntimeError) as e:
+            errors.append(f'mpv {client.pid}: {e}')
+        finally:
+            client.close()
     return errors
+
 
 def clear_sink_users(settings):
     """Only streams actually using our disappearing sink need a fallback."""
     sinks = json.loads(run(['pactl', '-f', 'json', 'list', 'sinks']).stdout)
     spatial = next((s for s in sinks if s['name'] == TARGET), None)
-    if spatial is None: return
+    if spatial is None:
+        return
     names = {s['name'] for s in sinks if s['name'] != TARGET}
     fallback = settings.get('previous_default_sink')
     if fallback not in names:
         fallback = default_sink()
     if fallback not in names:
         fallback = 'easyeffects_sink' if 'easyeffects_sink' in names else next(iter(sorted(names)), None)
-    if fallback is None: raise RuntimeError('No normal audio output is available')
-    if default_sink() == TARGET: run(['pactl', 'set-default-sink', fallback])
+    if fallback is None:
+        raise RuntimeError('No normal audio output is available')
+    if default_sink() == TARGET:
+        run(['pactl', 'set-default-sink', fallback])
     inputs = json.loads(run(['pactl', '-f', 'json', 'list', 'sink-inputs']).stdout)
     for stream in inputs:
         if stream['sink'] == spatial['index']:
             run(['pactl', 'move-sink-input', str(stream['index']), fallback])
 
+
+def acquire_sink():
+    """Start the virtual spatial sink on demand without altering desktop default sink."""
+    settings = config()
+    if not settings['enabled']:
+        raise RuntimeError('Spatial audio is disabled')
+    updated = dict(settings)
+    if TARGET not in sink_names():
+        try:
+            ensure_pipewire_conf(selected_profile(settings))
+        except RuntimeError:
+            pass
+        prev = default_sink()
+        if prev and prev != TARGET:
+            updated['previous_default_sink'] = prev
+            save(updated)
+        run(['systemctl', '--user', 'start', UNIT])
+        deadline = time.monotonic() + 3
+        while TARGET not in sink_names() and time.monotonic() < deadline:
+            time.sleep(.05)
+        if TARGET not in sink_names():
+            run(['systemctl', '--user', 'stop', UNIT], check=False)
+            raise RuntimeError('Spatial audio output did not become ready')
+    if default_sink() == TARGET and updated.get('previous_default_sink'):
+        run(['pactl', 'set-default-sink', updated['previous_default_sink']])
+
+
+def release_sink(exclude_pid=None):
+    """Tear down the virtual spatial sink once no unpaused mpv player needs it."""
+    if any_active_spatial_player(exclude_pid=exclude_pid):
+        return False
+    settings = config()
+    restore_players(only_idle=True, exclude_pid=exclude_pid)
+    if active() or TARGET in sink_names():
+        clear_sink_users(settings)
+        run(['systemctl', '--user', 'stop', UNIT], check=False)
+        deadline = time.monotonic() + 2
+        while TARGET in sink_names() and time.monotonic() < deadline:
+            time.sleep(.05)
+    return True
+
+
+def set_profile(profile_id):
+    profiles = {p['id']: p for p in available_profiles()}
+    if profile_id not in profiles:
+        raise ValueError(f'Unknown spatial profile: {profile_id}')
+    if not profiles[profile_id]['available']:
+        raise RuntimeError(f"Spatial profile '{profile_id}' is unavailable on this machine")
+    previous = config()
+    updated = dict(previous, profile=profile_id)
+    write_pipewire_conf(profile_id)
+    save(updated)
+    if active():
+        was_playing = any_active_spatial_player()
+        restore_players()
+        clear_sink_users(updated)
+        run(['systemctl', '--user', 'restart', UNIT])
+        deadline = time.monotonic() + 3
+        while TARGET not in sink_names() and time.monotonic() < deadline:
+            time.sleep(.05)
+        if default_sink() == TARGET and updated.get('previous_default_sink'):
+            run(['pactl', 'set-default-sink', updated['previous_default_sink']])
+        refresh_players('profile')
+        if not was_playing and not any_active_spatial_player():
+            release_sink()
+    else:
+        refresh_players('profile')
+
+
+def set_passthrough(value):
+    previous = config()
+    save(dict(previous, passthrough=bool(value)))
+    refresh_players('passthrough')
+
+
 def set_enabled(value):
-    previous = config();updated = dict(previous, enabled=value)
+    previous = config()
+    updated = dict(previous, enabled=value)
     if value:
-        if TARGET not in sink_names(): updated['previous_default_sink'] = default_sink()
+        if TARGET not in sink_names():
+            prev = default_sink()
+            if prev and prev != TARGET:
+                updated['previous_default_sink'] = prev
         save(updated)
         try:
-            run(['systemctl', '--user', 'enable', '--now', UNIT])
-            deadline = time.monotonic() + 3
-            while TARGET not in sink_names() and time.monotonic() < deadline: time.sleep(.1)
-            if TARGET not in sink_names(): raise RuntimeError('Spatial audio output did not become ready')
-            # A manually targeted virtual sink must never become the desktop default.
-            if default_sink() == TARGET:
-                run(['pactl', 'set-default-sink', updated['previous_default_sink']])
+            # On-demand lifecycle: never leave the virtual sink running at boot or while idle.
+            run(['systemctl', '--user', 'disable', UNIT], check=False)
             refresh_players('enabled')
+            if not any_active_spatial_player():
+                release_sink()
         except Exception:
             save(previous)
             if not previous['enabled']:
-                restore_players();clear_sink_users(updated)
+                restore_players()
+                clear_sink_users(updated)
                 run(['systemctl', '--user', 'disable', '--now', UNIT], check=False)
             raise
     else:
         save(updated)
         errors = restore_players()
         clear_sink_users(updated)
-        run(['systemctl', '--user', 'disable', '--now', UNIT])
-        if errors: raise RuntimeError('; '.join(errors))
+        run(['systemctl', '--user', 'disable', '--now', UNIT], check=False)
+        if errors:
+            raise RuntimeError('; '.join(errors))
+
 
 def status():
-    settings = config();running = active();available = TARGET in sink_names()
+    settings = config()
+    running = active()
+    available = TARGET in sink_names()
+    profiles = available_profiles()
+    profile_id = selected_profile(settings)
+    profile_entry = next((p for p in profiles if p['id'] == profile_id), profiles[0])
+    passthrough = passthrough_enabled(settings)
+    hdmi = hdmi_dolby_info()
     players = []
     for client in clients():
         try:
             state = client.get('user-data/mpv-spatial', {}) or {}
-            players.append({'pid': client.pid, 'spatial': client.get('audio-device') == DEVICE, 'state': state})
-        finally: client.close()
+            paused = bool(client.get('pause', False) or client.get('idle-active', False))
+            on_spatial = client.get('audio-device') == DEVICE
+            on_passthrough = bool(state.get('passthrough')) and not paused
+            players.append({
+                'pid': client.pid,
+                'spatial': on_spatial and not paused,
+                'passthrough': on_passthrough,
+                'paused': paused,
+                'state': state,
+            })
+        finally:
+            client.close()
     message = 'Off — normal stereo output'
     if settings['enabled']:
-        if not running or not available:
-            message = 'Enabled, but the spatial output is unavailable'
-        elif any(player['spatial'] for player in players):
-            message = 'Spatial processing active in mpv'
+        if any(player['passthrough'] for player in players):
+            message = 'True Dolby HDMI bitstream passthrough active in mpv'
+        elif any(player['spatial'] for player in players) and running and available:
+            message = f"Spatial active in mpv ({profile_entry['label']})"
+        elif running or available:
+            message = 'Spatial sink idle — releases automatically when paused'
         else:
-            message = 'Ready — waiting for a multichannel mpv track' if settings['automatic'] else 'Ready — press F8 in mpv'
-    return {'enabled': settings['enabled'], 'automatic': settings['automatic'], 'running': running, 'available': available, 'message': message, 'players': players}
+            mode_msg = 'starts on multichannel mpv playback' if settings['automatic'] else 'press F8 in mpv'
+            message = f"Ready ({profile_entry['label']}, on-demand) — {mode_msg}"
+    return {
+        'enabled': settings['enabled'],
+        'automatic': settings['automatic'],
+        'profile': profile_id,
+        'profile_label': profile_entry['label'],
+        'profiles': profiles,
+        'passthrough': passthrough,
+        'hdmi_dolby': hdmi['hdmi_dolby'],
+        'hdmi_codecs': hdmi['hdmi_codecs'],
+        'hdmi_outputs': hdmi['hdmi_outputs'],
+        'hdmi_summary': hdmi['hdmi_summary'],
+        'running': running,
+        'available': available,
+        'message': message,
+        'players': players,
+    }
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['status', 'enable', 'disable', 'toggle', 'automatic', 'runtime', 'is-enabled'])
-    parser.add_argument('value', nargs='?', choices=['true', 'false'])
+    parser.add_argument(
+        'command',
+        choices=['status', 'enable', 'disable', 'toggle', 'automatic', 'passthrough', 'profile', 'runtime', 'is-enabled', 'acquire', 'release'],
+    )
+    parser.add_argument('value', nargs='?')
+    parser.add_argument('--exclude-pid', type=int, default=None)
     args = parser.parse_args()
-    if args.command == 'runtime': print(runtime());return
-    if args.command == 'is-enabled': raise SystemExit(0 if config()['enabled'] else 1)
-    if args.command == 'status': print(json.dumps(status()));return
+    if args.command == 'runtime':
+        print(runtime())
+        return
+    if args.command == 'is-enabled':
+        raise SystemExit(0 if config()['enabled'] else 1)
+    if args.command == 'status':
+        print(json.dumps(status()))
+        return
     with (runtime() / 'control.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if args.command == 'automatic':
-            if args.value is None: parser.error('automatic requires true or false')
-            save(dict(config(), automatic=args.value == 'true'));refresh_players('automatic')
-        else: set_enabled(not config()['enabled'] if args.command == 'toggle' else args.command == 'enable')
+            if args.value not in ('true', 'false'):
+                parser.error('automatic requires true or false')
+            save(dict(config(), automatic=args.value == 'true'))
+            refresh_players('automatic')
+        elif args.command == 'passthrough':
+            if args.value not in ('true', 'false'):
+                parser.error('passthrough requires true or false')
+            set_passthrough(args.value == 'true')
+        elif args.command == 'profile':
+            if not args.value:
+                parser.error('profile requires a profile id (atmos-7.1 or sofa-kemar)')
+            set_profile(args.value)
+        elif args.command == 'acquire':
+            acquire_sink()
+        elif args.command == 'release':
+            release_sink(exclude_pid=args.exclude_pid)
+        else:
+            set_enabled(not config()['enabled'] if args.command == 'toggle' else args.command == 'enable')
     print(json.dumps(status()))
 
+
 if __name__ == '__main__':
-    try: main()
+    try:
+        main()
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-        print(str(error), file=sys.stderr);raise SystemExit(1)
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1)

@@ -23,6 +23,14 @@ QtObject {
     // original behavior.
     property bool altActionOnRightClick: false
 
+    // Press-and-hold safety guards for heavy/destructive actions.
+    property bool mainActionRequiresHold: false
+    property bool altActionRequiresHold: false
+    property int mainHoldDurationMs: 950
+    property int altHoldDurationMs: 1100
+    property string mainHoldLabel: ""
+    property string altHoldLabel: ""
+
     // Allow stuff like Processes to be declared freely
     default property list<QtObject> data
 }

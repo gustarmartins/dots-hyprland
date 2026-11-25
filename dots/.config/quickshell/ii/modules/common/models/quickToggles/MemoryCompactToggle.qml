@@ -10,11 +10,17 @@ QuickToggleModel {
     hasStatusText: false
     toggled: false
     altActionOnRightClick: true
+    mainActionRequiresHold: true
+    mainHoldDurationMs: 900
+    mainHoldLabel: Translation.tr("Compact RAM")
+    altActionRequiresHold: true
+    altHoldDurationMs: 900
+    altHoldLabel: Translation.tr("Compact ZRAM")
     mainAction: () => {
         Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh compact-memory"])
     }
     altAction: () => {
         Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh compact-zram"])
     }
-    tooltipText: Translation.tr("Left: global physical compaction. Right: compact zram's allocator.")
+    tooltipText: Translation.tr("Hold left-click: global physical compaction. Hold right-click: compact zram's allocator.")
 }

@@ -19,6 +19,10 @@ Scope { // Scope
             "name": Translation.tr("Keybinds")
         },
         {
+            "icon": "touch_app",
+            "name": Translation.tr("Gestures")
+        },
+        {
             "icon": "experiment",
             "name": Translation.tr("Elements")
         },
@@ -171,6 +175,7 @@ Scope { // Scope
                         }
 
                         CheatsheetKeybinds {}
+                        CheatsheetGestures {}
                         CheatsheetPeriodicTable {}
                     }
                 }
@@ -191,6 +196,29 @@ Scope { // Scope
 
         function open(): void {
             cheatsheetLoader.active = true;
+        }
+
+        function gesturesToggle(): void {
+            if (cheatsheetLoader.active && Persistent.states.cheatsheet.tabIndex === 1) {
+                cheatsheetLoader.active = false;
+            } else {
+                Persistent.states.cheatsheet.tabIndex = 1;
+                cheatsheetLoader.active = true;
+            }
+        }
+    }
+
+    GlobalShortcut {
+        name: "cheatsheetGesturesToggle"
+        description: "Toggles cheatsheet directly on the Gestures tab"
+
+        onPressed: {
+            if (cheatsheetLoader.active && Persistent.states.cheatsheet.tabIndex === 1) {
+                cheatsheetLoader.active = false;
+            } else {
+                Persistent.states.cheatsheet.tabIndex = 1;
+                cheatsheetLoader.active = true;
+            }
         }
     }
 

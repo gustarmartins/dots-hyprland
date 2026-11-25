@@ -67,12 +67,14 @@ install-uv(){
 }
 
 install-python-packages(){
-  UV_NO_MODIFY_PATH=1
-  ILLOGICAL_IMPULSE_VIRTUAL_ENV=$XDG_STATE_HOME/quickshell/.venv
-  x mkdir -p $(eval echo $ILLOGICAL_IMPULSE_VIRTUAL_ENV)
+  export UV_NO_MODIFY_PATH=1
+  ILLOGICAL_IMPULSE_VIRTUAL_ENV="$XDG_STATE_HOME/quickshell/.venv"
+  x mkdir -p "$(dirname "$ILLOGICAL_IMPULSE_VIRTUAL_ENV")"
   # we need python 3.12 https://github.com/python-pillow/Pillow/issues/8089
-  try uv venv --prompt .venv $(eval echo $ILLOGICAL_IMPULSE_VIRTUAL_ENV) -p 3.12
-  x source $(eval echo $ILLOGICAL_IMPULSE_VIRTUAL_ENV)/bin/activate
+  if [[ ! -x "$ILLOGICAL_IMPULSE_VIRTUAL_ENV/bin/python" ]]; then
+    x uv venv --prompt .venv "$ILLOGICAL_IMPULSE_VIRTUAL_ENV" -p 3.12
+  fi
+  x source "$ILLOGICAL_IMPULSE_VIRTUAL_ENV/bin/activate"
   if [[ "$INSTALL_VIA_NIX" = true ]]; then
     x nix-shell "${REPO_ROOT}/sdata/uv/shell.nix" --run "uv pip install -r '${REPO_ROOT}/sdata/uv/requirements.txt'"
   else

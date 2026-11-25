@@ -32,13 +32,63 @@ GroupButton {
         restoreMode: Binding.RestoreBindingOrValue
     }
     property string name: toggleModel?.name ?? ""
-    readonly property string compactName: ({notifications: "Inbox", idleInhibitor: "Keep awake", onScreenKeyboard: "Keyboard", colorPicker: "Pick color", screenSnip: "Capture", antiFlashbang: "Anti-flash", tripleBuffer: "Buffer", darkMode: "Theme", directScanout: "Scanout", powerProfile: "Power", musicRecognition: "Identify", memoryCompact: "Compact", zramRecompress: "Recompress", zramWriteback: "Writeback", dropCaches: "Caches"})[buttonData.type] ?? name
+    readonly property string compactName: ({notifications: "Inbox", idleInhibitor: "Keep awake", onScreenKeyboard: "Keyboard", colorPicker: "Pick color", screenSnip: "Capture", antiFlashbang: "Anti-flash", tripleBuffer: "Buffer", darkMode: "Theme", directScanout: "Scanout", powerProfile: "Power", musicRecognition: "Identify", memoryCompact: "Compact", zramRecompress: "Recompress", zramWriteback: "Writeback", dropCaches: "Caches", vrr: "VRR"})[buttonData.type] ?? name
+    readonly property string tileCategory: TileGrid.categoryOf(buttonData.type)
+    readonly property color categoryAccent: tileCategory === "performance"
+        ? (Appearance.m3colors.m3tertiary ?? Appearance.m3colors.m3primary)
+        : tileCategory === "advanced"
+            ? (Appearance.m3colors.m3error ?? Appearance.m3colors.m3primary)
+            : tileCategory === "comfort"
+                ? (Appearance.m3colors.m3secondary ?? Appearance.m3colors.m3primary)
+                : Appearance.m3colors.m3primary
+    readonly property color categoryToggledBg: tileCategory === "performance"
+        ? (Appearance.m3colors.m3tertiaryContainer ?? Appearance.m3colors.m3primaryContainer)
+        : tileCategory === "advanced"
+            ? (Appearance.m3colors.m3errorContainer ?? Appearance.m3colors.m3primaryContainer)
+            : tileCategory === "comfort"
+                ? (Appearance.m3colors.m3secondaryContainer ?? Appearance.m3colors.m3primaryContainer)
+                : Appearance.m3colors.m3primaryContainer
+    readonly property color categoryToggledFg: tileCategory === "performance"
+        ? (Appearance.m3colors.m3onTertiaryContainer ?? Appearance.m3colors.m3onPrimaryContainer)
+        : tileCategory === "advanced"
+            ? (Appearance.m3colors.m3onErrorContainer ?? Appearance.m3colors.m3onPrimaryContainer)
+            : tileCategory === "comfort"
+                ? (Appearance.m3colors.m3onSecondaryContainer ?? Appearance.m3colors.m3onPrimaryContainer)
+                : Appearance.m3colors.m3onPrimaryContainer
+    readonly property color categoryRestBg: tileCategory === "performance"
+        ? ColorUtils.mix(Appearance.m3colors.m3surfaceContainerHigh, categoryToggledBg, 0.87)
+        : tileCategory === "advanced"
+            ? ColorUtils.mix(Appearance.m3colors.m3surfaceContainerHigh, categoryToggledBg, 0.90)
+            : tileCategory === "comfort"
+                ? (Appearance.m3colors.m3surfaceContainer ?? Appearance.m3colors.m3surfaceContainerHigh)
+                : Appearance.m3colors.m3surfaceContainerHigh
+    readonly property color categoryBorderColor: root.toggled
+        ? ColorUtils.transparentize(categoryAccent, 0.50)
+        : (root.mainActionRequiresHold
+            ? ColorUtils.transparentize(Appearance.m3colors.m3error ?? categoryAccent, 0.58)
+            : tileCategory === "performance"
+                ? ColorUtils.transparentize(categoryAccent, 0.70)
+                : tileCategory === "advanced"
+                    ? ColorUtils.transparentize(categoryAccent, 0.74)
+                    : tileCategory === "essentials"
+                        ? ColorUtils.transparentize(categoryAccent, 0.82)
+                        : ColorUtils.transparentize(Appearance.m3colors.m3outlineVariant ?? categoryAccent, 0.55))
+    readonly property string holdBadgeText: root.mainActionRequiresHold
+        ? Translation.tr("HOLD")
+        : (root.altActionRequiresHold ? Translation.tr("R·HOLD") : "")
     property string statusText: toggleModel?.hasStatusText ? (toggleModel?.statusText || (toggled ? Translation.tr("Active") : Translation.tr("Inactive"))) : ""
     property string tooltipText: toggleModel?.tooltipText ?? ""
     property string buttonIcon: toggleModel?.icon ?? "close"
     property bool available: toggleModel?.available ?? true
     property var mainAction: toggleModel?.mainAction ?? null
     property bool altActionOnRightClick: toggleModel?.altActionOnRightClick ?? false
+    property bool mainActionRequiresHold: toggleModel?.mainActionRequiresHold ?? false
+    property bool altActionRequiresHold: toggleModel?.altActionRequiresHold ?? false
+    property int mainHoldDurationMs: toggleModel?.mainHoldDurationMs ?? 950
+    property int altHoldDurationMs: toggleModel?.altHoldDurationMs ?? 1100
+    property string mainHoldLabel: toggleModel?.mainHoldLabel ?? ""
+    property string altHoldLabel: toggleModel?.altHoldLabel ?? ""
+    readonly property bool hasHoldGuard: root.mainActionRequiresHold || root.altActionRequiresHold
     property bool editMode: false
     function removeTile() {
         const type = root.buttonData.type;
@@ -47,8 +97,11 @@ GroupButton {
         Config.options.sidebar.quickToggles.android.toggles =
             TileGrid.snapshot(Config.options.sidebar.quickToggles.android.toggles, root.gridColumns).filter(tile => tile.type !== type);
     }
-    onEditModeChanged: if (!editMode) sizePopup.close()
-    readonly property bool splitAltAction: altAction && expandedSize && !altActionOnRightClick
+    onEditModeChanged: {
+        if (!editMode) sizePopup.close();
+        else holdOverlay.cancelHold(false);
+    }
+    readonly property bool splitAltAction: altAction && expandedSize && !altActionOnRightClick && !hasHoldGuard
     property bool moving: false
     property bool resizing: false
     property real dragX: 0
@@ -62,6 +115,8 @@ GroupButton {
     baseHeight: baseCellHeight * cellRows + cellSpacing * (cellRows - 1)
     width: baseWidth
     height: baseHeight
+    scale: holdOverlay.holding ? 0.975 : 1.0
+    Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
     bounce: false
     enableImplicitWidthAnimation: false
     enableImplicitHeightAnimation: false
@@ -71,18 +126,48 @@ GroupButton {
     verticalPadding: padding
     buttonRadius: 18
     buttonRadiusPressed: 14
-    colBackground: Appearance.m3colors.m3surfaceContainerHigh
-    colBackgroundHover: Appearance.colors.colLayer2Hover
-    colBackgroundActive: Appearance.colors.colLayer2Active
-    colBackgroundToggled: Appearance.m3colors.m3primaryContainer
-    colBackgroundToggledHover: ColorUtils.mix(colBackgroundToggled, Appearance.m3colors.m3onPrimaryContainer, 0.08)
-    colBackgroundToggledActive: ColorUtils.mix(colBackgroundToggled, Appearance.m3colors.m3onPrimaryContainer, 0.12)
-    property color colText: toggled ? Appearance.m3colors.m3onPrimaryContainer : Appearance.m3colors.m3onSurface
+    colBackground: root.categoryRestBg
+    colBackgroundHover: ColorUtils.mix(root.categoryRestBg, Appearance.m3colors.m3onSurface, 0.92)
+    colBackgroundActive: ColorUtils.mix(root.categoryRestBg, Appearance.m3colors.m3onSurface, 0.86)
+    colBackgroundToggled: root.categoryToggledBg
+    colBackgroundToggledHover: ColorUtils.mix(colBackgroundToggled, root.categoryToggledFg, 0.92)
+    colBackgroundToggledActive: ColorUtils.mix(colBackgroundToggled, root.categoryToggledFg, 0.88)
+    property color colText: toggled ? root.categoryToggledFg : Appearance.m3colors.m3onSurface
     opacity: root.moving ? 0.45 : root.enabled ? 1 : 0.45
+    Binding {
+        target: root.mouseArea
+        property: "enabled"
+        value: !(root.hasHoldGuard && !root.editMode)
+        restoreMode: Binding.RestoreBindingOrValue
+    }
     onClicked: {
-        if (editMode) return;
+        if (editMode || hasHoldGuard) return;
         if (!altActionOnRightClick && expandedSize && altAction) altAction();
         else if (mainAction) mainAction();
+    }
+    // Subtle semantic category frame (defers to HoldToConfirmOverlay ring while holding)
+    Rectangle {
+        z: 1
+        anchors.fill: parent
+        radius: root.down ? root.buttonRadiusPressed : root.buttonRadius
+        color: "transparent"
+        visible: !(holdOverlay.holding || holdOverlay.showEarlyHint)
+        border.width: 1
+        border.color: root.categoryBorderColor
+    }
+    // Compact 1-col corner indicator dot for guarded hold tiles
+    Rectangle {
+        z: 3
+        visible: !root.expandedSize && root.hasHoldGuard && !root.editMode && !holdOverlay.holding && !holdOverlay.showEarlyHint
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: 8
+        anchors.rightMargin: 8
+        width: 6
+        height: 6
+        radius: 3
+        color: root.toggled ? root.colText : Appearance.m3colors.m3error
+        opacity: root.mainActionRequiresHold ? 0.95 : 0.65
     }
     contentItem: Item {
         RowLayout {
@@ -92,37 +177,86 @@ GroupButton {
             spacing: 8
             MouseArea {
                 Layout.preferredWidth: 36
-                Layout.preferredHeight: 40
+                Layout.preferredHeight: 38
                 acceptedButtons: root.splitAltAction ? Qt.LeftButton : Qt.NoButton
                 cursorShape: Qt.PointingHandCursor
                 onClicked: if (root.mainAction && !root.editMode) root.mainAction()
                 Rectangle {
                     anchors.fill: parent
                     radius: 12
-                    color: root.splitAltAction ? ColorUtils.transparentize(root.colText, 0.92) : "transparent"
-                    MaterialSymbol { anchors.centerIn: parent; text: root.buttonIcon; iconSize: 24; color: root.colText; fill: root.toggled ? 1 : 0 }
+                    color: root.toggled
+                        ? ColorUtils.transparentize(root.colText, root.splitAltAction ? 0.86 : 0.90)
+                        : ColorUtils.transparentize(root.categoryAccent, root.splitAltAction ? 0.82 : 0.87)
+                    border.width: root.splitAltAction ? 1 : 0
+                    border.color: root.toggled
+                        ? ColorUtils.transparentize(root.colText, 0.72)
+                        : ColorUtils.transparentize(root.categoryAccent, 0.70)
+                    MaterialSymbol {
+                        anchors.centerIn: parent
+                        text: root.buttonIcon
+                        iconSize: 22
+                        color: (holdOverlay.holding || holdOverlay.showEarlyHint)
+                            ? Appearance.m3colors.m3error
+                            : (root.toggled ? root.colText : root.categoryAccent)
+                        fill: (root.toggled || holdOverlay.holding) ? 1 : 0
+                    }
                 }
             }
             ColumnLayout {
                 Layout.fillWidth: true
                 spacing: 3
-                StyledText {
+                RowLayout {
                     Layout.fillWidth: true
-                    text: root.name
-                    color: root.colText
-                    font.pixelSize: 13
-                    font.weight: Font.Medium
-                    elide: Text.ElideRight
-                    wrapMode: Text.WordWrap
-                    maximumLineCount: 2
+                    spacing: 4
+                    StyledText {
+                        Layout.fillWidth: true
+                        text: root.name
+                        color: root.colText
+                        font.pixelSize: 13
+                        font.weight: Font.Medium
+                        elide: Text.ElideRight
+                        wrapMode: root.holdBadgeText.length > 0 ? Text.NoWrap : Text.WordWrap
+                        maximumLineCount: root.holdBadgeText.length > 0 ? 1 : 2
+                    }
+                    Rectangle {
+                        objectName: "tileHoldBadge-" + root.buttonData.type
+                        visible: root.holdBadgeText.length > 0 && !root.editMode && !holdOverlay.holding && !holdOverlay.showEarlyHint
+                        Layout.alignment: Qt.AlignVCenter
+                        implicitWidth: holdBadgeLabel.implicitWidth + 8
+                        implicitHeight: 15
+                        radius: 7.5
+                        color: root.toggled
+                            ? ColorUtils.transparentize(root.colText, 0.84)
+                            : ColorUtils.transparentize(Appearance.m3colors.m3error, root.mainActionRequiresHold ? 0.82 : 0.89)
+                        border.width: 1
+                        border.color: root.toggled
+                            ? ColorUtils.transparentize(root.colText, 0.60)
+                            : ColorUtils.transparentize(Appearance.m3colors.m3error, root.mainActionRequiresHold ? 0.45 : 0.68)
+                        StyledText {
+                            id: holdBadgeLabel
+                            anchors.centerIn: parent
+                            text: root.holdBadgeText
+                            font.pixelSize: 8
+                            font.weight: Font.DemiBold
+                            font.letterSpacing: 0.4
+                            color: root.toggled ? root.colText : Appearance.m3colors.m3error
+                            opacity: root.mainActionRequiresHold ? 0.98 : 0.85
+                        }
+                    }
                 }
                 StyledText {
+                    objectName: "tileStatus-" + root.buttonData.type
                     Layout.fillWidth: true
-                    visible: root.statusText.length > 0
-                    text: root.statusText
+                    visible: root.statusText.length > 0 || holdOverlay.holding || holdOverlay.showEarlyHint
+                    text: holdOverlay.holding
+                        ? ((holdOverlay.holdLabel || root.name) + " · " + Math.round(holdOverlay.progress * 100) + "%")
+                        : holdOverlay.showEarlyHint
+                            ? holdOverlay.earlyHintText
+                            : root.statusText
                     font.pixelSize: 11
-                    color: root.colText
-                    opacity: 0.75
+                    font.weight: (holdOverlay.holding || holdOverlay.showEarlyHint) ? Font.DemiBold : Font.Normal
+                    color: (holdOverlay.holding || holdOverlay.showEarlyHint) ? Appearance.m3colors.m3error : root.colText
+                    opacity: (holdOverlay.holding || holdOverlay.showEarlyHint) ? 1.0 : 0.78
                     elide: Text.ElideRight
                 }
             }
@@ -132,13 +266,26 @@ GroupButton {
             width: parent.width
             visible: !root.expandedSize
             spacing: 4
-            MaterialSymbol { Layout.alignment: Qt.AlignHCenter; text: root.buttonIcon; iconSize: 24; color: root.colText; fill: root.toggled ? 1 : 0 }
+            MaterialSymbol {
+                Layout.alignment: Qt.AlignHCenter
+                text: root.buttonIcon
+                iconSize: 23
+                color: (holdOverlay.holding || holdOverlay.showEarlyHint)
+                    ? Appearance.m3colors.m3error
+                    : (root.toggled ? root.colText : root.categoryAccent)
+                fill: (root.toggled || holdOverlay.holding) ? 1 : 0
+            }
             StyledText {
                 Layout.fillWidth: true
                 visible: root.width >= 64
-                text: root.compactName
+                text: holdOverlay.holding
+                    ? (Math.round(holdOverlay.progress * 100) + "%")
+                    : holdOverlay.showEarlyHint
+                        ? Translation.tr("Hold")
+                        : root.compactName
                 font.pixelSize: 11
-                color: root.colText
+                font.weight: (holdOverlay.holding || holdOverlay.showEarlyHint) ? Font.DemiBold : Font.Normal
+                color: (holdOverlay.holding || holdOverlay.showEarlyHint) ? Appearance.m3colors.m3error : root.colText
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
                 maximumLineCount: 2
@@ -146,10 +293,94 @@ GroupButton {
             }
         }
     }
-    // Keep the tile's explicit right-click action outside edit mode.
+    HoldToConfirmOverlay {
+        id: holdOverlay
+        objectName: "tileHoldOverlay-" + root.buttonData.type
+        z: 2
+        cornerRadius: root.down ? root.buttonRadiusPressed : root.buttonRadius
+        accentColor: Appearance.m3colors.m3error
+        showIdleGuard: root.hasHoldGuard && !root.editMode
+    }
+    // Guarded press-and-hold interaction for risky left/right actions.
+    MouseArea {
+        id: guardedInteraction
+        objectName: "tileGuardedArea-" + root.buttonData.type
+        z: 4
+        anchors.fill: parent
+        visible: root.hasHoldGuard && !root.editMode
+        enabled: root.available && !root.editMode
+        hoverEnabled: true
+        preventStealing: true
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        cursorShape: Qt.PointingHandCursor
+        property int activeButton: Qt.NoButton
+
+        onPressed: event => {
+            activeButton = event.button;
+            if (event.button === Qt.LeftButton) {
+                root.down = true;
+                if (root.mainActionRequiresHold) {
+                    holdOverlay.startHold(
+                        root.mainAction,
+                        root.mainHoldDurationMs,
+                        root.mainHoldLabel || ("Hold · " + root.name),
+                        Translation.tr("Hold to confirm"),
+                        Appearance.m3colors.m3error
+                    );
+                }
+            } else if (event.button === Qt.RightButton) {
+                if (!root.altAction) {
+                    activeButton = Qt.NoButton;
+                    return;
+                }
+                root.down = true;
+                if (root.altActionRequiresHold) {
+                    holdOverlay.startHold(
+                        root.altAction,
+                        root.altHoldDurationMs,
+                        root.altHoldLabel || ("Hold · " + root.name),
+                        Translation.tr("Hold right-click"),
+                        Appearance.m3colors.m3error
+                    );
+                }
+            }
+        }
+        onPositionChanged: {
+            if (holdOverlay.holding && !containsMouse) {
+                root.down = false;
+                activeButton = Qt.NoButton;
+                holdOverlay.cancelHold(false);
+            }
+        }
+        onReleased: event => {
+            const btn = activeButton;
+            activeButton = Qt.NoButton;
+            root.down = false;
+            if (holdOverlay.holding) {
+                holdOverlay.cancelHold(containsMouse);
+                return;
+            }
+            if (holdOverlay.consumeCompleted()) return;
+            if (!containsMouse) return;
+            if (btn === Qt.LeftButton && !root.mainActionRequiresHold) {
+                if (!root.altActionOnRightClick && root.expandedSize && root.altAction && !root.altActionRequiresHold)
+                    root.altAction();
+                else if (root.mainAction)
+                    root.mainAction();
+            } else if (btn === Qt.RightButton && !root.altActionRequiresHold) {
+                if (root.altAction) root.altAction();
+            }
+        }
+        onCanceled: {
+            root.down = false;
+            activeButton = Qt.NoButton;
+            holdOverlay.cancelHold(false);
+        }
+    }
+    // Keep the tile's explicit right-click action outside edit mode (for unguarded tiles).
     MouseArea {
         anchors.fill: parent
-        visible: root.altActionOnRightClick && !root.editMode
+        visible: root.altActionOnRightClick && !root.editMode && !root.hasHoldGuard
         acceptedButtons: Qt.RightButton
         onClicked: if (root.altAction) root.altAction()
     }

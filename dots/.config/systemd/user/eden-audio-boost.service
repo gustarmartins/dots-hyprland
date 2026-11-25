@@ -1,5 +1,5 @@
 [Unit]
-Description=Temporary Eden-only audio boost (double-click activation)
+Description=Temporary current-app audio boost (+12 dB)
 
 [Service]
 Type=simple

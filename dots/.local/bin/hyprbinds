@@ -13,6 +13,11 @@ import subprocess
 from collections import Counter
 from pathlib import Path
 
+try:
+    import readline  # noqa: F401
+except ImportError:
+    pass
+
 # --- ANSI Color Helpers ---
 USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -66,6 +71,12 @@ KEY_MAP = {
     'left': 'Left', 'right': 'Right', 'up': 'Up', 'down': 'Down',
     'pageup': 'Page_Up', 'page_up': 'Page_Up', 'pgup': 'Page_Up',
     'pagedown': 'Page_Down', 'page_down': 'Page_Down', 'pgdn': 'Page_Down',
+    'print': 'Print', 'prtsc': 'Print', 'printscreen': 'Print',
+    'home': 'Home', 'end': 'End', 'insert': 'Insert', 'ins': 'Insert',
+    'grave': 'Grave', 'tilde': 'Tilde', 'backtick': 'Grave',
+    'caps': 'Caps_Lock', 'capslock': 'Caps_Lock', 'caps_lock': 'Caps_Lock',
+    'mouse_up': 'Mouse_up', 'mouse_down': 'Mouse_down',
+    'mouse_left': 'Mouse_left', 'mouse_right': 'Mouse_right',
 }
 
 PUNCT_MAP = {
@@ -73,6 +84,26 @@ PUNCT_MAP = {
     "'": 'Apostrophe', '"': 'Apostrophe', '-': 'Minus', '=': 'Equal', '+': 'Equal',
     '[': 'BracketLeft', ']': 'BracketRight', '`': 'Grave', '~': 'Tilde',
 }
+
+FUNCTION_KEY_RE = re.compile(r'^f([1-9]|1[0-9]|2[0-4])$', re.IGNORECASE)
+KEYPAD_KEY_RE = re.compile(r'^kp_[a-z0-9_]+$', re.IGNORECASE)
+
+def is_known_key_token(token: str, known_keys=None) -> bool:
+    if not token:
+        return False
+    t = token.strip()
+    t_low = t.lower()
+    if t_low in KEY_MAP or t in PUNCT_MAP:
+        return True
+    if len(t) == 1 and t.isalnum():
+        return True
+    if FUNCTION_KEY_RE.match(t_low) or KEYPAD_KEY_RE.match(t_low):
+        return True
+    if t_low.startswith(('code:', 'mouse:', 'xf86', 'switch:')):
+        return True
+    if known_keys and normalize_key(t).casefold() in known_keys:
+        return True
+    return False
 
 def normalize_key(k: str) -> str:
     if not k:
@@ -114,23 +145,25 @@ def format_combo(mods: set, key: str) -> str:
         return " + ".join(sorted_mods + [key])
     return " + ".join(sorted_mods)
 
-def tokenize_user_query(q: str):
+def parse_user_query(q: str, known_keys=None):
     """
-    Tokenizes flexible user query strings like:
-    - 'super,shift,d'
-    - 'super+shift+d'
-    - 'super,a'
-    - 'a'
-    - 'super,,'
-    - 'ctrl,alt,del'
+    Classifies a user query into one of:
+    - ('empty', set(), None, [], raw)
+    - ('combo', mods_set, key_str, [], raw)      e.g. 'super + r', 'ctrl+shift+esc', 'super,,'
+    - ('key', set(), key_str, [], raw)           e.g. 'r', '"r"', 'space', 'f1', 'print', '/'
+    - ('mods', mods_set, None, [], raw)          e.g. 'super', 'super + shift'
+    - ('mod_text', mods_set, None, terms, raw)   e.g. 'super terminal', 'super + reload'
+    - ('text', set(), None, terms, raw)          e.g. 'terminal', 'task manager', 'left sidebar'
     """
     q = q.strip()
+    if len(q) >= 2 and q[0] == q[-1] and q[0] in ('"', "'"):
+        q = q[1:-1].strip()
     if not q:
-        return set(), None, q
+        return 'empty', set(), None, [], q
 
     # Special handling if entire query is single punctuation
     if q in PUNCT_MAP:
-        return set(), PUNCT_MAP[q], q
+        return 'key', set(), PUNCT_MAP[q], [], q
 
     cleaned = q
     trailing_key = None
@@ -146,17 +179,36 @@ def tokenize_user_query(q: str):
 
     parts = [p for p in re.split(r'[,+\s]+', cleaned) if p]
     mods = set()
-    key = trailing_key
-
+    non_mods = []
     for p in parts:
         p_low = p.lower()
         if p_low in MOD_MAP:
             mods.add(MOD_MAP[p_low])
         else:
-            if key is None:
-                key = KEY_MAP.get(p_low, PUNCT_MAP.get(p, normalize_key(p)))
+            non_mods.append(p)
 
-    return mods, key, q
+    if mods and not non_mods and trailing_key is None:
+        return 'mods', mods, None, [], q
+
+    if mods:
+        if trailing_key is not None and not non_mods:
+            return 'combo', mods, trailing_key, [], q
+        if trailing_key is None and len(non_mods) == 1 and is_known_key_token(non_mods[0], known_keys):
+            return 'combo', mods, normalize_key(non_mods[0]), [], q
+        return 'mod_text', mods, None, non_mods, q
+
+    if trailing_key is not None and not non_mods:
+        return 'key', set(), trailing_key, [], q
+    if trailing_key is None and len(non_mods) == 1 and is_known_key_token(non_mods[0], known_keys):
+        return 'key', set(), normalize_key(non_mods[0]), [], q
+
+    text_terms = [t for t in re.split(r'\s+', q) if t]
+    return 'text', set(), None, text_terms, q
+
+def tokenize_user_query(q: str, known_keys=None):
+    """Backward-compatible wrapper returning (mods_set, key_str_or_None, raw_q)."""
+    _, mods, key, _, raw = parse_user_query(q, known_keys=known_keys)
+    return mods, key, raw
 
 def get_lua_extractor_script():
     return """
@@ -297,26 +349,47 @@ end
 print("{" .. '"binds":[' .. table.concat(json_binds, ",") .. '],' .. '"unbinds":[' .. table.concat(json_unbinds, ",") .. ']}')
 """
 
+def _strip_lua_strings_and_comments(line: str) -> str:
+    out = []
+    i = 0
+    n = len(line)
+    quote = None
+    while i < n:
+        ch = line[i]
+        if quote:
+            if ch == '\\' and i + 1 < n:
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        else:
+            if ch == '-' and i + 1 < n and line[i + 1] == '-':
+                break
+            if ch in ('"', "'"):
+                quote = ch
+            else:
+                out.append(ch)
+        i += 1
+    return ''.join(out)
+
 def extract_function_body(filepath: str, start_line: int, max_lines: int = 15) -> str:
-    """Extracts a short snippet of a Lua function from the source file."""
+    """Extracts the Lua hl.bind(...) call/function snippet without leaking into following statements."""
     try:
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
-        if start_line > len(lines):
+        if start_line < 1 or start_line > len(lines):
             return ""
         snippet_lines = []
-        depth = 0
-        started = False
+        parens = 0
+        seen_paren = False
         for idx in range(start_line - 1, min(start_line - 1 + max_lines, len(lines))):
             line = lines[idx]
             snippet_lines.append(line.rstrip())
-            # Count function / end balance
-            if "function" in line:
-                depth += line.count("function")
-                started = True
-            if "end" in line:
-                depth -= line.count("end")
-            if started and depth <= 0 and idx > start_line - 1:
+            code = _strip_lua_strings_and_comments(line)
+            if '(' in code:
+                seen_paren = True
+            parens += code.count('(') - code.count(')')
+            if seen_paren and parens <= 0:
                 break
         return "\n".join(snippet_lines)
     except Exception:
@@ -516,62 +589,201 @@ def add_live_bindings(entries):
         else:
             entries.append(item)
 
+def _decamel(text: str) -> str:
+    return re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', text)
+
+def _word_tokens(text: str):
+    return re.findall(r'[a-z0-9]+', _decamel(text).casefold())
+
+def _contains_token_sequence(tokens, seq) -> bool:
+    if not seq or len(seq) > len(tokens):
+        return False
+    end = len(tokens) - len(seq) + 1
+    for i in range(end):
+        if tokens[i:i + len(seq)] == seq:
+            return True
+    return False
+
+def _field_match_level(raw_field: str, words, phrase: str):
+    """
+    Returns match quality tier (0 best .. 3 loosest) or None if no match:
+      0: exact phrase token sequence (or single-word exact token)
+      1: all query words match full tokens
+      2: all query words match token prefixes
+      3: substring match (for words >= 3 chars; shorter words still require token prefix)
+    """
+    if not raw_field or not words:
+        return None
+    field_low = raw_field.casefold()
+    tokens = _word_tokens(raw_field)
+    phrase_tokens = _word_tokens(phrase)
+
+    if phrase_tokens and _contains_token_sequence(tokens, phrase_tokens):
+        return 0
+
+    word_toks_list = [_word_tokens(w) for w in words]
+
+    if all((all(wt in tokens for wt in wt_list) if wt_list else w in field_low)
+           for w, wt_list in zip(words, word_toks_list)):
+        return 1
+
+    if all((all(any(t.startswith(wt) for t in tokens) for wt in wt_list) if wt_list else w in field_low)
+           for w, wt_list in zip(words, word_toks_list)):
+        return 2
+
+    def _loose_match(w, wt_list):
+        if len(w) >= 3:
+            return w in field_low
+        if wt_list:
+            return all(any(t.startswith(wt) for t in tokens) for wt in wt_list)
+        return w in field_low
+
+    if all(_loose_match(w, wt_list) for w, wt_list in zip(words, word_toks_list)):
+        return 3
+
+    return None
+
+def _score_text_match(e: KeybindEntry, words, phrase: str):
+    """
+    Ranks text matches by field relevance and match tightness.
+    Never matches generic directory paths like '~/.config/hypr/.../keybinds.lua'
+    unless the user explicitly searches a path/filename.
+    """
+    if not words:
+        return None
+
+    desc_level = _field_match_level(e.description, words, phrase)
+    if desc_level is not None:
+        return (0, desc_level)
+
+    action_text = "" if e.is_function else e.action
+    act_levels = [lvl for lvl in (
+        _field_match_level(action_text, words, phrase),
+        _field_match_level(e.submap, words, phrase),
+    ) if lvl is not None]
+    if words == ['custom'] and e.is_custom:
+        act_levels.append(0)
+    if act_levels:
+        return (1, min(act_levels))
+
+    combo_level = _field_match_level(e.combo_formatted, words, phrase)
+    if combo_level is not None and (combo_level <= 2 or all(len(w) >= 3 for w in words)):
+        return (2, combo_level)
+
+    combined = " ".join(p for p in (e.description, action_text, e.submap, e.combo_formatted) if p)
+    comb_level = _field_match_level(combined, words, phrase)
+    if comb_level is not None:
+        return (3, comb_level)
+
+    code_level = _field_match_level(e.function_code, words, phrase)
+    if code_level is not None:
+        return (4, code_level)
+
+    if any('/' in w or w.endswith(('.lua', '.conf')) for w in words):
+        path_low = e.display_file.casefold()
+        if all(w in path_low for w in words):
+            return (5, 0)
+
+    return None
+
+def _mod_sort_key(mods: set):
+    return tuple(sorted(MOD_ORDER.get(m, 99) for m in mods))
+
+def _key_sort_key(key: str):
+    k = key or ""
+    if len(k) == 1 and k.isalpha():
+        return (0, 0, k.casefold())
+    if len(k) == 1 and k.isdigit():
+        return (1, int(k), k)
+    m = FUNCTION_KEY_RE.match(k)
+    if m:
+        return (2, int(m.group(1)), k.casefold())
+    if k.lower().startswith('code:'):
+        num = int(k[5:]) if k[5:].isdigit() else 9999
+        return (4, num, k.casefold())
+    if k.lower().startswith('mouse'):
+        return (5, 0, k.casefold())
+    return (3, 0, k.casefold())
+
 def search_binds(entries, query: str):
-    mods_q, key_q, raw_q = tokenize_user_query(query)
-    
+    known_keys = {e.key.casefold() for e in entries if e.key}
+    mode, mods_q, key_q, text_terms, _ = parse_user_query(query, known_keys=known_keys)
+
     exact_matches = []
     superset_matches = []
     key_matches = []
-    text_matches = []
-    
-    raw_lower = raw_q.lower()
-    is_single_key_query = len(raw_q) == 1
-    
-    for e in entries:
-        is_exact = False
-        is_superset = False
-        is_key_match = False
-        is_text = False
-        
-        if key_q and e.key:
-            if e.key.lower() == key_q.lower():
+    scored_text = []
+
+    if mode == 'combo':
+        key_q_cf = key_q.casefold()
+        for e in entries:
+            if e.key and e.key.casefold() == key_q_cf:
                 if mods_q == e.mods:
-                    is_exact = True
-                elif mods_q.issubset(e.mods) and len(mods_q) > 0:
-                    is_superset = True
+                    exact_matches.append(e)
+                elif mods_q.issubset(e.mods):
+                    superset_matches.append(e)
                 else:
-                    is_key_match = True
-        elif not key_q and mods_q:
-            # Query is only modifiers (e.g. 'super', 'super+shift')
+                    key_matches.append(e)
+    elif mode == 'key':
+        key_q_cf = key_q.casefold()
+        for e in entries:
+            if e.key and e.key.casefold() == key_q_cf:
+                if not e.mods:
+                    exact_matches.append(e)
+                else:
+                    key_matches.append(e)
+    elif mode == 'mods':
+        for e in entries:
             if mods_q == e.mods:
-                is_exact = True
+                exact_matches.append(e)
             elif mods_q.issubset(e.mods):
-                is_superset = True
+                superset_matches.append(e)
+    elif mode in ('text', 'mod_text'):
+        words = [w.casefold() for w in text_terms]
+        phrase = " ".join(words)
+        for e in entries:
+            if mode == 'mod_text' and not mods_q.issubset(e.mods):
+                continue
+            score = _score_text_match(e, words, phrase)
+            if score is not None:
+                scored_text.append((score, e))
 
-        # Only perform text match if not already matched AND query is not a single character key
-        if not (is_exact or is_superset or is_key_match):
-            if not is_single_key_query and len(raw_lower) >= 2:
-                searchable = " ".join((e.description, e.action, e.combo_formatted, e.display_file,
-                                       e.function_code, e.submap)).casefold()
-                is_text = all(word in searchable for word in raw_lower.split())
+    def combo_sort_key(e: KeybindEntry):
+        src_rank = 0 if e.source_type == "lua" else (1 if e.source_type == "conf" else 2)
+        return (
+            1 if e.is_unbound else 0,
+            1 if e.submap else 0,
+            len(e.mods),
+            _mod_sort_key(e.mods),
+            0 if e.is_custom else 1,
+            _key_sort_key(e.key or ""),
+            src_rank,
+            e.display_file,
+            e.line,
+        )
 
-        if is_exact:
-            exact_matches.append(e)
-        elif is_superset:
-            superset_matches.append(e)
-        elif is_key_match:
-            key_matches.append(e)
-        elif is_text:
-            text_matches.append(e)
+    def text_sort_key(item):
+        score, e = item
+        src_rank = 0 if e.source_type == "lua" else (1 if e.source_type == "conf" else 2)
+        return (
+            1 if e.is_unbound else 0,
+            score[0],
+            score[1],
+            1 if e.submap else 0,
+            len(e.mods),
+            _mod_sort_key(e.mods),
+            0 if e.is_custom else 1,
+            _key_sort_key(e.key or ""),
+            src_rank,
+            e.display_file,
+            e.line,
+        )
 
-    # Sort each group: custom entries first, then lua before conf, then by line
-    def sort_key(e: KeybindEntry):
-        return (0 if e.is_custom else 1, 0 if e.source_type == "lua" else 1, len(e.mods), e.display_file, e.line)
-
-    exact_matches.sort(key=sort_key)
-    superset_matches.sort(key=sort_key)
-    key_matches.sort(key=sort_key)
-    text_matches.sort(key=sort_key)
+    exact_matches.sort(key=combo_sort_key)
+    superset_matches.sort(key=combo_sort_key)
+    key_matches.sort(key=combo_sort_key)
+    scored_text.sort(key=text_sort_key)
+    text_matches = [e for _, e in scored_text]
 
     return exact_matches, superset_matches, key_matches, text_matches, (mods_q, key_q)
 
@@ -627,36 +839,55 @@ def render_entry(e: KeybindEntry, highlight_exact=False):
 
 def display_results(query: str, exact, superset, key_m, text_m, parsed_tuple):
     mods_q, key_q = parsed_tuple
-    norm_query_str = format_combo(mods_q, key_q) if (mods_q or key_q) else query
+    is_key_or_combo = bool(mods_q or key_q)
+    norm_query_str = format_combo(mods_q, key_q) if is_key_or_combo else query
+    show_norm = is_key_or_combo and not (mods_q and not key_q and text_m) and norm_query_str != query
 
     print()
-    print(bold(f"🔍 Search results for: ") + bold_yellow(f"'{query}'") + (dim(f" (normalized: {norm_query_str})") if norm_query_str != query else ""))
+    print(bold("🔍 Search results for: ") + bold_yellow(f"'{query}'") + (dim(f" (normalized: {norm_query_str})") if show_norm else ""))
     print(dim("─" * 65))
 
     if not (exact or superset or key_m or text_m):
         print(bold_red(f"  ✖ No keybinds found matching '{query}'"))
-        if mods_q or key_q:
+        if mods_q and key_q:
             print(dim(f"    • Combo: {norm_query_str} is currently unassigned in ~/.config/hypr"))
+        elif key_q:
+            print(dim(f"    • Key: {key_q} is currently unassigned in ~/.config/hypr"))
+        elif mods_q:
+            print(dim(f"    • Modifier: {norm_query_str} has no matching bindings in ~/.config/hypr"))
         print()
         return
 
+    if mods_q and key_q and not exact:
+        print(yellow(f"  ℹ {norm_query_str} is currently unassigned."))
+        print()
+
     if exact:
-        print(bold_green("  ✔ EXACT MATCH:"))
+        print(bold_green(f"  ✔ EXACT MATCH ({len(exact)}):"))
         for e in exact:
             render_entry(e, highlight_exact=True)
 
     if superset:
-        print(bold_cyan(f"  ✦ COMBINATIONS CONTAINING {norm_query_str}:"))
+        print(bold_cyan(f"  ✦ COMBINATIONS CONTAINING {norm_query_str} ({len(superset)}):"))
         for e in superset:
             render_entry(e, highlight_exact=False)
 
-    if key_m and not exact:
-        print(bold_yellow(f"  ◆ ALL KEYBINDS ON KEY [{key_q}]:"))
+    show_key_m = bool(key_m) and ((not mods_q and bool(key_q)) or not exact)
+    if show_key_m:
+        if exact or superset:
+            header = f"  ◆ OTHER KEYBINDS ON KEY [{key_q}] ({len(key_m)}):"
+        else:
+            header = f"  ◆ ALL KEYBINDS ON KEY [{key_q}] ({len(key_m)}):"
+        print(bold_yellow(header))
         for e in key_m:
             render_entry(e, highlight_exact=False)
 
     if text_m:
-        print(bold_cyan("  ✦ MATCHES BY ACTION / DESCRIPTION / PATH:"))
+        if mods_q:
+            header = f"  ✦ {format_combo(mods_q, '')} MATCHES BY DESCRIPTION / ACTION ({len(text_m)}):"
+        else:
+            header = f"  ✦ MATCHES BY DESCRIPTION / ACTION ({len(text_m)}):"
+        print(bold_cyan(header))
         for e in text_m:
             render_entry(e, highlight_exact=False)
 
@@ -739,7 +970,11 @@ Examples:
     exact, superset, key_m, text_m, parsed = search_binds(entries, query_str)
 
     if args.json:
-        results = exact + superset + key_m + text_m
+        mods_q, key_q = parsed
+        if mods_q and key_q and exact:
+            results = exact + superset
+        else:
+            results = exact + superset + key_m + text_m
         print(json.dumps([{
             "combo": e.combo_formatted,
             "mods": list(e.mods),

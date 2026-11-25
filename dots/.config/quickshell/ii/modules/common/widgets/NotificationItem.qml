@@ -333,7 +333,7 @@ Item { // Notification item area
                                     iconSize: Appearance.font.pixelSize.larger
                                     horizontalAlignment: Text.AlignHCenter
                                     color: ((notificationObject?.urgency ?? NotificationUrgency.Normal) == NotificationUrgency.Critical) ?
-                                        Appearance.m3colors.m3onSurfaceVariant : Appearance.m3colors.m3onSurface
+                                        Appearance.m3colors.m3onSecondaryContainer : Appearance.m3colors.m3onSurface
                                     text: "close"
                                 }
                             }
@@ -379,7 +379,7 @@ Item { // Notification item area
                                     iconSize: Appearance.font.pixelSize.larger
                                     horizontalAlignment: Text.AlignHCenter
                                     color: ((notificationObject?.urgency ?? NotificationUrgency.Normal) == NotificationUrgency.Critical) ?
-                                        Appearance.m3colors.m3onSurfaceVariant : Appearance.m3colors.m3onSurface
+                                        Appearance.m3colors.m3onSecondaryContainer : Appearance.m3colors.m3onSurface
                                     text: "content_copy"
                                 }
                             }

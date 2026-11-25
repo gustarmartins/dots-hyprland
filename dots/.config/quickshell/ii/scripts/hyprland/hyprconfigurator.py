@@ -1,5 +1,6 @@
 #!/usr/bin/env -S\_/bin/sh\_-c\_"source\_\$(eval\_echo\_\$ILLOGICAL_IMPULSE_VIRTUAL_ENV)/bin/activate&&exec\_python\_-E\_"\$0"\_"\$@""
 import argparse
+import fcntl
 import re
 import os
 import tempfile
@@ -29,6 +30,17 @@ def generate_config_line(key, value):
     return f'hl.config({{{nested_structure}}})\n'
 
 def edit_hyprland_config(file_path, set_args, reset_args):
+    dir_name = os.path.dirname(os.path.abspath(file_path))
+    os.makedirs(dir_name, exist_ok=True)
+    # The overrides file is replaced on each edit. Its containing directory has a stable inode.
+    directory = os.open(dir_name, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        _edit_locked(file_path, set_args, reset_args, dir_name)
+    finally:
+        os.close(directory)
+
+def _edit_locked(file_path, set_args, reset_args, dir_name):
     if os.path.exists(file_path):
         with open(file_path, 'r') as file:
             lines = file.readlines()
@@ -86,8 +98,6 @@ def edit_hyprland_config(file_path, set_args, reset_args):
                     new_lines[-1] += '\n'
                 new_lines.append(generate_config_line(key, value))
                 
-    dir_name = os.path.dirname(os.path.abspath(file_path))
-    os.makedirs(dir_name, exist_ok=True)
     temp_path = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', dir=dir_name, delete=False) as temp_file:

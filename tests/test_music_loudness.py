@@ -35,6 +35,35 @@ class AppGainTests(unittest.TestCase):
   self.assertAlmostEqual(self.stream['params'][m.GAIN_KEY],10**(1.5/20));self.assertEqual(m.read(m.SESSION)['db'],1.5)
   self.assertTrue(m.tick());m.cleanup();self.assertNotIn(m.GAIN_KEY,self.stream['params'])
   self.assertEqual(self.other['params'],{'eden_boost_gain:Mult':4});self.assertEqual(self.snapshot['gain'],2.82)
+ def test_eden_default_uses_existing_manual_gain_slot_once(self):
+  self.stream['process']['exe']='eglantine'
+  apps=[{'id':'exe:eglantine','name':'Eden','streams':[self.stream]}]
+  core=[{'type':'PipeWire:Interface:Core','info':{'cookie':42}}]
+  m.write(m.CONFIG,{'enabled':True,'eden_default':True})
+  with patch.object(m,'pw_dump',return_value=core),patch.object(m,'playback_apps',return_value=apps):
+   m.update_eden_defaults();m.update_eden_defaults()
+   self.assertEqual(len(self.writes),1);self.assertEqual(m.current_db({},self.snapshot),10)
+   m.adjust(-2);self.assertEqual(m.current_db(m.read(m.SESSION),self.snapshot),8)
+   m.cleanup();m.update_eden_defaults();self.assertNotIn(m.GAIN_KEY,self.stream['params'])
+   self.stream['serial']='fresh';m.update_eden_defaults();self.assertEqual(m.current_db({},self.snapshot),10)
+   m.clear_eden_defaults();self.assertNotIn(m.GAIN_KEY,self.stream['params'])
+ def test_eglantine_display_name_and_muted_startup(self):
+  self.stream.update(app_name='Eglantine',levels={'mute':True,'softMute':True,'volume':0,'channelVolumes':[0,0],'softVolumes':[0,0]})
+  self.assertTrue(m.is_eden(self.stream))
+  for exe in ('eden','Eden.AppImage','eglantine','eglantine-local'):
+   self.assertTrue(m.is_eden(dict(self.stream,app_name='',process={'exe':exe})))
+  apps=[{'id':'exe:wrapper','streams':[self.stream]}]
+  core=[{'type':'PipeWire:Interface:Core','info':{'cookie':42}}]
+  m.write(m.CONFIG,{'enabled':True,'eden_default':True})
+  def update(ident,cookie,changes):self.current(ident,cookie)['levels'].update(changes)
+  with patch.object(m,'pw_dump',return_value=core),patch.object(m,'playback_apps',return_value=apps),patch.object(m,'set_stream_props',side_effect=update) as setter:
+   m.update_eden_defaults()
+   self.assertEqual(self.stream['levels'],{'mute':False,'softMute':False,'volume':1,'channelVolumes':[1,1],'softVolumes':[1,1]})
+   self.stream['levels']['mute']=True
+   m.update_eden_defaults();self.assertTrue(self.stream['levels']['mute']);setter.assert_called_once()
+  self.assertEqual(m.startup_level_changes({'levels':{'volume':.25,'channelVolumes':[0,.5]}}),{})
+  # Hidden WirePlumber scalar attenuation (volume=0.25 while mixer channelVolumes are 100%) is fixed.
+  self.assertEqual(m.startup_level_changes({'levels':{'volume':.25,'channelVolumes':[1.0,1.0]}}),{'volume':1.0})
  def test_manual_gain_works_with_other_apps_playing(self):
   self.snapshot['foreign']=['Eden','osu!'];m.adjust(2);self.assertTrue(m.tick());self.assertEqual(m.read(m.SESSION)['db'],2)
  def test_matching_refuses_mixed_audio_before_recording(self):

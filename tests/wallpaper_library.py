@@ -243,5 +243,86 @@ class Retention(unittest.TestCase):
             self.assertEqual(result.returncode,2)
             self.assertIn('already running',json.loads(result.stdout)['error'])
 
+    def test_rotation_log_records_urls_skips_prefetch_and_survives_eviction(self):
+        log_path = library.STATE / 'rotation.log'
+        first = self.original('first', size=512 * 1024, current=True)
+        # Prefetch / download-only must not write to rotation.log.
+        prefetched = self.collection / 'mario-prefetched.png'
+        output = io.BytesIO()
+        Image.new('RGB', (1920, 1080), 'blue').save(output, 'PNG')
+        content = output.getvalue()
+        prefetched.write_bytes(content + b'\0' * max(0, 700 * 1024 - len(content)))
+        prefetch_entry = dict(
+            id='prefetched', theme='mario', label='Mario worlds', provider='Wallhaven',
+            path=str(prefetched), url='https://wallhaven.cc/w/prefetched',
+            imageUrl='https://w.wallhaven.cc/full/pr/wallhaven-prefetched.png',
+            source='https://example.com/art', width=1920, height=1080, fetchedAt=20,
+        )
+        self.assertEqual(discovery.finish(prefetch_entry, [], download_only=True), 0)
+        self.assertFalse(log_path.exists())
+
+        # Failed apply must not write to rotation.log.
+        with patch.object(discovery.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, ['switchwall'])):
+            self.assertEqual(discovery.finish(dict(prefetch_entry), [], download_only=False), 1)
+        self.assertFalse(log_path.exists())
+
+        # Successful apply logs page URL, direct image URL, source, and local path.
+        def apply(command, **kwargs):
+            self.settings(limit=1, current=command[-1])
+            return subprocess.CompletedProcess(command, 0)
+        with patch.object(discovery.subprocess, 'run', side_effect=apply):
+            self.assertEqual(discovery.finish(dict(prefetch_entry), [], download_only=False), 0)
+        lines = log_path.read_text(encoding='utf-8').splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn(' | applied | mario | prefetched | 1920x1080 | ', lines[0])
+        self.assertIn('url=https://wallhaven.cc/w/prefetched', lines[0])
+        self.assertIn('file_url=https://w.wallhaven.cc/full/pr/wallhaven-prefetched.png', lines[0])
+        self.assertIn('source=https://example.com/art', lines[0])
+        self.assertIn(f'path={prefetched}', lines[0])
+        self.assertEqual(self.store.snapshot()['rotationLogCount'], 1)
+
+        # Restoring an older entry resolves cached detail file_url and logs 'restored'.
+        library.CACHE.mkdir(parents=True, exist_ok=True)
+        (library.CACHE / 'detail-first.json').write_text(
+            json.dumps({'data': {'path': 'https://w.wallhaven.cc/full/fi/wallhaven-first.png'}}),
+            encoding='utf-8',
+        )
+        with patch.object(library.subprocess, 'run', side_effect=apply):
+            self.store.restore('first')
+        lines = log_path.read_text(encoding='utf-8').splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn(' | restored | mario | first | 1920x1080 | ', lines[1])
+        self.assertIn('file_url=https://w.wallhaven.cc/full/fi/wallhaven-first.png', lines[1])
+        self.assertEqual(self.store.snapshot()['rotationLogCount'], 2)
+
+        # Evicting the unkept wallpaper does NOT delete or truncate rotation.log.
+        self.settings(limit=1, current=first)
+        self.store.enforce()
+        self.assertFalse(prefetched.exists())
+        self.assertEqual(len(log_path.read_text(encoding='utf-8').splitlines()), 2)
+        self.assertIn('https://w.wallhaven.cc/full/pr/wallhaven-prefetched.png', log_path.read_text(encoding='utf-8'))
+
+    def test_cli_log_rotation_sanitizes_fields(self):
+        img = self.collection / 'external.png'
+        Image.new('RGB', (2560, 1440), 'teal').save(img)
+        env = os.environ.copy()
+        env.update(HOME=str(self.root), XDG_CONFIG_HOME=str(library.CONFIG),
+                   XDG_STATE_HOME=str(self.root / 'state'), XDG_CACHE_HOME=str(self.root / 'cache'))
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / 'wallpaper_library.py'), 'log-rotation',
+             '--event', 'random', '--theme', 'konachan',
+             '--url', 'https://konachan.net/post/show/123',
+             '--file-url', 'https://konachan.net/image/abc/test.png\ninjected|pipe',
+             '--path', str(img), 'konachan-123'],
+            env=env, capture_output=True, text=True, check=True,
+        )
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload['logged'])
+        lines = (library.STATE / 'rotation.log').read_text(encoding='utf-8').splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn(' | random | konachan | konachan-123 | 2560x1440 | ', lines[0])
+        self.assertIn('url=https://konachan.net/post/show/123', lines[0])
+        self.assertIn('file_url=https://konachan.net/image/abc/test.png injected pipe', lines[0])
+
 
 if __name__=='__main__':unittest.main(verbosity=2)

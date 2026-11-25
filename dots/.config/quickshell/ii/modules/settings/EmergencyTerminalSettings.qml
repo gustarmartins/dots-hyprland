@@ -34,7 +34,7 @@ ColumnLayout {
     }
     RowLayout {
         Layout.fillWidth: true
-        StyledText { Layout.fillWidth: true; text: "Emergency terminal · Super+Ctrl+Enter"; wrapMode: Text.WordWrap }
+        StyledText { Layout.fillWidth: true; text: "Emergency terminal · Super+Ctrl+Enter"; font.pixelSize: 14; font.weight: Font.Medium; color: Appearance.m3colors.m3onSurface; wrapMode: Text.WordWrap }
         SettingsSwitch {
             objectName: "emergencyTerminalShortcut"
             Accessible.name: "Emergency terminal shortcut"
@@ -50,6 +50,8 @@ ColumnLayout {
     StyledText {
         Layout.fillWidth: true
         text: root.errorMessage || "Open foot with a clean Bash prompt, even when Quickshell or Kitty is busy."
+        font.pixelSize: 12
+        color: root.errorMessage ? Appearance.m3colors.m3error : Appearance.m3colors.m3onSurfaceVariant
         wrapMode: Text.WordWrap
     }
 }

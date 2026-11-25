@@ -243,8 +243,12 @@ ButtonMouseArea {
                         sourceComponent: Colorizer {
                             implicitWidth: appIcon.implicitWidth
                             implicitHeight: appIcon.implicitHeight
-                            colorizationColor: Appearance.m3colors.darkmode ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnPrimary
-                            colorization: Config.options.bar.workspaces.monochromeIcons ? 0.8 : 0.5
+                            colorizationColor: wsApp.wsId === wsModel.activeWorkspace
+                                ? Appearance.colors.colOnPrimary
+                                : Appearance.colors.colOnSecondaryContainer
+                            colorization: Config.options.bar.workspaces.monochromeIcons
+                                ? 0.8
+                                : (Appearance.m3colors.darkmode ? 0.5 : 0.15)
                             brightness: 0
                             source: appIcon
 

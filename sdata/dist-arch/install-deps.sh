@@ -19,7 +19,11 @@ remove_deprecated_dependencies(){
   list+=(hyprland-qtutils)
   list+=({quickshell,hyprutils,hyprpicker,hyprlang,hypridle,hyprland-qt-support,hyprland-qtutils,hyprlock,xdg-desktop-portal-hyprland,hyprcursor,hyprwayland-scanner,hyprland}-git)
   list+=(matugen-bin)
-  for i in ${list[@]};do try sudo pacman --noconfirm -Rdd $i;done
+  for i in "${list[@]}"; do
+    if pacman -Q "$i" >/dev/null 2>&1; then
+      try sudo pacman --noconfirm -Rdd "$i"
+    fi
+  done
 }
 # NOTE: `implicitize_old_dependencies()` was for the old days when we just switch from dependencies.conf to local PKGBUILDs.
 # However, let's just keep it as references for other distros writing their `sdata/dist-<OS_GROUP_ID>/install-deps.sh`, if they need it.
@@ -71,23 +75,32 @@ v implicitize_old_dependencies
 
 # https://github.com/end-4/dots-hyprland/issues/581
 # yay -Bi is kinda hit or miss, instead cd into the relevant directory and manually source and install deps
-install-local-pkgbuild() {
+install-local-pkgbuild() (
   local location=$1
   local installflags=$2
+  local build_root="${XDG_CACHE_HOME:-$HOME/.cache}/dots-hyprland-build"
+  # makepkg's debug prefix-map flags cannot survive spaces in a source path.
+  # Keep the checkout anywhere, but compile in a separate filesystem cache.
+  if [[ "$build_root" =~ [[:space:]] ]]; then
+    build_root="$(mktemp -d /var/tmp/dots-hyprland-build.XXXXXXXX)" || return 1
+  fi
+  x mkdir -p "$build_root"
 
-  x pushd $location
+  x pushd "$location"
 
   source ./PKGBUILD
-  x yay -S --sudoloop $installflags --asdeps "${depends[@]}"
+  if (( ${#depends[@]} )); then
+    x yay -S --sudoloop $installflags --asdeps "${depends[@]}"
+  fi
   # man makepkg:
   # -A, --ignorearch: Ignore a missing or incomplete arch field in the build script.
   # -s, --syncdeps: Install missing dependencies using pacman. When build-time or run-time dependencies are not found, pacman will try to resolve them.
   # -f, --force: build a package even if it already exists in the PKGDEST
   # -i, --install: Install or upgrade the package after a successful build using pacman(8).
   # In https://github.com/end-4/dots-hyprland/issues/823#issuecomment-3394774645 it's suggested to use `sudo pacman -U --noconfirm *.pkg.tar.zst` instead of `makepkg -i`, however it's possible that multiple *.pkg.tar.zst exist, which makes this command not reliable.
-  x makepkg -Afsi --noconfirm
+  x env BUILDDIR="$build_root" makepkg -Afsi --noconfirm
   x popd
-}
+)
 
 # Install core dependencies from the meta-packages
 metapkgs=(./sdata/dist-arch/illogical-impulse-{audio,backlight,basic,fonts-themes,kde,portal,python,screencapture,toolkit,widgets})

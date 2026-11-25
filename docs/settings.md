@@ -29,12 +29,21 @@ fork instead of putting most controls into one long Interface page.
 - **Wallpaper & colors** includes discovery, rotation, palette generation,
   transparency, wallpaper motion, and terminal-color tuning.
 - **Text & fonts** lists all 26 fontctl profiles, with compact and grayscale
-  options, preview, and explicit desktop apply. Individual shell roles and point
-  sizes remain available below it.
+  options, preview, explicit desktop apply, and optional per-monitor Kitty
+  terminal font sizing (`kitty-font-monitor`, with a master off switch,
+  per-display point sizes, auto-adjust on monitor open/move, and live Kitty
+  reload on preset apply). Individual shell roles and point sizes remain
+  available below it.
 - **Bar & resources** includes monitor selection, workspace indicators, tray,
   warnings, sampling interval and history length.
 - **Control center** offers Classic or Custom tiles, the exact grid column count,
-  tile add/remove/reorder/size, sliders, corner gestures and panel retention.
+  tile add/remove/reorder/size, sliders, live display & app presentation status
+  (`display-app-status`, using `hyprctl` and optional `/proc` inspection; turning
+  its master switch off hides the card and stops all queries), live PipeWire &
+  kernel audio telemetry (`pipewire-audio-status`, using `pw-metadata`, `pw-dump`
+  and `/proc/asound` for DAC/ELD readback plus zero-restart quantum/sample-rate
+  switching; turning its master switch off hides the strip and stops all polling),
+  corner gestures and panel retention.
 - **Workspaces & dock** and **Desktop widgets** expose overview, dock, clock and
   weather settings, including placement and the digital clock's font axes.
 - **Mail** connects Thunderbird accounts, local verification-code and link actions,
@@ -77,7 +86,7 @@ The Wallpapers page opens with discovery, rotation and storage controls. Open sa
 
 Prefetch downloads a batch without applying it or rebuilding colors. The batch defaults to six and is configurable. Rotation uses matching ready originals before contacting the API, so a prepared queue works offline. The optional Keep the offline queue filled control lets the main shell refill it while automatic rotation is enabled. Prefetch does not reset the rotation deadline.
 
-The default collection limit is 1024 MiB with a 2048 MiB free-space reserve. Both limits are editable in Settings. Oldest unkept managed originals are pruned only when needed; current and kept wallpapers are protected. If protected originals fill the budget, new downloads pause. Manually added files and symlink targets are not deleted. Download validation precedes eviction, and an original is recorded before attempting to apply it, so failed downloads do not evict history and failed applies leave a restorable image.
+The default collection limit is 1024 MiB with a 2048 MiB free-space reserve. Both limits are editable in Settings. Oldest unkept managed originals are pruned only when needed; current and kept wallpapers are protected. If protected originals fill the budget, new downloads pause. Manually added files and symlink targets are not deleted. Download validation precedes eviction, and an original is recorded before attempting to apply it, so failed downloads do not evict history and failed applies leave a restorable image. Every applied or restored rotation is also appended to `~/.local/state/wallpaper-discovery/rotation.log` with its timestamp, page URL, direct image URL, upstream source, and local path; this log survives local storage pruning and can be opened from Wallpaper actions via **Rotation log**.
 
 ## Coverage and ownership
 

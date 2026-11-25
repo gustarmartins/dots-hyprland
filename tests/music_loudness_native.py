@@ -37,10 +37,10 @@ context.objects = [
   while not (runtime/'pipewire-0').exists():
    assert time.monotonic()<end;time.sleep(.05)
   wav=root/'tone.wav'
-  subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=1000:sample_rate=48000:duration=120','-af','volume=0.2','-ac','2','-c:a','pcm_f32le',str(wav)],check=True)
+  subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=750:sample_rate=48000:duration=120','-af','volume=0.2','-ac','2','-c:a','pcm_f32le',str(wav)],check=True)
   for name in ['firefox-fixture','other-player']:
    binary=root/name;shutil.copy2('/usr/bin/pw-cat',binary)
-   launch([str(binary),'--playback','--target','0','--properties',json.dumps({'node.name':name,'application.name':name,'node.autoconnect':False}),str(wav)],name)
+   launch([str(binary),'--playback','--target','0','--properties',json.dumps({'node.name':name,'application.name':('Eglantine' if name=='other-player' else name),'node.autoconnect':False}),str(wav)],name)
   end=time.monotonic()+5
   while True:
    nodes=[x for x in dump() if x['type'].endswith(':Node') and x.get('info',{}).get('props',{}).get('node.name') in ['firefox-fixture','other-player']]
@@ -58,6 +58,31 @@ context.objects = [
     with patch.object(m,'inspect',side_effect=lambda **kw:snapshot(app_id)):return m.measure(snapshot(app_id),seconds=2)
    with patch.object(m,'inspect',side_effect=snapshot),patch.object(m,'ensure_worker'):
     base=measure('exe:firefox-fixture');other_before=measure('exe:other-player')
+    # Start the Eglantine-labelled stream muted with both channels at zero.
+    # Keep it linked during discovery, as it would be during real playback.
+    from concurrent.futures import ThreadPoolExecutor
+    target='exe:other-player'
+    cmd('pw-cli','set-param',str(snapshot(target)['streams'][0]['id']),'Props','{ mute = true channelVolumes = [ 0.0 0.0 ] }')
+    # The user-facing meter rejects non-finite peaks; keep digital silence
+    # available as a measurement for this startup regression.
+    checked_number=m.number
+    with patch.object(m,'number',side_effect=lambda v: -math.inf if v=='-inf' else checked_number(v)):
+     assert measure(target)['true_peak_dbtp']==-math.inf
+    m.write(m.CONFIG,m.config()|{'eden_default':True})
+    with ThreadPoolExecutor(max_workers=1) as pool:
+     section=pool.submit(measure,target)
+     end=time.monotonic()+3
+     while not snapshot(target)['streams'][0]['running']:
+      assert time.monotonic()<end,'fixture did not start';time.sleep(.03)
+     m.update_eden_defaults()
+     section.result(timeout=8)
+    restored=measure(target)
+    delta=restored['true_peak_dbtp']-other_before['true_peak_dbtp']
+    assert abs(delta-10)<.15,(restored,other_before)
+    assert not m.startup_level_changes(snapshot(target)['streams'][0])
+    m.clear_eden_defaults()
+    m.write(m.CONFIG,m.config()|{'eden_default':False})
+    print('Eglantine startup: initially silent, measured gain',delta,'dB',flush=True)
     other_params=copy_params=snapshot('exe:other-player')['streams'][0]['params'].copy()
     m.adjust(6);assert m.tick();boost=measure('exe:firefox-fixture');other_after=measure('exe:other-player')
     assert abs((boost['true_peak_dbtp']-base['true_peak_dbtp'])-6)<.15,(base,boost)
@@ -65,7 +90,7 @@ context.objects = [
     assert snapshot('exe:other-player')['streams'][0]['params']==other_params
     m.adjust(-3);assert abs(m.read(m.SESSION)['db']-3)<.0001
     m.cleanup();reset=measure('exe:firefox-fixture')
-    assert abs(reset['true_peak_dbtp']-base['true_peak_dbtp'])<.05
+    assert abs(reset['true_peak_dbtp']-base['true_peak_dbtp'])<.05,(base,reset)
     assert m.GAIN_KEY not in snapshot()['streams'][0]['params']
     # Exercise the actual automatic matcher and its full eight-second meter.
     m.set_auto_match(True)
@@ -76,7 +101,7 @@ context.objects = [
     auto_cpu=sum(getattr(after,k)-getattr(before,k) for before,after in [(cpu_before,cpu_after),(children_before,children_after)] for k in ['ru_utime','ru_stime'])
     assert automatic['db']==1,automatic
     auto_level=measure('exe:firefox-fixture');auto_other=measure('exe:other-player')
-    assert abs(auto_level['true_peak_dbtp']-base['true_peak_dbtp']-1)<.15
+    assert abs(auto_level['true_peak_dbtp']-base['true_peak_dbtp']-1)<.15,(base,auto_level)
     assert abs(auto_other['true_peak_dbtp']-other_before['true_peak_dbtp'])<.05
     # A target below the measured level must attenuate, not keep adding gain.
     m.write(m.CONFIG,m.config()|{'target_lufs':auto_level['lufs']-6})
@@ -107,7 +132,7 @@ context.objects = [
       for timer in timers:timer.join()
    assert not any(x.get('info',{}).get('props',{}).get('media.class') in ('Audio/Sink','Audio/Source') for x in dump())
    result={'passed':True,'selected_app_delta_db':round(boost['true_peak_dbtp']-base['true_peak_dbtp'],3),'other_app_delta_db':round(other_after['true_peak_dbtp']-other_before['true_peak_dbtp'],3),'reset_delta_db':round(reset['true_peak_dbtp']-base['true_peak_dbtp'],3),'other_app_params_unchanged':True,'real_pipewire_stream_gain_and_capture':True,'hardware_or_microphone_nodes':False,'scope':'Native stream gain and isolation, not actual Firefox or EasyEffects limiting/listening acceptance'}
-   result.update(auto_match_gain_db=1,auto_attenuation_db=-1,auto_other_app_delta_db=round(auto_other['true_peak_dbtp']-other_before['true_peak_dbtp'],3),auto_measurement_wall_seconds=round(auto_wall,3),auto_measurement_cpu_seconds=round(auto_cpu,3),auto_meter_percent_of_one_core_at_30s=round(auto_cpu/30*100,3),silent_background_allowed=True,audible_background_rejected=True,brief_background_sound_rejected=True)
+   result.update(eglantine_unmuted_delta_db=round(delta,3),auto_match_gain_db=1,auto_attenuation_db=-1,auto_other_app_delta_db=round(auto_other['true_peak_dbtp']-other_before['true_peak_dbtp'],3),auto_measurement_wall_seconds=round(auto_wall,3),auto_measurement_cpu_seconds=round(auto_cpu,3),auto_meter_percent_of_one_core_at_30s=round(auto_cpu/30*100,3),silent_background_allowed=True,audible_background_rejected=True,brief_background_sound_rejected=True)
    print(json.dumps(result,indent=2))
    if os.environ.get('MUSIC_LOUDNESS_NATIVE_RESULT'):Path(os.environ['MUSIC_LOUDNESS_NATIVE_RESULT']).write_text(json.dumps(result,indent=2)+'\n')
  except Exception:

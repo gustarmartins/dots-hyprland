@@ -87,12 +87,13 @@ Singleton {
     function changePassword(network: WifiAccessPoint, password: string, username = ""): void {
         // TODO: enterprise wifi with username
         network.askingPassword = false;
+        root.wifiConnectTarget = network;
         changePasswordProc.exec({
             "environment": {
                 "PASSWORD": password,
                 "SSID": network.ssid
             },
-            "command": ["bash", "-c", 'nmcli connection modify "$SSID" wifi-sec.psk "$PASSWORD"']
+            "command": ["bash", "-c", 'if nmcli -t -f NAME connection show | grep -Fxq "$SSID"; then nmcli connection modify "$SSID" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PASSWORD" && nmcli connection up "$SSID"; else nmcli dev wifi connect "$SSID" password "$PASSWORD"; fi']
         })
     }
 
@@ -115,13 +116,15 @@ Singleton {
         stderr: SplitParser {
             onRead: line => {
                 // print("err:", line)
-                if (line.includes("Secrets were required")) {
+                if (line.includes("Secrets were required") && root.wifiConnectTarget) {
                     root.wifiConnectTarget.askingPassword = true
                 }
             }
         }
         onExited: (exitCode, exitStatus) => {
-            root.wifiConnectTarget.askingPassword = (exitCode !== 0)
+            if (root.wifiConnectTarget) {
+                root.wifiConnectTarget.askingPassword = (exitCode !== 0)
+            }
             root.wifiConnectTarget = null
         }
     }
@@ -135,9 +138,21 @@ Singleton {
 
     Process {
         id: changePasswordProc
-        onExited: { // Re-attempt connection after changing password
-            connectProc.running = false
-            connectProc.running = true
+        environment: ({
+            LANG: "C",
+            LC_ALL: "C"
+        })
+        stdout: SplitParser {
+            onRead: line => {
+                getNetworks.running = true
+            }
+        }
+        onExited: (exitCode, exitStatus) => {
+            if (root.wifiConnectTarget) {
+                root.wifiConnectTarget.askingPassword = (exitCode !== 0)
+            }
+            root.wifiConnectTarget = null
+            getNetworks.running = true
         }
     }
 

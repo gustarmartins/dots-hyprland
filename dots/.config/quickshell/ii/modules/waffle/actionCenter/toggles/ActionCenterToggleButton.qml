@@ -27,6 +27,9 @@ ColumnLayout {
     property var mainAction: toggleModel?.mainAction ?? null
     property var altAction: toggleModel?.hasMenu ? (() => root.openMenu()) : (toggleModel?.altAction ?? null)
     property bool hasMenu: toggleModel?.hasMenu ?? false
+    property bool mainActionRequiresHold: toggleModel?.mainActionRequiresHold ?? false
+    property int mainHoldDurationMs: toggleModel?.mainHoldDurationMs ?? 950
+    property string mainHoldLabel: toggleModel?.mainHoldLabel ?? ""
     property Component menu
 
     property color colBackground: toggled ? Looks.colors.accent : Looks.colors.bg2
@@ -50,12 +53,32 @@ ColumnLayout {
             spacing: 0
 
             ToggleFragment {
+                id: mainFragment
                 topLeftRadius: Looks.radius.medium
                 bottomLeftRadius: Looks.radius.medium
                 topRightRadius: root.hasMenu ? 0 : Looks.radius.medium
                 bottomRightRadius: root.hasMenu ? 0 : Looks.radius.medium
                 iconName: root.icon
-                onClicked: root.mainAction && root.mainAction()
+                onClicked: if (!root.mainActionRequiresHold && root.mainAction) root.mainAction()
+
+                HoldToConfirmOverlay {
+                    id: waffleHold
+                    cornerRadius: Looks.radius.medium
+                    accentColor: Appearance.m3colors.m3error
+                    showIdleGuard: root.mainActionRequiresHold
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    visible: root.mainActionRequiresHold
+                    hoverEnabled: true
+                    preventStealing: true
+                    cursorShape: Qt.PointingHandCursor
+                    onPressed: waffleHold.startHold(root.mainAction, root.mainHoldDurationMs, root.mainHoldLabel || root.name, Translation.tr("Hold to confirm"), Appearance.m3colors.m3error)
+                    onPositionChanged: if (waffleHold.holding && !containsMouse) waffleHold.cancelHold(false)
+                    onReleased: if (waffleHold.holding) waffleHold.cancelHold(containsMouse)
+                    onCanceled: waffleHold.cancelHold(false)
+                }
             }
             FadeLoader {
                 Layout.fillHeight: true

@@ -289,6 +289,7 @@ def finish(result, history, download_only, reused=False, keep_busy=False):
         result['appliedAt'] = result['lastUsedAt'] = int(time.time())
         result['queued'] = False
         atomic_json(STATE / 'current.json', result)
+        storage.log_rotation(result, event='applied')
     storage.remember(result)
     atomic_json(STATE / 'history.json', (history + [result])[-150:])
     verb = 'Saved' if download_only else 'Applied'
@@ -319,7 +320,7 @@ def fetch_one(theme, settings, history, seen, target, current_id, download_only,
                     errors.append(str(error))
                     continue
                 return dict(id=item['id'], theme=selected, label=label, provider=item['provider'],
-                    path=str(path), url=item['url'], source=item.get('source', ''), width=width, height=height,
+                    path=str(path), url=item['url'], imageUrl=item['path'], source=item.get('source', ''), width=width, height=height,
                     tags=[tag['name'] for tag in item.get('tags', [])], fetchedAt=int(time.time())), False
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             errors.append(f'{label}: {error}')

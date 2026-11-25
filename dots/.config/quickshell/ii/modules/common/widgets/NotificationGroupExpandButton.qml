@@ -18,7 +18,7 @@ RippleButton { // Expand button
 
     buttonRadius: Appearance.rounding.full
     colBackground: root.more && !root.expanded ? Appearance.colors.colPrimaryContainer : ColorUtils.mix(Appearance?.colors.colLayer2, Appearance?.colors.colLayer2Hover, 0.5)
-    colBackgroundHover: root.more ? ColorUtils.mix(Appearance.colors.colPrimaryContainer, Appearance.colors.colPrimary, 0.25) : Appearance?.colors.colLayer2Hover ?? "#E5DFED"
+    colBackgroundHover: root.more && !root.expanded ? Appearance.colors.colPrimaryContainerHover : Appearance?.colors.colLayer2Hover ?? "#E5DFED"
     colRipple: Appearance?.colors.colLayer2Active ?? "#D6CEE2"
     scale: root.more && hovered ? 1.1 : 1
     Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutBack } }

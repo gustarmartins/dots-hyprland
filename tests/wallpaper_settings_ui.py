@@ -230,6 +230,7 @@ try:
     until(lambda: state_value()['library'].get('queuedCount')==3 and not state_value()['busy'],timeout=40)
     assert read('background.wallpaperPath')==before, 'Prefetch changed wallpaper'
     assert not (OUT/'apply-receipt').exists(), 'Prefetch applied wallpaper/colors'
+    assert not (state/'rotation.log').exists(), 'Prefetch wrote to rotation.log'
     assert state_value()['next']==deadline, 'Prefetch reset the rotation deadline'
     assert state_value()['library']['count']==5
     for wallpaper in state_value()['library']['entries']:
@@ -243,22 +244,31 @@ try:
     until(lambda: read('background.wallpaperPath')==target['path'] and not state_value()['busy'])
     assert state_value()['library']['queuedCount']==2
     assert (OUT/'apply-receipt').read_text()==target['path']
+    log_lines = (state/'rotation.log').read_text(encoding='utf-8').splitlines()
+    assert len(log_lines) == 1, log_lines
+    assert f"url=https://wallhaven.cc/w/{target['id']}" in log_lines[0], log_lines[0]
+    assert f"file_url=https://w.wallhaven.cc/full/fi/{target['id']}.png" in log_lines[0], log_lines[0]
+    assert state_value()['library']['rotationLogCount'] == 1
+    assert until(lambda: json.loads(call('test', 'locate', 'wallpaperRotationLog'))) is not None
     click('wallpaperHistoryReadyOnly')
     click('wallpaperHistoryKeptOnly')
     until(lambda: state_value()['count']==1)
     click('wallpaperRestore-seed-old')
     until(lambda: state_value()['current'].get('id')=='seed-old' and not state_value()['busy'])
     assert read('background.wallpaperPath').endswith('mario-seed-old.png')
+    assert len((state/'rotation.log').read_text(encoding='utf-8').splitlines()) == 2
     assert read('settingsTestSentinel')=={'preserve':['unrelated',42]}
     click('wallpaperHistoryKeptOnly')
     queued=next(e for e in state_value()['library']['entries'] if e.get('queued'))
     click('wallpaperRestore-'+queued['id'])
     until(lambda: state_value()['library']['queuedCount']==1 and not state_value()['busy'])
+    assert len((state/'rotation.log').read_text(encoding='utf-8').splitlines()) == 3
     before_refill=read('background.wallpaperPath')
     call('test','warmAhead')
     until(lambda: state_value()['library']['queuedCount']==3 and not state_value()['busy'],timeout=40)
     assert read('background.wallpaperPath')==before_refill, 'Read-ahead applied a wallpaper'
     assert (OUT/'apply-receipt').read_text()==before_refill
+    assert len((state/'rotation.log').read_text(encoding='utf-8').splitlines()) == 3, 'Read-ahead wrote to rotation.log'
     call('test','resize','700','650');time.sleep(.3)
     screenshot('narrow')
     assert not any(x in (OUT/'settings.log').read_text() for x in ['ReferenceError:', 'TypeError:', 'Unable to assign', 'Binding loop', 'Failed to load configuration'])

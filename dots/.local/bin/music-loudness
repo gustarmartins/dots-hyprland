@@ -27,7 +27,7 @@ SESSION=RUNTIME/'music-loudness-session.json'
 UNIT='music-loudness.service'
 GAIN='output:limiter:0:inputGain'
 DEFAULT={'enabled':False,'step_db':1.0,'target_lufs':-16.0,'follow_presets':True,'selected_app':'exe:mpv',
-         'auto_match':False,'auto_interval':30.0}
+         'auto_match':False,'auto_interval':30.0,'eden_default':False}
 GRAPH_KEY='audioconvert.filter-graph.778'
 GAIN_KEY='music_loudness_gain:Mult'
 BACKEND='app-stream-v2'
@@ -67,8 +67,14 @@ def run(args,timeout=5,**kw):
 
 def birth(pid):
     p=Path('/proc')/str(pid)
+    raw_exe=os.readlink(p/'exe')
+    name=Path(raw_exe).name
+    if raw_exe=='/usr/bin/easyeffects (deleted)':
+        try:
+            if (p/'comm').read_text().strip()=='easyeffects':name='easyeffects'
+        except OSError:pass
     return {'pid':int(pid),'start':p.joinpath('stat').read_text().rsplit(')',1)[1].split()[19],
-            'exe':Path(os.readlink(p/'exe')).name}
+            'exe':name}
 
 
 def exchange(command):
@@ -120,9 +126,13 @@ def playback_apps(data):
         channels=next((int(f['channels']) for f in formats if isinstance(f.get('channels'),int)),0)
         params=node_params(node)
         supported=any(x.get('name')=='audioconvert.filter-graph.N' for x in node['info'].get('params',{}).get('PropInfo',[])) and not params.get('audioconvert.filter-graph.disable',False)
+        levels={}
+        for entry in node['info'].get('params',{}).get('Props',[]):
+            for key in ('mute','volume','channelVolumes','softMute','softVolumes'):
+                if key in entry:levels[key]=entry[key]
         app['streams'].append({'id':node['id'],'serial':str(p.get('object.serial')),'process':process,'channels':channels,
             'running':node['info'].get('state')=='running','supported':supported,'params':params,
-            'title':str(p.get('media.name') or name)})
+            'app_name':name,'levels':levels,'title':str(p.get('media.name') or name)})
     return sorted(apps.values(),key=lambda x:x['name'].casefold())
 
 
@@ -228,10 +238,13 @@ def graph_state(data,streams):
                 and any(path_exists(edges,x,a) for x in selected) and path_exists(edges,b,output['id']))}
 
 
-def inspect(allow_paused=None,data=None):
+def inspect(allow_paused=None,data=None,app_id=None,stream_serial=None):
     data=pw_dump() if data is None else data
-    app=next((x for x in playback_apps(data) if x['id']==config()['selected_app']),None)
+    app=next((x for x in playback_apps(data) if x['id']==(app_id or config()['selected_app'])),None)
     if app is None:raise RuntimeError('Start playback, then pick its app below')
+    if stream_serial is not None:
+        app=dict(app,streams=[s for s in app['streams'] if s['serial']==stream_serial])
+        if not app['streams']:raise RuntimeError('The selected audio stream changed')
     if any(not x['supported'] or not 1<=x['channels']<=64 for x in app['streams']):
         raise RuntimeError('This app’s audio stream does not support an independent gain stage')
     preset,owner=exchange('get_last_loaded_preset:output')
@@ -332,10 +345,14 @@ def current_stream(ident,cookie):
     return next((s for a in playback_apps(data) for s in a['streams'] if stream_identity(s)==stream_identity(ident)),None)
 
 
-def set_stream(ident,cookie,params):
+def set_stream_props(ident,cookie,properties):
     current=current_stream(ident,cookie)
     if current is None:raise RuntimeError('The selected audio stream changed')
-    run(['pw-cli','set-param',str(current['id']),'Props',json.dumps({'params':params})])
+    run(['pw-cli','set-param',str(current['id']),'Props',json.dumps(properties)])
+
+
+def set_stream(ident,cookie,params):
+    set_stream_props(ident,cookie,{'params':params})
 
 
 def wait_gain(ident,cookie,expected):
@@ -375,18 +392,144 @@ def raw_reset(state,message='Original app level restored'):
     if remaining:raise RuntimeError('Could not verify app gain reset; recovery receipt retained')
 
 
+# Automatic defaults and manual adjustments share one PipeWire graph slot.
+# Keep the default receipt per stream so selecting another app cannot move it.
+def eden_receipt():
+    return RUNTIME/'music-loudness-eden.json'
+
+
+def is_eden(stream):
+    return (stream.get('app_name','').casefold() in ('eden','eglantine') or
+            re.fullmatch(r'(eden|eglantine)(?:[-_.][a-z0-9_.-]+)?',stream['process']['exe'],re.I) is not None)
+
+
+def has_default(records,cookie,stream):
+    item=records.get(stream['serial'],{})
+    return (item.get('cookie')==cookie and item.get('stream')==stream_identity(stream)
+            and item.get('default') and close(stream['params'].get(GAIN_KEY,-1),10**0.5))
+
+
+def current_db(state,snapshot):
+    if owned(state,snapshot):return state['db']
+    records=read(eden_receipt())
+    if snapshot['streams'] and all(has_default(records,snapshot['cookie'],s) for s in snapshot['streams']):return 10
+    return 0
+
+
+def startup_level_changes(stream):
+    levels=stream.get('levels',{})
+    changes={key:False for key in ('mute','softMute') if levels.get(key)}
+    ch_vols=levels.get('channelVolumes',[])
+    hidden_scalar_attenuation=(
+        levels.get('volume') is not None and number(levels['volume'])<0.99
+        and bool(ch_vols) and all(number(v)>=0.99 for v in ch_vols)
+    )
+    if levels.get('volume')==0 or hidden_scalar_attenuation:changes['volume']=1.0
+    for key in ('channelVolumes','softVolumes'):
+        volumes=levels.get(key,[])
+        if volumes and all(v==0 for v in volumes):
+            changes[key]=[1.0]*len(volumes)
+    return changes
+
+
+def finish_eden_startup(stream,cookie):
+    current=current_stream(stream,cookie)
+    if current is None:raise RuntimeError('Eden stream closed during startup')
+    changes=startup_level_changes(current)
+    if not changes:return
+    set_stream_props(stream,cookie,changes)
+    deadline=time.monotonic()+2
+    while time.monotonic()<deadline:
+        current=current_stream(stream,cookie)
+        if current is None:break
+        if not startup_level_changes(current):return
+        time.sleep(.05)
+    raise RuntimeError('Eden stream did not confirm its startup volume')
+
+
+def update_eden_defaults():
+    with lock():
+        cfg=config()
+        if not cfg['enabled'] or not cfg['eden_default']:return
+        data=pw_dump()
+        cookie=next(obj['info']['cookie'] for obj in data if obj['type'].endswith(':Core'))
+        apps=playback_apps(data)
+        saved=read(eden_receipt())
+        records={}
+        retry=False
+        for app in apps:
+            pending=[]
+            for stream in app['streams']:
+                if not is_eden(stream):continue
+                key=stream['serial']
+                item=saved.get(key,{})
+                if item.get('cookie')==cookie and item.get('stream')==stream_identity(stream):
+                    if not item['default']:
+                        records[key]=item
+                        continue
+                    if has_default(saved,cookie,stream):
+                        if item.get('pending'):finish_eden_startup(stream,cookie)
+                        records[key]={k:v for k,v in item.items() if k!='pending'}
+                        continue
+                if not stream['running']:
+                    retry=True
+                    continue
+                if not stream['params'].get(GRAPH_KEY) and GAIN_KEY not in stream['params']:
+                    pending.append(stream)
+            for stream in pending:
+                try:inspect(data=data,app_id=app['id'],stream_serial=stream['serial'])
+                except (OSError,RuntimeError,ValueError,subprocess.SubprocessError):
+                    retry=True
+                    continue
+                # Persist before installation for recovery after interruption.
+                item={'cookie':cookie,'stream':stream_identity(stream),'default':True}
+                key=stream['serial']
+                saved[key]=dict(item,pending=True)
+                write(eden_receipt(),saved)
+                set_stream(stream,cookie,[GRAPH_KEY,gain_graph(10**0.5,stream['channels'])])
+                wait_gain(stream,cookie,10**0.5)
+                finish_eden_startup(stream,cookie)
+                records[key]=item
+        if saved!=records:write(eden_receipt(),records)
+        return retry
+
+
+def clear_eden_defaults():
+    with lock():
+        records=read(eden_receipt())
+        for key,item in list(records.items()):
+            stream=current_stream(item['stream'],item['cookie']) if item['default'] else None
+            if stream and has_default(records,item['cookie'],stream):
+                set_stream(stream,item['cookie'],[GRAPH_KEY,''])
+                wait_gain(stream,item['cookie'],None)
+            del records[key]
+            write(eden_receipt(),records)
+
+
+def release_defaults(snapshot):
+    records=read(eden_receipt())
+    for stream in snapshot['streams']:
+        if has_default(records,snapshot['cookie'],stream):
+            set_stream(stream,snapshot['cookie'],[GRAPH_KEY,''])
+            wait_gain(stream,snapshot['cookie'],None)
+            records[stream['serial']]['default']=False
+            write(eden_receipt(),records)
+
+
 def apply_extra(snapshot,state,db):
     db=number(db);multiplier=10**(db/20)
     if not math.isfinite(multiplier) or not 0<multiplier<=10:raise ValueError('The app gain stage supports up to +20 dB')
     previous=owned(state,snapshot)
     if not previous:
         if state.get('owned'):raise RuntimeError('Reset the previous adjustment first')
-        if any(GAIN_KEY in x['params'] or x['params'].get(GRAPH_KEY) for x in snapshot['streams']):
+        records=read(eden_receipt())
+        if any((GAIN_KEY in x['params'] or x['params'].get(GRAPH_KEY)) and not has_default(records,snapshot['cookie'],x) for x in snapshot['streams']):
             raise RuntimeError('This app already has a gain stage without a matching receipt')
         state={'backend':BACKEND,'observed':compact(snapshot),'owned':False,'db':0,'applied':[]}
     before=inspect(allow_paused=snapshot['track']['key'])
     if not same_scope(snapshot,before) or (previous and not owned(state,before)):
         raise RuntimeError('Audio changed before the adjustment; nothing replaced')
+    if not previous:release_defaults(before)
     if close(db,0):raw_reset(state);return state
     old_multiplier=state.get('multiplier')
     state.update(observed=compact(snapshot),multiplier=multiplier,owned=True,db=db,measuring=False,operation=None,
@@ -420,7 +563,7 @@ def adjust(step):
         if snapshot['track']['status']!='Playing':raise RuntimeError('Play the selected app first')
         if state.get('measuring'):raise RuntimeError('A loudness check is already in progress')
         if state.get('owned') and (not same_scope(state['observed'],snapshot) or not owned(state,snapshot)):raw_reset(state,'Audio changed');snapshot=inspect();state={}
-        db=state.get('db',0) if owned(state,snapshot) else 0
+        db=current_db(state,snapshot)
         result=apply_extra(snapshot,state,number(db)+number(step))
     try:
         if result.get('owned'):ensure_worker()
@@ -562,7 +705,7 @@ def match(automatic=False):
             if automatic and not config()['auto_match']:raise RuntimeError('Automatic matching cancelled')
             if state.get('operation')!=token or not meter_scope_matches(snapshot,now,automatic) or (automatic and now.get('foreign_nodes',[])!=measured.get('silent_background',[])):
                 raise RuntimeError('Sound changed; the measured result was not applied')
-            db=state.get('db',0) if owned(state,now) else 0
+            db=current_db(state,now)
             if automatic:
                 db,limited=auto_recommendation(measured['lufs'],measured['true_peak_dbtp'],config()['target_lufs'],snapshot['ceiling'],db)
             else:
@@ -654,22 +797,41 @@ def serve():
         # Allow the starting CLI transaction to finish writing its receipt.
         time.sleep(.4)
         next_auto=0.0
+        listener=None
+        retry_eden=True
         try:
             while not stopping:
                 active=tick();cfg=config()
                 automatic=cfg['enabled'] and cfg['auto_match']
-                if not active and not automatic:break
+                eden=cfg['enabled'] and cfg['eden_default']
+                if not active and not automatic and not eden:break
+                if eden:
+                    if listener is None or listener.poll() is not None:
+                        if listener:listener.stdout.close()
+                        listener=subprocess.Popen(['pactl','subscribe'],stdout=subprocess.PIPE,env=dict(os.environ,LC_ALL='C'))
+                        os.set_blocking(listener.stdout.fileno(),False)
+                        retry_eden=True
+                    events=listener.stdout.read() or b''
+                    if retry_eden or b'sink-input' in events or b' on server' in events:
+                        retry_eden=True
+                        try:retry_eden=update_eden_defaults()
+                        except (OSError,RuntimeError,ValueError,subprocess.SubprocessError) as e:
+                            print('Eden default:',e,file=sys.stderr,flush=True)
+                elif listener is not None:
+                    listener.terminate();listener.wait();listener.stdout.close();listener=None
                 if automatic and not stopping and time.monotonic()>=next_auto:
                     next_auto=time.monotonic()+max(15.0,number(cfg['auto_interval']))
                     auto_attempt()
                 # Retain the existing ownership guard while gain is applied;
                 # an idle automatic watcher only reads its config every five seconds.
-                delay=.5 if read(SESSION).get('owned') or read(SESSION).get('measuring') else 5.0
+                delay=.5 if read(SESSION).get('owned') or read(SESSION).get('measuring') else (2.0 if eden else 5.0)
                 deadline=time.monotonic()+delay
                 while not stopping and time.monotonic()<deadline:time.sleep(.2)
         except BaseException:
             cleanup();raise
         finally:
+            if listener is not None:
+                listener.terminate();listener.wait();listener.stdout.close()
             if stopping:cleanup()
         # Idle exit already removed its gain in tick(). Do not clean up a new
         # CLI transaction that arrived as this worker was exiting. The CLI
@@ -679,7 +841,7 @@ def serve():
 def status():
     cfg=config();state=read(SESSION)
     result={'enabled':cfg['enabled'],'step_db':cfg['step_db'],'target_lufs':cfg['target_lufs'],'follow_presets':cfg['follow_presets'],
-            'auto_match':cfg['auto_match'],'auto_interval':cfg['auto_interval'],'auto_message':state.get('auto_message',''),
+            'eden_default':cfg['eden_default'],'auto_match':cfg['auto_match'],'auto_interval':cfg['auto_interval'],'auto_message':state.get('auto_message',''),
             'active':False,'ready':False,'match_ready':False,'match_message':'','apps':[],'selected_app':cfg['selected_app'],
             'db':0,'title':'Pick a playback app','preset':'','message':state.get('message','Ready for music'),'measuring':state.get('measuring',False),'measurement':None}
     if not cfg['enabled']:result['message']='Off';return result
@@ -692,7 +854,8 @@ def status():
         result['match_message']='Pause other audio to match: '+', '.join(snapshot['foreign']) if snapshot['foreign'] else 'Measure this app through the current effects'
         measurement=state.get('measurement')
         if measurement and measurement.get('scope') and same_scope(measurement['scope'],snapshot):result['measurement']={k:v for k,v in measurement.items() if k!='scope'}
-        if owned(state,snapshot):result.update(active=abs(state.get('db',0))>.00001,db=state.get('db',0))
+        db=current_db(state,snapshot)
+        result.update(active=abs(db)>.00001,db=db)
         if not state.get('measuring'):result['message']='Only '+snapshot['app_name']+' · preset unchanged'
     except Exception as e:result['message']=str(e)
     return result
@@ -707,7 +870,7 @@ def select_app(value):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['status','enable','disable','adjust','match','reset','serve','cleanup','target','step','follow-presets','select-app','cleanup-failed','auto-match','auto-interval'])
+    parser.add_argument('action',choices=['status','enable','disable','adjust','match','reset','serve','cleanup','target','step','follow-presets','select-app','cleanup-failed','eden-default','auto-match','auto-interval'])
     parser.add_argument('value',nargs='?');args=parser.parse_args()
     if args.action=='serve':serve();return
     if args.action=='cleanup':cleanup();return
@@ -717,15 +880,41 @@ def main():
     if args.action=='status':print(json.dumps(status(),ensure_ascii=False));return
     if args.action in ('enable','disable'):
         cfg=config();cfg['enabled']=args.action=='enable';write(CONFIG,cfg)
+        want_boot=bool(cfg['enabled'] and (cfg['eden_default'] or cfg['auto_match']))
+        run(['systemctl','--user','enable' if want_boot else 'disable',UNIT])
         if not cfg['enabled']:set_auto_match(False);run(['systemctl','--user','stop',UNIT]);cleanup()
-        elif cfg['auto_match']:ensure_worker()
-    elif args.action=='reset':set_auto_match(False);cleanup();run(['systemctl','--user','stop',UNIT])
+        elif cfg['auto_match'] or cfg['eden_default']:ensure_worker()
+        if not cfg['enabled'] and cfg['eden_default']:clear_eden_defaults()
+    elif args.action=='reset':
+        set_auto_match(False)
+        cfg=config()
+        run(['systemctl','--user','enable' if (cfg['enabled'] and cfg['eden_default']) else 'disable',UNIT])
+        if cfg['eden_default']:
+            with lock():
+                if read(eden_receipt()):
+                    try:snapshot=inspect()
+                    except (RuntimeError,OSError,ValueError,subprocess.SubprocessError):snapshot=None
+                    if snapshot:release_defaults(snapshot)
+                raw_reset(read(SESSION))
+        else:cleanup();run(['systemctl','--user','stop',UNIT])
+    elif args.action=='eden-default':
+        if args.value not in ('true','false'):raise ValueError('Use true or false')
+        enabled=args.value=='true'
+        with lock():
+            cfg=config();cfg['eden_default']=enabled;write(CONFIG,cfg)
+        want_boot=bool(cfg['enabled'] and (cfg['eden_default'] or cfg['auto_match']))
+        run(['systemctl','--user','enable' if want_boot else 'disable',UNIT])
+        if enabled and cfg['enabled']:ensure_worker()
+        if not enabled:clear_eden_defaults()
     elif args.action=='select-app':select_app(args.value)
     elif args.action=='adjust':adjust(number(args.value))
     elif args.action=='match':match()
     elif args.action=='auto-match':
         if args.value not in ('true','false'):raise ValueError('Use true or false')
         set_auto_match(args.value=='true')
+        cfg=config()
+        want_boot=bool(cfg['enabled'] and (cfg['eden_default'] or cfg['auto_match']))
+        run(['systemctl','--user','enable' if want_boot else 'disable',UNIT])
     elif args.action=='auto-interval':
         value=number(args.value)
         if not 15<=value<=300:raise ValueError('Choose an interval from 15 to 300 seconds')

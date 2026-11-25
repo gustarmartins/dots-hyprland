@@ -64,18 +64,23 @@ Item {
         bottomRightRadius: 12
 
         ColumnLayout {
-            anchors.fill: parent
-            anchors.margins: sidebarPadding
-            spacing: 10
+            anchors {
+                fill: parent
+                leftMargin: sidebarPadding
+                rightMargin: sidebarPadding
+                topMargin: 12
+                bottomMargin: 12
+            }
+            spacing: 6
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: 6
                 ColumnLayout {
-                    spacing: 3
+                    spacing: 1
                     StyledText {
                         text: "Control center"
-                        font.pixelSize: 24
+                        font.pixelSize: 20
                         font.weight: Font.Medium
                         color: Appearance.m3colors.m3onSurface
                     }
@@ -131,8 +136,8 @@ Item {
                         required property var modelData
                         Layout.fillWidth: true
                         Layout.preferredWidth: 1
-                        implicitHeight: 36
-                        buttonRadius: 12
+                        implicitHeight: 32
+                        buttonRadius: 10
                         toggled: (root.showingNotifications ? "inbox" : root.showingWidgets ? "agenda" : "controls") === modelData.value
                         colBackground: Appearance.m3colors.m3surfaceContainerHigh
                         onClicked: {
@@ -141,7 +146,7 @@ Item {
                         }
                         contentItem: RowLayout {
                             spacing: 6
-                            MaterialSymbol { text: modelData.icon; iconSize: 17; color: tabButton.toggled ? Appearance.m3colors.m3onPrimary : Appearance.m3colors.m3onSurface }
+                            MaterialSymbol { text: modelData.icon; iconSize: 16; color: tabButton.toggled ? Appearance.m3colors.m3onPrimary : Appearance.m3colors.m3onSurface }
                             StyledText { Layout.fillWidth: true; text: modelData.label; font.pixelSize: 12; color: tabButton.toggled ? Appearance.m3colors.m3onPrimary : Appearance.m3colors.m3onSurface; elide: Text.ElideRight }
                         }
                     }
@@ -150,13 +155,15 @@ Item {
             RowLayout {
                 Layout.fillWidth: true
                 visible: !root.showingNotifications && !root.showingWidgets && !root.editMode
-                spacing: 10
+                spacing: 8
                 DesktopMood { Layout.fillWidth: true; Layout.preferredWidth: 1 }
                 EasyEffectsPresets { Layout.fillWidth: true; Layout.preferredWidth: 1.4; visible: EasyEffects.available }
             }
 
             EdenBoostWidget { Layout.fillWidth: true; visible: EdenAudioBoost.enabled && !root.showingNotifications && !root.showingWidgets && !root.editMode }
             MusicLoudnessWidget { Layout.fillWidth: true; visible: MusicLoudness.enabled && !root.showingNotifications && !root.showingWidgets && !root.editMode }
+            DisplayAppStatusWidget { Layout.fillWidth: true; visible: DisplayAppStatus.enabled && !root.showingNotifications && !root.showingWidgets && !root.editMode }
+            PipeWireAudioStrip { Layout.fillWidth: true; visible: PipeWireAudio.enabled && !root.showingNotifications && !root.showingWidgets && !root.editMode }
 
             Loader {
                 id: slidersLoader

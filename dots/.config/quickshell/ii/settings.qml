@@ -17,11 +17,15 @@ ApplicationWindow {
     property string currentPage: "design"
     property string designSection: ""
     property string query: ""
-    property string feedback: "Changes save when you use a control. Text lists have a Save button."
+    property string feedback: "Changes save automatically. Text lists use a Save button."
     readonly property bool searching: query.trim().length > 0
     readonly property var page: Catalog.page(currentPage)
     readonly property bool wide: width >= 900
+    readonly property bool isLight: Appearance.m3colors.darkmode === false
+    readonly property color canvasColor: isLight ? Appearance.m3colors.m3surfaceContainerLow : Appearance.m3colors.m3background
+    readonly property color railColor: isLight ? Appearance.m3colors.m3surfaceContainer : Appearance.m3colors.m3surfaceContainerLowest
     property bool aboutVisited: false
+
     visible: true
     title: "illogical-impulse Settings"
     width: 1180
@@ -31,18 +35,28 @@ ApplicationWindow {
     font.family: Appearance.font.family.main
     font.pixelSize: 13
     palette {
-        window: Appearance.m3colors.m3background
+        window: canvasColor
         windowText: Appearance.m3colors.m3onSurface
         base: Appearance.m3colors.m3surfaceContainerHigh
         alternateBase: Appearance.m3colors.m3surfaceContainerLow
         text: Appearance.m3colors.m3onSurface
+        placeholderText: Appearance.m3colors.m3onSurfaceVariant
         button: Appearance.m3colors.m3surfaceContainerHigh
         buttonText: Appearance.m3colors.m3onSurface
+        brightText: Appearance.m3colors.m3onPrimary
+        light: Appearance.m3colors.m3surfaceContainerHighest
+        midlight: Appearance.m3colors.m3surfaceContainerHigh
+        mid: Appearance.m3colors.m3outlineVariant
+        dark: Appearance.m3colors.m3outline
+        shadow: Appearance.m3colors.m3shadow
         highlight: Appearance.m3colors.m3primary
         highlightedText: Appearance.m3colors.m3onPrimary
-        mid: Appearance.m3colors.m3outlineVariant
+        toolTipBase: Appearance.m3colors.m3inverseSurface
+        toolTipText: Appearance.m3colors.m3inverseOnSurface
+        link: Appearance.m3colors.m3primary
+        linkVisited: Appearance.m3colors.m3tertiary
     }
-    color: Appearance.m3colors.m3background
+    color: canvasColor
     onClosing: event => { if (Config.writesPaused) event.accepted = false; else Qt.quit(); }
     Component.onCompleted: MaterialThemeLoader.reapplyTheme()
 
@@ -54,150 +68,372 @@ ApplicationWindow {
         query = ""; searchField.text = "";
         if (designSection) Qt.callLater(() => designPage.revealSection());
     }
+
     Shortcut { sequence: "Ctrl+F"; enabled: !Config.writesPaused; onActivated: { searchField.forceActiveFocus(); searchField.selectAll(); } }
     Shortcut { sequence: "Ctrl+PageDown"; enabled: !Config.writesPaused; onActivated: root.navigate(Catalog.pages[(Catalog.pages.findIndex(p => p.id === root.currentPage) + 1) % Catalog.pages.length].id) }
     Shortcut { sequence: "Ctrl+PageUp"; enabled: !Config.writesPaused; onActivated: root.navigate(Catalog.pages[(Catalog.pages.findIndex(p => p.id === root.currentPage) + Catalog.pages.length - 1) % Catalog.pages.length].id) }
-    ColumnLayout {
-        anchors { fill: parent; margins: 16 }
-        spacing: 16
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 16
-            MaterialSymbol { text: "tune"; iconSize: 26; color: Appearance.m3colors.m3primary }
-            StyledText { text: "Desktop settings"; font.pixelSize: 21; font.weight: Font.Medium }
-            Item { Layout.fillWidth: true }
-            SettingsField {
-                id: searchField
-                objectName: "settingsSearch"
-                Layout.preferredWidth: Math.min(380, root.width * 0.37)
-                placeholderText: "Search settings…  Ctrl+F"
-                Accessible.name: "Search all settings"
-                selectByMouse: true
-                enabled: !Config.writesPaused
-                onTextEdited: root.query = text
-                Keys.onEscapePressed: { text = ""; root.query = ""; }
-            }
-            ToolButton { text: "×"; Accessible.name: "Close settings"; enabled: !Config.writesPaused; onClicked: root.close() }
-        }
-        RowLayout {
-            Layout.fillWidth: true
+
+    RowLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        // Left Material 3 Expressive Navigation Drawer Pane
+        Rectangle {
+            Layout.preferredWidth: root.wide ? 232 : 178
             Layout.fillHeight: true
-            spacing: 18
+            color: root.railColor
+
             ColumnLayout {
-                Layout.preferredWidth: root.wide ? 190 : 164
-                Layout.fillHeight: true
-                spacing: 12
+                anchors { fill: parent; leftMargin: 12; rightMargin: 12; topMargin: 16; bottomMargin: 14 }
+                spacing: 14
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 6
+                    Layout.rightMargin: 4
+                    spacing: 10
+                    Rectangle {
+                        implicitWidth: 34
+                        implicitHeight: 34
+                        radius: 11
+                        color: Appearance.m3colors.m3primaryContainer
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            text: "tune"
+                            iconSize: 20
+                            color: Appearance.m3colors.m3onPrimaryContainer
+                        }
+                    }
+                    StyledText {
+                        Layout.fillWidth: true
+                        text: "Settings"
+                        font.pixelSize: 18
+                        font.weight: Font.DemiBold
+                        color: Appearance.m3colors.m3onSurface
+                        elide: Text.ElideRight
+                    }
+                }
+
                 ListView {
                     id: navigation
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
                     model: Catalog.pages
-                    spacing: 4
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-                    delegate: Button {
+                    spacing: 3
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: StyledScrollBar {}
+                    delegate: AbstractButton {
+                        id: navButton
                         required property var modelData
+                        readonly property bool selected: !root.searching && root.currentPage === modelData.id
                         width: navigation.width
-                        height: root.wide ? 43 : 50
-                        padding: 10
+                        height: root.wide ? 42 : 46
+                        padding: 0
                         enabled: !Config.writesPaused
-                        highlighted: !root.searching && root.currentPage === modelData.id
                         Accessible.name: modelData.title
                         ToolTip.visible: hovered && !root.wide
                         ToolTip.text: modelData.title
                         onClicked: root.navigate(modelData.id)
-                        background: Rectangle { radius: 14; color: parent.highlighted ? Appearance.m3colors.m3secondaryContainer : parent.hovered ? Appearance.m3colors.m3surfaceContainerHigh : "transparent" }
+                        background: Rectangle {
+                            radius: height / 2
+                            color: navButton.selected
+                                ? Appearance.m3colors.m3secondaryContainer
+                                : navButton.down
+                                    ? Qt.alpha(Appearance.m3colors.m3onSurface, 0.10)
+                                    : navButton.hovered
+                                        ? Qt.alpha(Appearance.m3colors.m3onSurface, 0.06)
+                                        : "transparent"
+                            Behavior on color { ColorAnimation { duration: 140 } }
+                        }
                         contentItem: RowLayout {
-                            spacing: 10
-                            MaterialSymbol { text: modelData.icon; iconSize: 22; color: Appearance.m3colors.m3onSurface }
-                            StyledText { Layout.fillWidth: true; text: modelData.title; font.pixelSize: root.wide ? 13 : 12; wrapMode: Text.WordWrap }
+                            anchors { fill: parent; leftMargin: 14; rightMargin: 12 }
+                            spacing: 11
+                            MaterialSymbol {
+                                text: modelData.icon
+                                iconSize: 20
+                                fill: navButton.selected ? 1 : 0
+                                color: navButton.selected ? Appearance.m3colors.m3onSecondaryContainer : Appearance.m3colors.m3onSurfaceVariant
+                            }
+                            StyledText {
+                                Layout.fillWidth: true
+                                text: modelData.title
+                                textFormat: Text.PlainText
+                                font.pixelSize: root.wide ? 13 : 12
+                                font.weight: navButton.selected ? Font.DemiBold : Font.Normal
+                                color: navButton.selected ? Appearance.m3colors.m3onSecondaryContainer : Appearance.m3colors.m3onSurface
+                                elide: Text.ElideRight
+                                wrapMode: root.wide ? Text.NoWrap : Text.WordWrap
+                            }
                         }
                     }
                 }
+
                 SettingsButton {
                     Layout.fillWidth: true
+                    implicitHeight: 36
                     text: root.wide ? "Open config file" : "{ }"
                     Accessible.name: "Open configuration file"
                     enabled: !Config.writesPaused
                     onClicked: Qt.openUrlExternally(Directories.shellConfigPath)
                 }
             }
-            ColumnLayout {
+        }
+
+        // Right Content Pane
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 0
+
+            // Top bar: page title + pill search + close
+            Item {
                 Layout.fillWidth: true
-                Layout.fillHeight: true
-                spacing: 12
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
-                    StyledText { Layout.fillWidth: true; text: root.searching ? "Search results" : root.page.title; font.pixelSize: 27; font.weight: Font.Medium; wrapMode: Text.WordWrap }
-                    StyledText { Layout.fillWidth: true; text: root.searching ? "Matches across the whole desktop. Changes use the same controls as their own pages." : root.page.description; font.pixelSize: 13; wrapMode: Text.WordWrap; color: Appearance.m3colors.m3onSurfaceVariant }
-                }
-                StackLayout {
-                    id: stack
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    currentIndex: !Config.ready ? 4 : root.searching ? 2 : root.currentPage === "home" ? 0 : root.currentPage === "design" ? 1 : root.currentPage === "about" ? 3 : 2
-                    SettingsHome { onNavigate: id => root.navigate(id) }
-                    DesignPage { id: designPage; requestedSection: root.designSection; onEdited: path => { root.feedback = "Updated · " + (Catalog.entries.find(e => e.path === path)?.title ?? "Setting"); } }
-                    CatalogPage {
-                        id: catalogPage
-                        effectsEditor: designPage.effectsEditor
-                        pageId: root.currentPage
-                        query: root.query
-                        writable: !Config.writesPaused
-                        onNavigate: id => root.navigate(id)
-                        onEdited: path => { root.feedback = "Updated · " + (Catalog.entries.find(e => e.path === path)?.title ?? "Setting"); }
-                    }
-                    Loader { id: about; active: root.aboutVisited; source: "modules/settings/About.qml" }
-                    BusyIndicator { running: !Config.ready }
-                }
+                implicitHeight: Math.max(102, headerRow.implicitHeight + 44)
+
                 RowLayout {
-                    visible: MemoryLockDraft.initialized && (root.currentPage === "memory" || MemoryLockDraft.dirty || MemoryLockDraft.applying)
-                    Layout.fillWidth: true
-                    spacing: 10
-                    BusyIndicator { running: MemoryLockDraft.applying || MemoryLockDraft.checking; visible: running; implicitWidth: 24; implicitHeight: 24 }
-                    StyledText { Layout.fillWidth: true; Layout.minimumWidth: 30; text: MemoryLockDraft.applying ? "Applying… New edits stay in the next draft." : MemoryLockDraft.checking ? "Checking selected groups…" : MemoryLockDraft.needsReview && !MemoryLockDraft.acknowledged ? "Review group warnings to apply" : MemoryLockDraft.dirty ? "Changes not applied" : "No pending changes"; wrapMode: Text.WordWrap; font.pixelSize: 12 }
-                    MemoryActionButton {
-                        objectName: "memoryReview"
-                        visible: MemoryLockDraft.operations.length > 0 || MemoryLockDraft.needsReview
-                        text: "Review (" + MemoryLockDraft.operations.length + ")"
-                        onClicked: {
-                            if (root.currentPage !== "memory" || root.searching) root.navigate("memory");
-                            Qt.callLater(() => catalogPage.showMemoryReview());
+                    id: headerRow
+                    anchors {
+                        left: parent.left
+                        right: parent.right
+                        verticalCenter: parent.verticalCenter
+                        leftMargin: 24
+                        rightMargin: 20
+                    }
+                    spacing: 14
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        StyledText {
+                            Layout.fillWidth: true
+                            text: root.searching ? "Search results" : root.page.title
+                            textFormat: Text.PlainText
+                            font.family: Appearance.font.family.title
+                            font.pixelSize: 24
+                            font.weight: Font.DemiBold
+                            color: Appearance.m3colors.m3onSurface
+                            elide: Text.ElideRight
+                        }
+                        StyledText {
+                            Layout.fillWidth: true
+                            text: root.searching
+                                ? "Matches across every desktop page · edit directly below."
+                                : root.page.description
+                            textFormat: Text.PlainText
+                            font.pixelSize: 12
+                            color: Appearance.m3colors.m3onSurfaceVariant
+                            elide: Text.ElideRight
                         }
                     }
-                    MemoryActionButton { objectName: "memoryDiscard"; text: "Discard"; enabled: !MemoryLockDraft.applying && MemoryLockDraft.dirty; onClicked: MemoryLockDraft.discard() }
-                    MemoryActionButton { objectName: "memoryApplyAll"; text: MemoryLockDraft.applying ? "Applying…" : "Apply all"; prominent: true; enabled: MemoryLockDraft.canApply; onClicked: MemoryLockDraft.applyAll() }
+
+                    // Material 3 Pill Search Bar
+                    Rectangle {
+                        Layout.preferredWidth: Math.min(340, Math.max(200, root.width * 0.28))
+                        implicitHeight: 40
+                        radius: 20
+                        color: root.isLight ? Appearance.m3colors.m3surfaceContainerLowest : Appearance.m3colors.m3surfaceContainerHigh
+                        border.width: searchField.activeFocus ? 2 : 1
+                        border.color: searchField.activeFocus ? Appearance.m3colors.m3primary : Qt.alpha(Appearance.m3colors.m3outlineVariant, 0.7)
+
+                        RowLayout {
+                            anchors { fill: parent; leftMargin: 12; rightMargin: 8 }
+                            spacing: 6
+                            MaterialSymbol {
+                                text: "search"
+                                iconSize: 18
+                                color: searchField.activeFocus ? Appearance.m3colors.m3primary : Appearance.m3colors.m3onSurfaceVariant
+                            }
+                            TextField {
+                                id: searchField
+                                objectName: "settingsSearch"
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                verticalAlignment: TextInput.AlignVCenter
+                                color: Appearance.m3colors.m3onSurface
+                                placeholderTextColor: Appearance.m3colors.m3onSurfaceVariant
+                                selectionColor: Appearance.m3colors.m3primary
+                                selectedTextColor: Appearance.m3colors.m3onPrimary
+                                background: Item {}
+                                placeholderText: root.wide ? "Search settings…  Ctrl+F" : "Search…"
+                                Accessible.name: "Search all settings"
+                                selectByMouse: true
+                                enabled: !Config.writesPaused
+                                onTextEdited: root.query = text
+                                Keys.onEscapePressed: { text = ""; root.query = ""; }
+                            }
+                            AbstractButton {
+                                visible: searchField.text.length > 0
+                                implicitWidth: 26
+                                implicitHeight: 26
+                                Accessible.name: "Clear search"
+                                onClicked: { searchField.text = ""; root.query = ""; }
+                                background: Rectangle {
+                                    radius: 13
+                                    color: parent.hovered ? Qt.alpha(Appearance.m3colors.m3onSurface, 0.08) : "transparent"
+                                }
+                                contentItem: MaterialSymbol {
+                                    text: "close"
+                                    iconSize: 16
+                                    horizontalAlignment: Text.AlignHCenter
+                                    verticalAlignment: Text.AlignVCenter
+                                    color: Appearance.m3colors.m3onSurfaceVariant
+                                }
+                            }
+                        }
+                    }
+
+                    ToolButton {
+                        id: closeButton
+                        implicitWidth: 38
+                        implicitHeight: 38
+                        Accessible.name: "Close settings"
+                        enabled: !Config.writesPaused
+                        onClicked: root.close()
+                        background: Rectangle {
+                            radius: 19
+                            color: closeButton.down ? Appearance.m3colors.m3secondaryContainer
+                                : closeButton.hovered ? Appearance.m3colors.m3surfaceContainerHighest
+                                : root.isLight ? Appearance.m3colors.m3surfaceContainerLowest : Appearance.m3colors.m3surfaceContainerHigh
+                            border.width: closeButton.visualFocus ? 2 : 1
+                            border.color: closeButton.visualFocus ? Appearance.m3colors.m3primary : Qt.alpha(Appearance.m3colors.m3outlineVariant, 0.7)
+                            Behavior on color { ColorAnimation { duration: 120 } }
+                        }
+                        contentItem: MaterialSymbol {
+                            text: "close"
+                            iconSize: 19
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            color: closeButton.down ? Appearance.m3colors.m3onSecondaryContainer : Appearance.m3colors.m3onSurface
+                        }
+                    }
                 }
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: root.currentPage !== "memory" || root.searching || !!Config.writeError || Config.writesPaused
-                    spacing: 10
-                    StyledText {
+            }
+
+            StackLayout {
+                id: stack
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: !Config.ready ? 4 : root.searching ? 2 : root.currentPage === "home" ? 0 : root.currentPage === "design" ? 1 : root.currentPage === "about" ? 3 : 2
+                SettingsHome { onNavigate: id => root.navigate(id) }
+                DesignPage {
+                    id: designPage
+                    requestedSection: root.designSection
+                    onEdited: path => { root.feedback = "Saved · " + (Catalog.entries.find(e => e.path === path)?.title ?? "Setting"); }
+                }
+                CatalogPage {
+                    id: catalogPage
+                    effectsEditor: designPage.effectsEditor
+                    pageId: root.currentPage
+                    query: root.query
+                    writable: !Config.writesPaused
+                    onNavigate: id => root.navigate(id)
+                    onEdited: path => { root.feedback = "Saved · " + (Catalog.entries.find(e => e.path === path)?.title ?? "Setting"); }
+                }
+                Loader { id: about; active: root.aboutVisited; source: "modules/settings/About.qml" }
+                BusyIndicator { running: !Config.ready }
+            }
+
+            // Pinned bottom bar (Memory draft OR Design staged Apply/Reset OR subtle status bar)
+            Rectangle {
+                id: footerBar
+                Layout.fillWidth: true
+                readonly property bool showMemoryBar: MemoryLockDraft.initialized && (root.currentPage === "memory" || MemoryLockDraft.dirty || MemoryLockDraft.applying)
+                readonly property bool showDesignApply: (root.currentPage === "design" || root.searching) && designPage.effectsDirty
+                readonly property bool showStatusBar: root.currentPage !== "memory" || root.searching || !!Config.writeError || Config.writesPaused
+                visible: showMemoryBar || showStatusBar
+                implicitHeight: footerCol.implicitHeight + 18
+                color: showDesignApply ? Appearance.m3colors.m3secondaryContainer : root.railColor
+                Behavior on color { ColorAnimation { duration: 160 } }
+
+                Rectangle {
+                    anchors { left: parent.left; right: parent.right; top: parent.top }
+                    height: 1
+                    color: Qt.alpha(Appearance.m3colors.m3outlineVariant, 0.45)
+                }
+
+                ColumnLayout {
+                    id: footerCol
+                    anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; leftMargin: 24; rightMargin: 20 }
+                    spacing: 8
+
+                    RowLayout {
+                        visible: footerBar.showMemoryBar
                         Layout.fillWidth: true
-                        text: root.searching && designPage.effectsDirty ? "Unapplied animation edits" : root.currentPage === "memory" ? "Memory-lock edits apply together with Apply all. Browsing never changes locks." : Config.writeError ? Config.writeError : Config.writesPaused ? "Applying desktop fonts…" : root.currentPage === "design" && !root.searching ? designPage.effectsDirty ? "Unapplied GPU / animation edits" : designPage.effectsStatus + " · Color and shell controls save immediately." : root.feedback
-                        wrapMode: Text.WordWrap
-                        font.pixelSize: 11
-                        color: Appearance.m3colors.m3onSurfaceVariant
+                        spacing: 10
+                        BusyIndicator { running: MemoryLockDraft.applying || MemoryLockDraft.checking; visible: running; implicitWidth: 22; implicitHeight: 22 }
+                        StyledText {
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 30
+                            text: MemoryLockDraft.applying ? "Applying… New edits stay in the next draft."
+                                : MemoryLockDraft.checking ? "Checking selected groups…"
+                                : MemoryLockDraft.needsReview && !MemoryLockDraft.acknowledged ? "Review group warnings to apply"
+                                : MemoryLockDraft.dirty ? "Changes not applied" : "No pending changes"
+                            wrapMode: Text.WordWrap
+                            font.pixelSize: 12
+                        }
+                        MemoryActionButton {
+                            objectName: "memoryReview"
+                            visible: MemoryLockDraft.operations.length > 0 || MemoryLockDraft.needsReview
+                            text: "Review (" + MemoryLockDraft.operations.length + ")"
+                            onClicked: {
+                                if (root.currentPage !== "memory" || root.searching) root.navigate("memory");
+                                Qt.callLater(() => catalogPage.showMemoryReview());
+                            }
+                        }
+                        MemoryActionButton { objectName: "memoryDiscard"; text: "Discard"; enabled: !MemoryLockDraft.applying && MemoryLockDraft.dirty; onClicked: MemoryLockDraft.discard() }
+                        MemoryActionButton { objectName: "memoryApplyAll"; text: MemoryLockDraft.applying ? "Applying…" : "Apply all"; prominent: true; enabled: MemoryLockDraft.canApply; onClicked: MemoryLockDraft.applyAll() }
                     }
-                    SettingsButton {
-                        objectName: "designReset"
-                        visible: (root.currentPage === "design" || root.searching) && designPage.effectsDirty
-                        enabled: !designPage.effectsBusy && !Config.writesPaused
-                        text: "Reset edits"
-                        onClicked: designPage.resetEffects()
-                    }
-                    SettingsButton {
-                        objectName: "designApply"
-                        visible: (root.currentPage === "design" || root.searching) && designPage.effectsDirty
-                        enabled: !designPage.effectsBusy && !Config.writesPaused
-                        text: "Apply custom changes"
-                        onClicked: designPage.applyEffects()
+
+                    RowLayout {
+                        visible: footerBar.showStatusBar
+                        Layout.fillWidth: true
+                        spacing: 10
+                        MaterialSymbol {
+                            visible: footerBar.showDesignApply
+                            text: "pending_actions"
+                            iconSize: 18
+                            color: Appearance.m3colors.m3onSecondaryContainer
+                        }
+                        StyledText {
+                            Layout.fillWidth: true
+                            text: root.searching && designPage.effectsDirty ? "Unapplied GPU / animation edits"
+                                : root.currentPage === "memory" ? "Memory-lock edits apply together with Apply all. Browsing never changes locks."
+                                : Config.writeError ? Config.writeError
+                                : Config.writesPaused ? "Applying desktop fonts…"
+                                : root.currentPage === "design" && !root.searching
+                                    ? (designPage.effectsDirty ? "You have unapplied GPU or animation edits" : designPage.effectsStatus + " · Color and shell changes save immediately.")
+                                : root.feedback
+                            wrapMode: Text.WordWrap
+                            font.pixelSize: 12
+                            font.weight: footerBar.showDesignApply ? Font.Medium : Font.Normal
+                            color: Config.writeError ? Appearance.m3colors.m3error
+                                : footerBar.showDesignApply ? Appearance.m3colors.m3onSecondaryContainer
+                                : Appearance.m3colors.m3onSurfaceVariant
+                        }
+                        SettingsButton {
+                            objectName: "designReset"
+                            visible: footerBar.showDesignApply
+                            enabled: !designPage.effectsBusy && !Config.writesPaused
+                            implicitHeight: 36
+                            text: "Reset edits"
+                            onClicked: designPage.resetEffects()
+                        }
+                        SettingsButton {
+                            objectName: "designApply"
+                            prominent: true
+                            visible: footerBar.showDesignApply
+                            enabled: !designPage.effectsBusy && !Config.writesPaused
+                            implicitHeight: 36
+                            text: "Apply custom changes"
+                            onClicked: designPage.applyEffects()
+                        }
                     }
                 }
             }
         }
     }
+
     IpcHandler {
         target: "settings"
         function open(page: string): void { if (Catalog.pages.some(p => p.id === Catalog.canonicalPage(page))) root.navigate(page); }

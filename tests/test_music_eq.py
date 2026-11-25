@@ -61,11 +61,15 @@ class MusicEqTests(unittest.TestCase):
     def test_gain_and_eq_readback(self):
         with tempfile.TemporaryDirectory() as d,patch.object(m,'PRESETS',Path(d)):
             m.write(Path(d)/'auto.json',{'output':{'limiter#0':{},'equalizer#0':{'input-gain':-5}}})
-            with patch.object(m,'exchange',side_effect=['','auto','','-1','-5']) as query:
+            with patch.object(m,'exchange',side_effect=['','auto','','-1.0','-5']) as query:
                 m.apply('auto','-1')
                 self.assertIn(unittest.mock.call('set_property:output:limiter:0:outputGain:-1'),query.call_args_list)
             with patch.object(m,'exchange',side_effect=['','auto','','-2']):
                 with self.assertRaises(RuntimeError): m.apply('auto','-1')
+
+    def test_service_uses_restart_always(self):
+        unit = (Path(__file__).resolve().parents[1] / 'dots/.config/systemd/user/music-eq.service').read_text()
+        self.assertIn('Restart=always', unit)
 
     def test_mpv_source_and_toggle(self):
         w=m.Watcher.__new__(m.Watcher)

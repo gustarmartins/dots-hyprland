@@ -48,6 +48,8 @@ rule({
     no_shadow = true,
     no_anim = true,
     opaque = true,
+    rounding = 0,
+    border_size = 0,
 })
 
 local game_classes_file = io.open(os.getenv("HOME") .. "/.config/hypr/custom/game_classes.txt", "r")
@@ -96,7 +98,7 @@ hl.layer_rule({
 -- MKW presentation: avoid desktop decoration work on the game surface.
 rule({
     name = "mekki_mkw_presentation",
-    match = { class = "^Eglantine$", title = ".*Mario Kart World.*" },
+    match = { class = "^(dev\\.eglantine\\.eglantine|Eglantine|eglantine)$", title = ".*Mario Kart World.*" },
     content = "game",
     idle_inhibit = "fullscreen",
     no_blur = true,

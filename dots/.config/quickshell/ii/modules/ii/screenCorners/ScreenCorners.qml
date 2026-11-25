@@ -150,26 +150,40 @@ Scope {
             property HyprlandMonitor monitor: Hyprland.monitorFor(modelData)
 
             property bool fullscreen: HyprlandData.monitorHasFullscreen(modelData?.name ?? "")
+            readonly property bool cornersActive: Config.options.appearance.fakeScreenRounding === 1
+                || (Config.options.appearance.fakeScreenRounding === 2 && !fullscreen)
 
-            CornerPanelWindow {
-                screen: modelData
-                corner: RoundCorner.CornerEnum.TopLeft
-                fullscreen: monitorScope.fullscreen
+            LazyLoader {
+                active: monitorScope.cornersActive
+                component: CornerPanelWindow {
+                    screen: monitorScope.modelData
+                    corner: RoundCorner.CornerEnum.TopLeft
+                    fullscreen: monitorScope.fullscreen
+                }
             }
-            CornerPanelWindow {
-                screen: modelData
-                corner: RoundCorner.CornerEnum.TopRight
-                fullscreen: monitorScope.fullscreen
+            LazyLoader {
+                active: monitorScope.cornersActive
+                component: CornerPanelWindow {
+                    screen: monitorScope.modelData
+                    corner: RoundCorner.CornerEnum.TopRight
+                    fullscreen: monitorScope.fullscreen
+                }
             }
-            CornerPanelWindow {
-                screen: modelData
-                corner: RoundCorner.CornerEnum.BottomLeft
-                fullscreen: monitorScope.fullscreen
+            LazyLoader {
+                active: monitorScope.cornersActive
+                component: CornerPanelWindow {
+                    screen: monitorScope.modelData
+                    corner: RoundCorner.CornerEnum.BottomLeft
+                    fullscreen: monitorScope.fullscreen
+                }
             }
-            CornerPanelWindow {
-                screen: modelData
-                corner: RoundCorner.CornerEnum.BottomRight
-                fullscreen: monitorScope.fullscreen
+            LazyLoader {
+                active: monitorScope.cornersActive
+                component: CornerPanelWindow {
+                    screen: monitorScope.modelData
+                    corner: RoundCorner.CornerEnum.BottomRight
+                    fullscreen: monitorScope.fullscreen
+                }
             }
         }
     }

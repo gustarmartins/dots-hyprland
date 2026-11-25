@@ -2,9 +2,11 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs
+import qs.services
 import qs.modules.common
 import qs.modules.common.functions
 import qs.modules.common.widgets.widgetCanvas
+import "../WidgetPlacement.js" as WidgetPlacement
 
 AbstractWidget {
     id: root
@@ -15,6 +17,12 @@ AbstractWidget {
     required property int scaledScreenWidth
     required property int scaledScreenHeight
     required property real wallpaperScale
+    property int monitorId: -1
+    property real monitorX: 0
+    property real monitorY: 0
+    property var monitorReserved: [0, 0, 0, 0]
+    property int activeWorkspaceId: -1
+    property var avoidRects: []
     property bool visibleWhenLocked: false
     property var configEntry: Config.options.background.widgets[configEntryName]
     property string placementStrategy: configEntry.placementStrategy
@@ -22,19 +30,52 @@ AbstractWidget {
     property real canvasOffsetY: 0
     property bool centerOnScreen: false
     property point automaticCenter: Qt.point(NaN, NaN)
-    readonly property real positionOffsetX: placementStrategy === "free" || centerOnScreen ? -canvasOffsetX : 0
-    readonly property real positionOffsetY: placementStrategy === "free" || centerOnScreen ? -canvasOffsetY : 0
-    readonly property real targetX: clampPosition(placementStrategy !== "free" && isFinite(automaticCenter.x)
-        ? automaticCenter.x - width / 2 : configEntry.x, scaledScreenWidth - width)
-    readonly property real targetY: clampPosition(placementStrategy !== "free" && isFinite(automaticCenter.y)
-        ? automaticCenter.y - height / 2 : configEntry.y, scaledScreenHeight - height)
-    readonly property real placedX: (centerOnScreen ? (screenWidth - width) / 2 : targetX) + positionOffsetX
-    readonly property real placedY: (centerOnScreen ? (screenHeight - height) / 2 : targetY) + positionOffsetY
+    property point openSpaceCenter: Qt.point(NaN, NaN)
+
+    readonly property bool useOpenSpace: placementStrategy === "avoidWindows"
+        && isFinite(openSpaceCenter.x) && isFinite(openSpaceCenter.y)
+    readonly property bool useWallpaperAuto: placementStrategy !== "free"
+        && isFinite(automaticCenter.x) && isFinite(automaticCenter.y)
+    readonly property real targetX: clampPosition(useOpenSpace
+        ? openSpaceCenter.x - width / 2
+        : useWallpaperAuto ? automaticCenter.x - width / 2 : configEntry.x,
+        scaledScreenWidth - width)
+    readonly property real targetY: clampPosition(useOpenSpace
+        ? openSpaceCenter.y - height / 2
+        : useWallpaperAuto ? automaticCenter.y - height / 2 : configEntry.y,
+        scaledScreenHeight - height)
+
+    property real animatedTargetX: targetX
+    property real animatedTargetY: targetY
+    Behavior on animatedTargetX {
+        enabled: root.placementStrategy !== "free" && !root.centerOnScreen && !root.drag.active
+        animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
+    }
+    Behavior on animatedTargetY {
+        enabled: root.placementStrategy !== "free" && !root.centerOnScreen && !root.drag.active
+        animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
+    }
+
+    readonly property bool pinToScreen: placementStrategy === "free" || placementStrategy === "avoidWindows" || centerOnScreen
+    readonly property real clampedParallaxX: clampPosition(animatedTargetX + canvasOffsetX, screenWidth - width) - animatedTargetX
+    readonly property real clampedParallaxY: clampPosition(animatedTargetY + canvasOffsetY, screenHeight - height) - animatedTargetY
+    readonly property real positionOffsetX: pinToScreen ? -canvasOffsetX : clampedParallaxX - canvasOffsetX
+    readonly property real positionOffsetY: pinToScreen ? -canvasOffsetY : clampedParallaxY - canvasOffsetY
+    readonly property real placedX: (centerOnScreen ? (screenWidth - width) / 2 : animatedTargetX) + positionOffsetX
+    readonly property real placedY: (centerOnScreen ? (screenHeight - height) / 2 : animatedTargetY) + positionOffsetY
+    readonly property var currentScreenRect: ({
+        x: placedX + canvasOffsetX,
+        y: placedY + canvasOffsetY,
+        width: width,
+        height: height,
+    })
+
     x: placedX
     y: placedY
-    // Cancel the animated canvas offset exactly, without a second animation lag.
-    animateXPos: placementStrategy !== "free"
-    animateYPos: placementStrategy !== "free"
+    // Smooth automatic placement happens on animatedTargetX/Y; keep x/y un-animated so
+    // canvas parallax cancellation and clamping never lag behind workspace transitions.
+    animateXPos: false
+    animateYPos: false
     visible: opacity > 0
     opacity: (GlobalStates.screenLocked && !visibleWhenLocked) ? 0 : 1
     Behavior on opacity {
@@ -77,16 +118,75 @@ AbstractWidget {
 
     property bool wallpaperIsVideo: Config.options.background.wallpaperPath.endsWith(".mp4") || Config.options.background.wallpaperPath.endsWith(".webm") || Config.options.background.wallpaperPath.endsWith(".mkv") || Config.options.background.wallpaperPath.endsWith(".avi") || Config.options.background.wallpaperPath.endsWith(".mov")
     property string wallpaperPath: wallpaperIsVideo ? Config.options.background.thumbnailPath : Config.options.background.wallpaperPath
-    
+
+    function recomputeOpenSpace() {
+        if (root.placementStrategy !== "avoidWindows" || GlobalStates.screenLocked) {
+            root.openSpaceCenter = Qt.point(NaN, NaN);
+            return;
+        }
+        const obstacles = WidgetPlacement.monitorObstacles(
+            HyprlandData.windowList, root.monitorId, root.monitorX, root.monitorY, root.activeWorkspaceId);
+        const combined = obstacles.concat(Array.isArray(root.avoidRects) ? root.avoidRects : []);
+        const spot = WidgetPlacement.bestOpenSpot(
+            root.screenWidth, root.screenHeight, root.monitorReserved,
+            combined, root.width || 230, root.height || 230,
+            { edgeMargin: 24, obstaclePadding: 16 });
+        root.openSpaceCenter = spot ? Qt.point(spot.x, spot.y) : Qt.point(NaN, NaN);
+    }
+
+    function scheduleOpenSpaceRefresh() {
+        if (root.placementStrategy !== "avoidWindows") {
+            openSpaceTimer.stop();
+            root.openSpaceCenter = Qt.point(NaN, NaN);
+            return;
+        }
+        openSpaceTimer.restart();
+    }
+
+    Timer {
+        id: openSpaceTimer
+        interval: 90
+        repeat: false
+        onTriggered: root.recomputeOpenSpace()
+    }
+
+    Connections {
+        target: HyprlandData
+        enabled: root.placementStrategy === "avoidWindows"
+        function onWindowListChanged() { root.scheduleOpenSpaceRefresh(); }
+    }
+
+    onMonitorIdChanged: scheduleOpenSpaceRefresh()
+    onMonitorXChanged: scheduleOpenSpaceRefresh()
+    onMonitorYChanged: scheduleOpenSpaceRefresh()
+    onMonitorReservedChanged: scheduleOpenSpaceRefresh()
+    onActiveWorkspaceIdChanged: scheduleOpenSpaceRefresh()
+    onAvoidRectsChanged: scheduleOpenSpaceRefresh()
+    onWidthChanged: scheduleOpenSpaceRefresh()
+    onHeightChanged: scheduleOpenSpaceRefresh()
+
     onWallpaperPathChanged: refreshPlacementIfNeeded()
-    onPlacementStrategyChanged: refreshPlacementIfNeeded()
+    onScaledScreenWidthChanged: refreshPlacementIfNeeded()
+    onScaledScreenHeightChanged: refreshPlacementIfNeeded()
+    onPlacementStrategyChanged: {
+        refreshPlacementIfNeeded();
+        scheduleOpenSpaceRefresh();
+    }
+    Component.onCompleted: {
+        refreshPlacementIfNeeded();
+        scheduleOpenSpaceRefresh();
+    }
     Connections {
         target: Config
-        function onReadyChanged() { refreshPlacementIfNeeded() }
+        function onReadyChanged() {
+            root.refreshPlacementIfNeeded();
+            root.scheduleOpenSpaceRefresh();
+        }
     }
     function refreshPlacementIfNeeded() {
         if (!Config.ready) return;
         if (root.placementStrategy === "free" && !root.needsColText) return;
+        if (!root.wallpaperPath) return;
         leastBusyRegionProc.wallpaperPath = root.wallpaperPath;
         leastBusyRegionProc.running = false;
         leastBusyRegionProc.running = true;
@@ -114,13 +214,16 @@ AbstractWidget {
             id: leastBusyRegionOutputCollector
             onStreamFinished: {
                 const output = leastBusyRegionOutputCollector.text;
-                // console.log("[Background] Least busy region output:", output)
                 if (output.length === 0) return;
-                const parsedContent = JSON.parse(output);
-                root.dominantColor = parsedContent.dominant_color || Appearance.colors.colPrimary;
-                if (root.placementStrategy === "free") return;
-                root.automaticCenter = Qt.point(parsedContent.center_x * root.wallpaperScale,
-                    parsedContent.center_y * root.wallpaperScale);
+                try {
+                    const parsedContent = JSON.parse(output);
+                    root.dominantColor = parsedContent.dominant_color || Appearance.colors.colPrimary;
+                    if (root.placementStrategy === "free") return;
+                    root.automaticCenter = Qt.point(parsedContent.center_x * root.wallpaperScale,
+                        parsedContent.center_y * root.wallpaperScale);
+                } catch (error) {
+                    console.warn("[Background] Failed to parse placement output:", error);
+                }
             }
         }
     }

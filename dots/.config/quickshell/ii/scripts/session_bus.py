@@ -7,8 +7,10 @@ to the same bus without causing a shell restart.
 """
 import argparse
 import asyncio
+import ctypes
 import json
 import os
+import signal
 import sys
 
 from dbus_fast import Message, MessageType
@@ -56,7 +58,26 @@ async def ready(timeout):
             delay = min(delay * 2, 4)
 
 
+def bind_parent_death(owner_pid):
+    """Ensure this helper exits automatically if its parent Quickshell crashes."""
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        # PR_SET_PDEATHSIG = 1
+        libc.prctl(1, signal.SIGTERM, 0, 0, 0)
+    except OSError:
+        return
+    # Guard against parent already dying before prctl ran (reparented to PID 1).
+    if os.getppid() == 1:
+        try:
+            os.kill(owner_pid, 0)
+        except ProcessLookupError:
+            sys.exit(0)
+        except PermissionError:
+            pass
+
+
 async def watch(pid):
+    bind_parent_death(pid)
     delay = .25
     while True:
         bus = None

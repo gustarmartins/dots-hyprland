@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Reconcile the same native SDR profiles used at login, without restarting
 # Hyprland or removing outputs/workspaces from the layout.
-runtime_dir=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 monitor_config="$HOME/.config/hypr/monitors.lua"
 # Keep IPC failure bounded so the EXIT trap can restore input wake settings.
 hyprctl() { command timeout 5 hyprctl "$@"; }
@@ -283,6 +283,14 @@ case "$mode" in cycle|sleep|wake|apply|status|verify) ;; -h|--help|help) usage; 
 if [[ "$off_explicit" == true && "$mode" != cycle && "$mode" != sleep ]]; then
     echo '--off-seconds applies only to cycle or sleep.' >&2; exit 2
 fi
+if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    if ! instance=$(hyprctl instances -j | jq -er '
+        select(type == "array" and length == 1) | .[0].instance | strings | select(length > 0)'); then
+        echo 'Could not identify a single Hyprland session. Set HYPRLAND_INSTANCE_SIGNATURE to select one.' >&2
+        exit 1
+    fi
+    export HYPRLAND_INSTANCE_SIGNATURE="$instance"
+fi
 if [[ -n "$target" ]]; then
     [[ "$target" =~ ^[A-Za-z0-9_.:-]+$ ]] || { echo 'Invalid output name' >&2; exit 2; }
     case "$mode" in cycle|sleep|wake) ;; *) echo 'OUTPUT is only supported for cycle/sleep/wake.' >&2; exit 2 ;; esac
@@ -291,7 +299,7 @@ fi
 
 # Read-only inspection remains available during a cycle.
 case "$mode" in status|verify) ;; *)
-    exec 9>"$runtime_dir/refresh-displays.lock"
+    exec 9>"$XDG_RUNTIME_DIR/refresh-displays.lock"
     flock -n 9 || { echo 'A display refresh is already running.' >&2; exit 1; }
 esac
 

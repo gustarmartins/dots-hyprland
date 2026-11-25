@@ -45,7 +45,11 @@ elif tool == 'hyprsunsetctl':
     if args[0] == 'identity': s['color']['identity'] = args[1]
     else: s['color'][args[0]] = args[1]
 elif tool == 'hyprctl':
-    if args[0] == 'monitors' or args == ['-j', 'monitors']: result = json.dumps(s['monitors'])
+    if args == ['instances', '-j']:
+        result = json.dumps([{'instance': sig} for sig in s.get('instances', ['test-instance'])])
+    elif not os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'):
+        raise RuntimeError('missing compositor instance')
+    elif args[0] == 'monitors' or args == ['-j', 'monitors']: result = json.dumps(s['monitors'])
     elif args[:2] == ['-j', 'getoption']:
         result = (json.dumps({'int': s['global_vrr']}) if args[2] == 'misc:vrr'
                   else json.dumps({'bool': s['options'][args[2].split(':')[1]]}))
@@ -181,6 +185,17 @@ class DisplayRecovery(unittest.TestCase):
         self.assertTrue(all('monitor = "DP-1"' in code for _, code in transitions))
         self.assertEqual(state['applied'], ['DP-1'])
         self.assert_restored()
+
+    def test_sleep_without_shell_instance_uses_only_session(self):
+        self.env.pop('HYPRLAND_INSTANCE_SIGNATURE', None)
+        self.run_command('sleep')
+        self.assertTrue(all(not m['dpmsStatus'] for m in self.state()['monitors']))
+
+    def test_ambiguous_instance_keeps_outputs_awake(self):
+        self.env.pop('HYPRLAND_INSTANCE_SIGNATURE', None)
+        self.update(instances=['session-a', 'session-b'])
+        self.run_command('sleep', expected=1)
+        self.assertTrue(all(m['dpmsStatus'] for m in self.state()['monitors']))
 
     def test_sleep_stays_off_and_wake_is_idempotent(self):
         self.run_command('sleep')

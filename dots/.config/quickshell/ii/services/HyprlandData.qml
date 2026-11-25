@@ -146,6 +146,35 @@ Singleton {
         return preferredScreenName ?? "";
     }
 
+    function isGameClient(win) {
+        if (!win)
+            return false;
+        if (String(win.contentType ?? "").toLowerCase() === "game")
+            return true;
+        return Array.isArray(win.tags) && win.tags.some(tag => String(tag).replace(/\*$/, "") === "gamemode");
+    }
+
+    function monitorHasGame(screenName) {
+        if (!screenName)
+            return false;
+        if (root.monitorHasFullscreen(screenName))
+            return true;
+        const monitor = root.monitors.find(mon => mon.name === screenName);
+        if (!monitor)
+            return false;
+        return root.windowList.some(win => win.monitor === monitor.id && root.isGameClient(win));
+    }
+
+    function anyMonitorHasGame() {
+        return root.anyMonitorHasFullscreen() || root.windowList.some(win => root.isGameClient(win));
+    }
+
+    function allMonitorsHaveFullscreen() {
+        if (!root.monitorsReady || !root.workspacesReady || root.monitors.length === 0)
+            return false;
+        return root.monitors.every(mon => root.monitorHasFullscreen(mon.name));
+    }
+
     function anyMonitorHasFullscreen() {
         if (!root.monitorsReady || !root.workspacesReady)
             return true;

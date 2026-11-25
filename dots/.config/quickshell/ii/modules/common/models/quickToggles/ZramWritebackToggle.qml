@@ -14,6 +14,9 @@ QuickToggleModel {
     statusText: budget
     toggled: budget.startsWith("Cap reached")
     altActionOnRightClick: true
+    altActionRequiresHold: true
+    altHoldDurationMs: 1100
+    altHoldLabel: Translation.tr("Writeback all")
 
     mainAction: () => {
         Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh writeback-cold"])
@@ -52,5 +55,5 @@ QuickToggleModel {
         onTriggered: fetchBudget.running = true
     }
 
-    tooltipText: Translation.tr("Left: guarded writeback using the configured idle age and budget. Right: emergency writeback; warning is shown, action proceeds.")
+    tooltipText: Translation.tr("Left: guarded writeback using the configured idle age and budget. Hold right-click: emergency writeback all.")
 }

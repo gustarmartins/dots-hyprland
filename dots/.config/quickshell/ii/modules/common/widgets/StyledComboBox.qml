@@ -15,6 +15,7 @@ ComboBox {
     property color colBackground: Appearance.colors.colSecondaryContainer
     property color colBackgroundHover: Appearance.colors.colSecondaryContainerHover
     property color colBackgroundActive: Appearance.colors.colSecondaryContainerActive
+    property color colText: Appearance.colors.colOnSecondaryContainer
 
     implicitHeight: 40
     Layout.fillWidth: true
@@ -39,7 +40,7 @@ ComboBox {
         y: root.height / 2 - height / 2
         text: "keyboard_arrow_down"
         iconSize: Appearance.font.pixelSize.larger
-        color: Appearance.colors.colOnSecondaryContainer
+        color: root.colText
 
         rotation: root.popup.visible ? 180 : 0
         Behavior on rotation {
@@ -70,14 +71,14 @@ ComboBox {
                         return root.buttonIcon;
                     }
                     iconSize: Appearance.font.pixelSize.larger
-                    color: Appearance.colors.colOnSecondaryContainer
+                    color: root.colText
                 }
             }
 
             StyledText {
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
-                color: Appearance.colors.colOnSecondaryContainer
+                color: root.colText
                 text: root.displayText
                 elide: Text.ElideRight
                 verticalAlignment: Text.AlignVCenter
@@ -89,21 +90,30 @@ ComboBox {
         id: itemDelegate
         width: ListView.view ? ListView.view.width : root.width
         implicitHeight: 40
+        highlighted: root.highlightedIndex === itemDelegate.index
+        hoverEnabled: root.hoverEnabled
 
         required property var model
         required property int index
+        readonly property bool isActive: itemDelegate.hovered || itemDelegate.highlighted
+        readonly property string itemLabel: {
+            const raw = root.textRole ? itemDelegate.model[root.textRole] : itemDelegate.model.modelData;
+            if (raw !== undefined && raw !== null) return String(raw);
+            const fallback = itemDelegate.model[root.textRole];
+            return fallback !== undefined && fallback !== null ? String(fallback) : "";
+        }
         property color color: {
             if (root.currentIndex === itemDelegate.index) {
                 if (itemDelegate.down) return Appearance.colors.colSecondaryContainerActive;
-                if (itemDelegate.hovered) return Appearance.colors.colSecondaryContainerHover;
+                if (itemDelegate.isActive) return Appearance.colors.colSecondaryContainerHover;
                 return Appearance.colors.colSecondaryContainer;
             } else {
-                if (itemDelegate.down) return Appearance.colors.colLayer3Active;
-                if (itemDelegate.hovered) return Appearance.colors.colLayer3Hover;
+                if (itemDelegate.down) return Appearance.colors.colSurfaceContainerHighestActive;
+                if (itemDelegate.isActive) return Appearance.m3colors.m3surfaceContainerHighest;
                 return ColorUtils.transparentize(Appearance.colors.colLayer3);
             }
         }
-        property color colText: (root.currentIndex === itemDelegate.index) ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnLayer3
+        property color colText: (root.currentIndex === itemDelegate.index) ? Appearance.colors.colOnSecondaryContainer : Appearance.m3colors.m3onSurface
 
         background: Rectangle {
             anchors.fill: parent
@@ -150,7 +160,7 @@ ComboBox {
                 Layout.fillWidth: true
                 Layout.preferredHeight: Appearance.font.pixelSize.larger
                 color: itemDelegate.colText
-                text: itemDelegate.model[root.textRole]
+                text: itemDelegate.itemLabel
                 elide: Text.ElideRight
                 verticalAlignment: Text.AlignVCenter
             }
@@ -192,7 +202,9 @@ ComboBox {
                 id: popupBackground
                 anchors.fill: parent
                 radius: Appearance.rounding.normal
-                color: Appearance.m3colors.m3surfaceContainerHigh
+                color: Appearance.m3colors.m3surfaceContainer
+                border.width: 1
+                border.color: Appearance.m3colors.m3outlineVariant
             }
         }
 

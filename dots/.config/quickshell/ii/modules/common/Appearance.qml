@@ -28,7 +28,7 @@ Singleton {
     property real autoBackgroundTransparency: { // y = 0.5768x^2 - 0.759x + 0.2896
         let x = wallpaperVibrancy
         let y = 0.5768 * (x * x) - 0.759 * (x) + 0.2896
-        return Math.max(0, Math.min(0.22, y)) - 0.12 * (m3colors.darkmode ? 0 : 1)
+        return Math.max(0, Math.min(0.22, y) - 0.12 * (m3colors.darkmode ? 0 : 1))
     }
     property real autoContentTransparency: 0.9
     property real backgroundTransparency: Config?.options.appearance.transparency.enable ? Config?.options.appearance.transparency.automatic ? autoBackgroundTransparency : Config?.options.appearance.transparency.backgroundTransparency : 0
@@ -86,10 +86,10 @@ Singleton {
         property color m3tertiaryFixedDim: "#d1c3c6"
         property color m3onTertiaryFixed: "#211a1c"
         property color m3onTertiaryFixedVariant: "#4e4447"
-        property color m3success: "#B5CCBA"
-        property color m3onSuccess: "#213528"
-        property color m3successContainer: "#374B3E"
-        property color m3onSuccessContainer: "#D1E9D6"
+        property color m3success: darkmode ? "#B5CCBA" : "#2E6B42"
+        property color m3onSuccess: darkmode ? "#213528" : "#FFFFFF"
+        property color m3successContainer: darkmode ? "#374B3E" : "#C8EED3"
+        property color m3onSuccessContainer: darkmode ? "#D1E9D6" : "#0C381D"
         property color term0: "#EDE4E4"
         property color term1: "#B52755"
         property color term2: "#A97363"
@@ -114,16 +114,16 @@ Singleton {
         property color colLayer0Base: ColorUtils.mix(m3colors.m3background, m3colors.m3primary, Config.options.appearance.extraBackgroundTint ? 0.99 : 1)
         property color colLayer0: ColorUtils.transparentize(colLayer0Base, root.backgroundTransparency)
         property color colOnLayer0: m3colors.m3onBackground
-        property color colLayer0Hover: ColorUtils.transparentize(ColorUtils.mix(colLayer0, colOnLayer0, 0.9, root.contentTransparency))
-        property color colLayer0Active: ColorUtils.transparentize(ColorUtils.mix(colLayer0, colOnLayer0, 0.8, root.contentTransparency))
+        property color colLayer0Hover: ColorUtils.transparentize(ColorUtils.mix(colLayer0Base, colOnLayer0, 0.92), root.backgroundTransparency)
+        property color colLayer0Active: ColorUtils.transparentize(ColorUtils.mix(colLayer0Base, colOnLayer0, 0.86), root.backgroundTransparency)
         property color colLayer0Border: ColorUtils.mix(root.m3colors.m3outlineVariant, colLayer0, 0.4)
         // Layer 1
         property color colLayer1Base: m3colors.m3surfaceContainerLow
         property color colLayer1: ColorUtils.solveOverlayColor(colLayer0Base, colLayer1Base, 1 - root.contentTransparency);
         property color colOnLayer1: m3colors.m3onSurfaceVariant;
         property color colOnLayer1Inactive: ColorUtils.mix(colOnLayer1, colLayer1, 0.45);
-        property color colLayer1Hover: ColorUtils.transparentize(ColorUtils.mix(colLayer1, colOnLayer1, 0.92), root.contentTransparency)
-        property color colLayer1Active: ColorUtils.transparentize(ColorUtils.mix(colLayer1, colOnLayer1, 0.85), root.contentTransparency);
+        property color colLayer1Hover: ColorUtils.solveOverlayColor(colLayer0Base, ColorUtils.mix(colLayer1Base, colOnLayer1, 0.92), 1 - root.contentTransparency)
+        property color colLayer1Active: ColorUtils.solveOverlayColor(colLayer0Base, ColorUtils.mix(colLayer1Base, colOnLayer1, 0.84), 1 - root.contentTransparency);
         // Layer 2
         property color colLayer2Base: m3colors.m3surfaceContainer
         property color colLayer2: ColorUtils.solveOverlayColor(colLayer1Base, colLayer2Base, 1 - root.contentTransparency)
@@ -147,28 +147,28 @@ Singleton {
         // Primary
         property color colPrimary: m3colors.m3primary
         property color colOnPrimary: m3colors.m3onPrimary
-        property color colPrimaryHover: ColorUtils.mix(colors.colPrimary, colLayer1Hover, 0.87)
-        property color colPrimaryActive: ColorUtils.mix(colors.colPrimary, colLayer1Active, 0.7)
+        property color colPrimaryHover: ColorUtils.mix(colors.colPrimary, colors.colOnPrimary, 0.92)
+        property color colPrimaryActive: ColorUtils.mix(colors.colPrimary, colors.colOnPrimary, 0.85)
         property color colPrimaryContainer: m3colors.m3primaryContainer
-        property color colPrimaryContainerHover: ColorUtils.mix(colors.colPrimaryContainer, colors.colOnPrimaryContainer, 0.9)
-        property color colPrimaryContainerActive: ColorUtils.mix(colors.colPrimaryContainer, colors.colOnPrimaryContainer, 0.8)
+        property color colPrimaryContainerHover: ColorUtils.mix(colors.colPrimaryContainer, colors.colOnPrimaryContainer, 0.92)
+        property color colPrimaryContainerActive: ColorUtils.mix(colors.colPrimaryContainer, colors.colOnPrimaryContainer, 0.84)
         property color colOnPrimaryContainer: m3colors.m3onPrimaryContainer
         // Secondary
         property color colSecondary: m3colors.m3secondary
-        property color colSecondaryHover: ColorUtils.mix(m3colors.m3secondary, colLayer1Hover, 0.85)
-        property color colSecondaryActive: ColorUtils.mix(m3colors.m3secondary, colLayer1Active, 0.4)
+        property color colSecondaryHover: ColorUtils.mix(m3colors.m3secondary, m3colors.m3onSecondary, 0.92)
+        property color colSecondaryActive: ColorUtils.mix(m3colors.m3secondary, m3colors.m3onSecondary, 0.85)
         property color colOnSecondary: m3colors.m3onSecondary
         property color colSecondaryContainer: m3colors.m3secondaryContainer
-        property color colSecondaryContainerHover: ColorUtils.mix(m3colors.m3secondaryContainer, m3colors.m3onSecondaryContainer, 0.90)
-        property color colSecondaryContainerActive: ColorUtils.mix(m3colors.m3secondaryContainer, m3colors.m3onSecondaryContainer, 0.54)
+        property color colSecondaryContainerHover: ColorUtils.mix(m3colors.m3secondaryContainer, m3colors.m3onSecondaryContainer, 0.92)
+        property color colSecondaryContainerActive: ColorUtils.mix(m3colors.m3secondaryContainer, m3colors.m3onSecondaryContainer, 0.82)
         property color colOnSecondaryContainer: m3colors.m3onSecondaryContainer
         // Tertiary
         property color colTertiary: m3colors.m3tertiary
-        property color colTertiaryHover: ColorUtils.mix(m3colors.m3tertiary, colLayer1Hover, 0.85)
-        property color colTertiaryActive: ColorUtils.mix(m3colors.m3tertiary, colLayer1Active, 0.4)
+        property color colTertiaryHover: ColorUtils.mix(m3colors.m3tertiary, m3colors.m3onTertiary, 0.92)
+        property color colTertiaryActive: ColorUtils.mix(m3colors.m3tertiary, m3colors.m3onTertiary, 0.85)
         property color colTertiaryContainer: m3colors.m3tertiaryContainer
-        property color colTertiaryContainerHover: ColorUtils.mix(m3colors.m3tertiaryContainer, m3colors.m3onTertiaryContainer, 0.90)
-        property color colTertiaryContainerActive: ColorUtils.mix(m3colors.m3tertiaryContainer, colLayer1Active, 0.54)
+        property color colTertiaryContainerHover: ColorUtils.mix(m3colors.m3tertiaryContainer, m3colors.m3onTertiaryContainer, 0.92)
+        property color colTertiaryContainerActive: ColorUtils.mix(m3colors.m3tertiaryContainer, m3colors.m3onTertiaryContainer, 0.82)
         property color colOnTertiary: m3colors.m3onTertiary
         property color colOnTertiaryContainer: m3colors.m3onTertiaryContainer
         // Surface
@@ -177,8 +177,8 @@ Singleton {
         property color colSurfaceContainer: ColorUtils.solveOverlayColor(m3colors.m3surfaceContainerLow, m3colors.m3surfaceContainer, 1 - root.contentTransparency)
         property color colSurfaceContainerHigh: ColorUtils.solveOverlayColor(m3colors.m3surfaceContainer, m3colors.m3surfaceContainerHigh, 1 - root.contentTransparency)
         property color colSurfaceContainerHighest: ColorUtils.solveOverlayColor(m3colors.m3surfaceContainerHigh, m3colors.m3surfaceContainerHighest, 1 - root.contentTransparency)
-        property color colSurfaceContainerHighestHover: ColorUtils.mix(m3colors.m3surfaceContainerHighest, m3colors.m3onSurface, 0.95)
-        property color colSurfaceContainerHighestActive: ColorUtils.mix(m3colors.m3surfaceContainerHighest, m3colors.m3onSurface, 0.85)
+        property color colSurfaceContainerHighestHover: ColorUtils.mix(m3colors.m3surfaceContainerHighest, m3colors.m3onSurface, 0.94)
+        property color colSurfaceContainerHighestActive: ColorUtils.mix(m3colors.m3surfaceContainerHighest, m3colors.m3onSurface, 0.86)
         property color colOnSurface: m3colors.m3onSurface
         property color colOnSurfaceVariant: m3colors.m3onSurfaceVariant
         // Misc
@@ -189,8 +189,8 @@ Singleton {
         property color colOutline: m3colors.m3outline
         property color colOutlineVariant: m3colors.m3outlineVariant
         property color colError: m3colors.m3error
-        property color colErrorHover: ColorUtils.mix(m3colors.m3error, colLayer1Hover, 0.85)
-        property color colErrorActive: ColorUtils.mix(m3colors.m3error, colLayer1Active, 0.7)
+        property color colErrorHover: ColorUtils.mix(m3colors.m3error, m3colors.m3onError, 0.92)
+        property color colErrorActive: ColorUtils.mix(m3colors.m3error, m3colors.m3onError, 0.85)
         property color colOnError: m3colors.m3onError
         property color colErrorContainer: m3colors.m3errorContainer
         property color colErrorContainerHover: ColorUtils.mix(m3colors.m3errorContainer, m3colors.m3onErrorContainer, 0.90)

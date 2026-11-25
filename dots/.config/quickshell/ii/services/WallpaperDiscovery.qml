@@ -35,6 +35,7 @@ Singleton {
         localAttemptAt) + intervalMs
     readonly property string script: FileUtils.trimFileProtocol(Directories.scriptPath) + "/colors/random/discover_wallpaper.py"
     readonly property string stateDirectory: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/wallpaper-discovery"
+    readonly property string rotationLogPath: root.stateDirectory + "/rotation.log"
 
     readonly property string libraryScript: FileUtils.trimFileProtocol(Directories.scriptPath) + "/colors/random/wallpaper_library.py"
     function libraryAction(args) {
@@ -195,7 +196,9 @@ Singleton {
         function status(): string { return JSON.stringify({busy: root.busy, message: root.status, current: root.current,
             rotationEnabled: Config.options.background.discovery.rotate, rotationOwner: root.rotationOwner,
             intervalMinutes: Config.options.background.discovery.intervalMinutes, nextRotationAt: root.nextRotationAt,
-            queuedCount: root.library.queuedCount, libraryCount: root.library.count, libraryBytes: root.library.totalBytes, libraryError: root.libraryError}); }
+            queuedCount: root.library.queuedCount, libraryCount: root.library.count, libraryBytes: root.library.totalBytes,
+            libraryError: root.libraryError, rotationLogPath: root.library.rotationLogPath || root.rotationLogPath,
+            rotationLogCount: root.library.rotationLogCount || 0}); }
         function refreshHistory(): void { root.refreshLibrary(); }
     }
 }

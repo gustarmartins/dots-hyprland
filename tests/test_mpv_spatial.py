@@ -42,15 +42,49 @@ class Lifecycle(unittest.TestCase):
             helper.set_enabled(False)
         self.assertEqual(events[:2], ['restore','fallback'])
         self.assertEqual(events[2], ['systemctl','--user','disable','--now','mpv-spatial.service'])
-    def test_enabling_does_not_change_the_normal_default(self):
+    def test_enabling_is_on_demand_and_never_changes_default(self):
         calls=[]
-        with patch.object(helper,'sink_names',return_value={'normal','effect_input.spatial-surround'}), patch.object(helper,'default_sink',return_value='normal'), patch.object(helper,'refresh_players',return_value=[]), patch.object(helper,'run',side_effect=lambda a,**kw:calls.append(a)):
+        with patch.object(helper,'sink_names',return_value={'normal'}), patch.object(helper,'default_sink',return_value='normal'), patch.object(helper,'refresh_players',return_value=[]), patch.object(helper,'any_active_spatial_player',return_value=False), patch.object(helper,'active',return_value=False), patch.object(helper,'run',side_effect=lambda a,**kw:calls.append(a)):
             helper.set_enabled(True)
-        self.assertEqual(calls,[['systemctl','--user','enable','--now','mpv-spatial.service']])
+        self.assertTrue(helper.config()['enabled'])
+        self.assertEqual(calls,[['systemctl','--user','disable','mpv-spatial.service']])
+
+    def test_acquire_starts_sink_without_changing_default_and_release_stops_when_idle(self):
+        helper.save({'enabled':True,'automatic':True})
+        calls=[]
+        sinks_state=[{'normal'}]
+        def fake_run(args, **kw):
+            calls.append(args)
+            if args == ['systemctl','--user','start','mpv-spatial.service']:
+                sinks_state[0] = {'normal', helper.TARGET}
+            elif args == ['systemctl','--user','stop','mpv-spatial.service']:
+                sinks_state[0] = {'normal'}
+            return subprocess.CompletedProcess(args, 0, '', '')
+        with patch.object(helper,'sink_names',side_effect=lambda: set(sinks_state[0])), \
+             patch.object(helper,'default_sink',return_value='normal'), \
+             patch.object(helper,'run',side_effect=fake_run):
+            helper.acquire_sink()
+        self.assertIn(['systemctl','--user','start','mpv-spatial.service'], calls)
+        self.assertFalse(any('set-default-sink' in a for a in calls))
+
+        # Active player keeps the sink alive; idle/paused releases and stops service.
+        with patch.object(helper,'any_active_spatial_player',return_value=True):
+            self.assertFalse(helper.release_sink())
+        with patch.object(helper,'any_active_spatial_player',return_value=False), \
+             patch.object(helper,'restore_players',return_value=[]) as restore_mock, \
+             patch.object(helper,'clear_sink_users') as clear_mock, \
+             patch.object(helper,'active',return_value=True), \
+             patch.object(helper,'sink_names',side_effect=lambda: set(sinks_state[0])), \
+             patch.object(helper,'run',side_effect=fake_run):
+            self.assertTrue(helper.release_sink())
+            restore_mock.assert_called_once_with(only_idle=True, exclude_pid=None)
+            clear_mock.assert_called_once()
+        self.assertIn(['systemctl','--user','stop','mpv-spatial.service'], calls)
+
     def test_failed_start_restores_off_choice(self):
         helper.save({'enabled':False,'automatic':False,'owner_note':'keep'})
         def command(args,**kw):
-            if 'enable' in args: raise RuntimeError('fixture startup failure')
+            if 'disable' in args: raise RuntimeError('fixture startup failure')
         with patch.object(helper,'sink_names',return_value={'normal'}), patch.object(helper,'default_sink',return_value='normal'), patch.object(helper,'restore_players',return_value=[]), patch.object(helper,'clear_sink_users'), patch.object(helper,'run',side_effect=command):
             with self.assertRaises(RuntimeError): helper.set_enabled(True)
         self.assertEqual(helper.config(),{'enabled':False,'automatic':False,'owner_note':'keep'})
@@ -65,6 +99,41 @@ class Lifecycle(unittest.TestCase):
             helper.clear_sink_users({'previous_default_sink':'normal'})
         self.assertEqual([a for a in calls if 'move-sink-input' in a],[['pactl','move-sink-input','20','normal']])
         self.assertFalse(any('set-default-sink' in a for a in calls))
+
+    def test_hdmi_dolby_eld_detection(self):
+        asound = self.root / 'asound/card0'
+        asound.mkdir(parents=True)
+        (asound / 'eld#0.0').write_text(
+            'monitor_present\t1\neld_valid\t1\nmonitor_name\tARZOPA\nconnection_type\tHDMI\n'
+            'sad0_coding_type\t[0x1] LPCM\nsad0_channels\t2\n'
+        )
+        lpcm = helper.hdmi_dolby_info(self.root / 'asound')
+        self.assertFalse(lpcm['hdmi_dolby'])
+        self.assertIn('ARZOPA', lpcm['hdmi_summary'])
+        (asound / 'eld#0.1').write_text(
+            'monitor_present\t1\neld_valid\t1\nmonitor_name\tDENON-AVR\nconnection_type\tHDMI\n'
+            'sad0_coding_type\t[0x1] LPCM\nsad0_channels\t8\n'
+            'sad1_coding_type\t[0xa] E-AC-3\nsad1_channels\t8\n'
+            'sad2_coding_type\t[0xc] MLP\nsad2_channels\t8\n'
+        )
+        avr = helper.hdmi_dolby_info(self.root / 'asound')
+        self.assertTrue(avr['hdmi_dolby'])
+        self.assertIn('E-AC-3', avr['hdmi_codecs'])
+        self.assertIn('DENON-AVR', avr['hdmi_summary'])
+
+    def test_sofa_and_hrir_pipewire_conf_rendering(self):
+        fake_hrir = self.root / 'hrir.wav'; fake_hrir.write_bytes(b'RIFF')
+        fake_sofa = self.root / 'kemar.sofa'; fake_sofa.write_bytes(b'SOFA')
+        with patch.object(helper, 'HRIR_PATH', fake_hrir), patch.object(helper, 'SOFA_CANDIDATES', (fake_sofa,)):
+            hrir_conf = helper.render_pipewire_conf('atmos-7.1')
+            self.assertIn('# spatial-profile: atmos-7.1', hrir_conf)
+            self.assertIn('label = convolver', hrir_conf)
+            self.assertIn('target.object      = "easyeffects_sink"', hrir_conf)
+            sofa_conf = helper.render_pipewire_conf('sofa-kemar')
+            self.assertIn('# spatial-profile: sofa-kemar', sofa_conf)
+            self.assertIn('type = sofa label = spatializer', sofa_conf)
+            self.assertIn(str(fake_sofa), sofa_conf)
+            self.assertIn('target.object      = "easyeffects_sink"', sofa_conf)
 
 class VerifiedPlayerSocket(unittest.TestCase):
     def test_ipc_is_bound_to_its_real_player(self):

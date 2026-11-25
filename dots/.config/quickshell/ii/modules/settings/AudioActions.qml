@@ -17,6 +17,7 @@ ColumnLayout {
         SettingsButton { text: "Open EasyEffects"; enabled: EasyEffects.available; onClicked: EasyEffects.show() }
     }
     StyledText { Layout.fillWidth: true; text: EasyEffects.error; visible: text.length > 0; wrapMode: Text.WordWrap; color: Appearance.m3colors.m3error; font.pixelSize: 12 }
+    PipeWireAudioControls { Layout.fillWidth: true }
     SpatialAudioControls { Layout.fillWidth: true }
     MusicLoudnessControls { Layout.fillWidth: true }
     StyledText { text: "Automatic music EQ"; font.pixelSize: 20; font.weight: Font.Medium }
@@ -63,17 +64,17 @@ ColumnLayout {
         StyledText { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "Song rules take priority. When music is paused or stopped and osu!lazer is actively using audio, the osu! preset is applied automatically. Unknown songs use your baseline. Manual preset changes last until the next song. Disabling stops the watcher and restores the prior preset if still owned." }
     }
     StyledText { Layout.fillWidth: true; text: MusicEq.error; visible: text.length > 0; wrapMode: Text.WordWrap; color: Appearance.m3colors.m3error }
-    StyledText { text: "Eden audio boost"; font.pixelSize: 20; font.weight: Font.Medium }
+    StyledText { text: "Boost current app"; font.pixelSize: 20; font.weight: Font.Medium }
     SettingsButton {
-        text: EdenAudioBoost.enabled ? "Eden boost widget: On — disable and reset" : "Eden boost widget: Off — enable"
+        text: EdenAudioBoost.enabled ? "Boost current app widget: On — disable and reset" : "Boost current app widget: Off — enable"
         enabled: !EdenAudioBoost.busy
         onClicked: EdenAudioBoost.setEnabled(!EdenAudioBoost.enabled)
     }
     ColumnLayout {
         visible: EdenAudioBoost.enabled
         Layout.fillWidth: true
-        StyledText { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "Double-click the control-center widget for +12 dB on Eden only. Single-click resets it. Your current EasyEffects preset stays selected. The boost ends when Eden audio stops." }
-        SettingsButton { text: "Reset Eden boost"; enabled: !EdenAudioBoost.busy; onClicked: EdenAudioBoost.reset() }
-        StyledText { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: EdenAudioBoost.error; visible: text.length > 0 }
+        StyledText { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "Press and hold the control-center widget to boost the focused or active playback app by +12 dB through your current EasyEffects chain. Single-click resets immediately. Ends automatically when the app stops." }
+        SettingsButton { text: "Reset app boost"; enabled: !EdenAudioBoost.busy; onClicked: EdenAudioBoost.reset() }
+        StyledText { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: EdenAudioBoost.error; visible: text.length > 0; color: Appearance.m3colors.m3error }
     }
 }

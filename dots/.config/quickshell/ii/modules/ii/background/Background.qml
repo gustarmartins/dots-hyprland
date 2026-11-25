@@ -43,19 +43,26 @@ Variants {
         }
     }
 
-    PanelWindow {
-        id: bgRoot
-
+    LazyLoader {
+        id: bgLoader
         required property var modelData
+        readonly property bool monitorFullscreen: HyprlandData.monitorHasFullscreen(modelData?.name ?? "")
+        active: GlobalStates.screenLocked || !(Config.options.background.hideWhenFullscreen && monitorFullscreen)
 
-        property bool monitorFullscreen: HyprlandData.monitorHasFullscreen(modelData?.name ?? "")
-        visible: GlobalStates.screenLocked || !monitorFullscreen
+        component: PanelWindow {
+            id: bgRoot
+
+            readonly property var modelData: bgLoader.modelData
+            property bool monitorFullscreen: bgLoader.monitorFullscreen
+            visible: GlobalStates.screenLocked || !monitorFullscreen
 
         // Workspaces
         property HyprlandMonitor monitor: Hyprland.monitorFor(modelData)
+        readonly property var monitorInfo: HyprlandData.monitors.find(m => m.name === bgRoot.modelData.name) ?? null
+        readonly property int activeWorkspaceId: bgRoot.monitor?.activeWorkspace?.id ?? bgRoot.monitorInfo?.activeWorkspace?.id ?? 1
         property int workspaceChunkSize: Config?.options.bar.workspaces.shown ?? 10
         readonly property real workspaceFraction: WorkspacePlacement.fraction(root.workspaceRules,
-            bgRoot.modelData.name, bgRoot.monitor?.activeWorkspace?.id ?? 1, workspaceChunkSize)
+            bgRoot.modelData.name, bgRoot.activeWorkspaceId, workspaceChunkSize)
         // Wallpaper
         property bool wallpaperIsVideo: Config.options.background.wallpaperPath.endsWith(".mp4") || Config.options.background.wallpaperPath.endsWith(".webm") || Config.options.background.wallpaperPath.endsWith(".mkv") || Config.options.background.wallpaperPath.endsWith(".avi") || Config.options.background.wallpaperPath.endsWith(".mov")
         property string wallpaperPath: wallpaperIsVideo ? Config.options.background.thumbnailPath : Config.options.background.wallpaperPath
@@ -236,10 +243,11 @@ Variants {
             Loader {
                 anchors.fill: parent
                 active: !GlobalStates.screenLocked && !bgRoot.monitorFullscreen
+                    && !HyprlandData.monitorHasGame(bgRoot.modelData?.name ?? "")
                     && !bgRoot.wallpaperSafetyTriggered
                     && (DesktopEffects.settings.aurora === true || DesktopEffects.settings.stars === true)
                 sourceComponent: AmbientScene {
-                    animate: bgRoot.visible && !bgRoot.monitorFullscreen
+                    animate: bgRoot.visible && !bgRoot.monitorFullscreen && !HyprlandData.monitorHasGame(bgRoot.modelData?.name ?? "")
                     workspace: bgRoot.monitor?.activeWorkspace?.id ?? 1
                 }
             }
@@ -275,19 +283,7 @@ Variants {
                 }
 
                 FadeLoader {
-                    shown: Config.options.background.widgets.weather.enable
-                    sourceComponent: WeatherWidget {
-                        canvasOffsetX: widgetCanvas.x
-                        canvasOffsetY: widgetCanvas.y
-                        screenWidth: bgRoot.screen.width
-                        screenHeight: bgRoot.screen.height
-                        scaledScreenWidth: bgRoot.screen.width
-                        scaledScreenHeight: bgRoot.screen.height
-                        wallpaperScale: 1
-                    }
-                }
-
-                FadeLoader {
+                    id: clockWidgetLoader
                     shown: Config.options.background.widgets.clock.enable
                     sourceComponent: ClockWidget {
                         canvasOffsetX: widgetCanvas.x
@@ -297,10 +293,37 @@ Variants {
                         scaledScreenWidth: bgRoot.screen.width
                         scaledScreenHeight: bgRoot.screen.height
                         wallpaperScale: 1
+                        monitorId: bgRoot.monitorInfo?.id ?? bgRoot.monitor?.id ?? -1
+                        monitorX: bgRoot.monitorInfo?.x ?? bgRoot.screen.x ?? 0
+                        monitorY: bgRoot.monitorInfo?.y ?? bgRoot.screen.y ?? 0
+                        monitorReserved: bgRoot.monitorInfo?.reserved ?? [0, 0, 0, 0]
+                        activeWorkspaceId: bgRoot.activeWorkspaceId
                         wallpaperSafetyTriggered: bgRoot.wallpaperSafetyTriggered
                     }
                 }
+
+                FadeLoader {
+                    id: weatherWidgetLoader
+                    shown: Config.options.background.widgets.weather.enable
+                    sourceComponent: WeatherWidget {
+                        canvasOffsetX: widgetCanvas.x
+                        canvasOffsetY: widgetCanvas.y
+                        screenWidth: bgRoot.screen.width
+                        screenHeight: bgRoot.screen.height
+                        scaledScreenWidth: bgRoot.screen.width
+                        scaledScreenHeight: bgRoot.screen.height
+                        wallpaperScale: 1
+                        monitorId: bgRoot.monitorInfo?.id ?? bgRoot.monitor?.id ?? -1
+                        monitorX: bgRoot.monitorInfo?.x ?? bgRoot.screen.x ?? 0
+                        monitorY: bgRoot.monitorInfo?.y ?? bgRoot.screen.y ?? 0
+                        monitorReserved: bgRoot.monitorInfo?.reserved ?? [0, 0, 0, 0]
+                        activeWorkspaceId: bgRoot.activeWorkspaceId
+                        avoidRects: clockWidgetLoader.item && clockWidgetLoader.item.visible
+                            ? [clockWidgetLoader.item.currentScreenRect] : []
+                    }
+                }
             }
+        }
         }
     }
 }

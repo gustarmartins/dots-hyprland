@@ -1,0 +1,615 @@
+#!/usr/bin/env python3
+"""OS-like hardware-accelerated screen recorder controller for dots-hyprland."""
+import argparse
+import contextlib
+import datetime
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+CONFIG_DIR = Path(os.environ.get('RECORDCTL_CONFIG_DIR', str(Path.home() / '.config/hypr')))
+STATE_FILE = CONFIG_DIR / 'recorder.json'
+SHELL_CONFIG = Path(os.environ.get('RECORDCTL_SHELL_CONFIG',
+                                   str(Path.home() / '.config/illogical-impulse/config.json')))
+RUNTIME_DIR = Path(os.environ.get('RECORDCTL_RUNTIME_DIR',
+                                  os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')))
+SESSION_FILE = RUNTIME_DIR / 'dots-recorder.json'
+POWER_SUPPLY_DIR = Path(os.environ.get('RECORDCTL_POWER_SUPPLY_DIR', '/sys/class/power_supply'))
+
+BACKENDS = ('gsr', 'wf-vaapi', 'wf-cpu')
+CODECS = ('hevc', 'hevc_10bit', 'h264', 'av1')
+QUALITIES = ('medium', 'high', 'very_high', 'ultra')
+FPS_CHOICES = (30, 60, 120, 144, 0)  # 0 = monitor native refresh rate
+TUNES = ('performance', 'quality')
+FRAME_MODES = ('vfr', 'cfr', 'content')
+BITRATE_MODES = ('qp', 'vbr', 'cbr')
+PIXFMTS = ('yuv420', 'yuv444')
+COLOR_RANGES = ('limited', 'full')
+AUDIO_MODES = ('system', 'system_mic', 'mic', 'none')
+AUDIO_CODECS = ('opus', 'aac', 'flac')
+CONTAINERS = ('mp4', 'mkv')
+
+PRESETS = {
+    'gaming': {
+        'backend': 'gsr',
+        'codec': 'hevc',
+        'quality': 'high',
+        'fps': 60,
+        'tune': 'performance',
+        'frameRateMode': 'vfr',
+        'bitrateMode': 'qp',
+        'lowPower': True,
+        'pixfmt': 'yuv420',
+        'colorRange': 'limited',
+        'audioCodec': 'opus',
+        'container': 'mp4',
+    },
+    'balanced': {
+        'backend': 'gsr',
+        'codec': 'hevc',
+        'quality': 'very_high',
+        'fps': 60,
+        'tune': 'performance',
+        'frameRateMode': 'vfr',
+        'bitrateMode': 'qp',
+        'lowPower': False,
+        'pixfmt': 'yuv420',
+        'colorRange': 'limited',
+        'audioCodec': 'opus',
+        'container': 'mp4',
+    },
+    'quality': {
+        'backend': 'gsr',
+        'codec': 'hevc_10bit',
+        'quality': 'ultra',
+        'fps': 60,
+        'tune': 'quality',
+        'frameRateMode': 'vfr',
+        'bitrateMode': 'qp',
+        'lowPower': False,
+        'pixfmt': 'yuv420',
+        'colorRange': 'full',
+        'audioCodec': 'flac',
+        'container': 'mkv',
+    },
+    'editing': {
+        'backend': 'gsr',
+        'codec': 'h264',
+        'quality': 'very_high',
+        'fps': 60,
+        'tune': 'quality',
+        'frameRateMode': 'cfr',
+        'bitrateMode': 'cbr',
+        'lowPower': False,
+        'pixfmt': 'yuv420',
+        'colorRange': 'limited',
+        'audioCodec': 'aac',
+        'container': 'mp4',
+    },
+}
+
+
+def has_system_battery() -> bool:
+    if not POWER_SUPPLY_DIR.is_dir():
+        return False
+    for entry in POWER_SUPPLY_DIR.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            scope = (entry / 'scope').read_text(encoding='utf-8').strip() if (entry / 'scope').exists() else ''
+            if scope == 'Device':
+                continue
+            if (entry / 'type').read_text(encoding='utf-8').strip() == 'Battery':
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def default_settings() -> dict:
+    preset = 'gaming' if has_system_battery() else 'balanced'
+    base = dict(PRESETS[preset])
+    base.update({
+        'preset': preset,
+        'audioMode': 'system',
+        'showCursor': True,
+    })
+    return base
+
+
+def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False, mode='w', encoding='utf-8') as stream:
+        tmp = Path(stream.name)
+        stream.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def normalize_settings(raw: dict | None) -> dict:
+    data = default_settings()
+    if not isinstance(raw, dict):
+        return data
+    validators = {
+        'backend': BACKENDS,
+        'codec': CODECS,
+        'quality': QUALITIES,
+        'fps': FPS_CHOICES,
+        'tune': TUNES,
+        'frameRateMode': FRAME_MODES,
+        'bitrateMode': BITRATE_MODES,
+        'pixfmt': PIXFMTS,
+        'colorRange': COLOR_RANGES,
+        'audioMode': AUDIO_MODES,
+        'audioCodec': AUDIO_CODECS,
+        'container': CONTAINERS,
+    }
+    for key, allowed in validators.items():
+        if raw.get(key) in allowed:
+            data[key] = raw[key]
+    for bkey in ('lowPower', 'showCursor'):
+        if isinstance(raw.get(bkey), bool):
+            data[bkey] = raw[bkey]
+    if raw.get('preset') in (*PRESETS.keys(), 'custom'):
+        data['preset'] = raw['preset']
+    else:
+        data['preset'] = match_preset(data)
+    return data
+
+
+def match_preset(data: dict) -> str:
+    for name, spec in PRESETS.items():
+        if all(data.get(k) == v for k, v in spec.items()):
+            return name
+    return 'custom'
+
+
+def load_settings() -> dict:
+    if not STATE_FILE.exists():
+        return default_settings()
+    try:
+        return normalize_settings(json.loads(STATE_FILE.read_text(encoding='utf-8')))
+    except (OSError, ValueError):
+        return default_settings()
+
+
+def save_settings(data: dict) -> None:
+    atomic_write(STATE_FILE, json.dumps(data, indent=2, ensure_ascii=False) + '\n')
+
+
+def save_dir() -> Path:
+    default = Path.home() / 'Videos'
+    if SHELL_CONFIG.exists():
+        try:
+            cfg = json.loads(SHELL_CONFIG.read_text(encoding='utf-8'))
+            custom = cfg.get('screenRecord', {}).get('savePath')
+            if isinstance(custom, str) and custom.strip():
+                return Path(os.path.expanduser(custom.strip()))
+        except (OSError, ValueError):
+            pass
+    return default
+
+
+def run_quiet(args: list[str], timeout: int = 5) -> subprocess.CompletedProcess:
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+
+
+def detect_hardware() -> dict:
+    gsr = bool(shutil.which('gpu-screen-recorder'))
+    kms = bool(shutil.which('gsr-kms-server'))
+    wf = bool(shutil.which('wf-recorder'))
+    codecs = []
+    driver = ''
+    if shutil.which('vainfo'):
+        try:
+            res = run_quiet(['vainfo'], timeout=3)
+            out = res.stdout + '\n' + res.stderr
+            for line in out.splitlines():
+                if 'Driver version:' in line and not driver:
+                    driver = line.split('Driver version:', 1)[1].strip()
+                if 'VAEntrypointEncSlice' in line:
+                    if 'VAProfileH264' in line and 'h264' not in codecs:
+                        codecs.append('h264')
+                    if 'VAProfileHEVCMain10' in line and 'hevc_10bit' not in codecs:
+                        codecs.append('hevc_10bit')
+                    if 'VAProfileHEVCMain' in line and 'hevc' not in codecs:
+                        codecs.append('hevc')
+                    if 'VAProfileAV1' in line and 'av1' not in codecs:
+                        codecs.append('av1')
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return {
+        'hasGsr': gsr,
+        'hasKms': kms,
+        'hasWfRecorder': wf,
+        'vaapiCodecs': codecs,
+        'vaapiDriver': driver,
+        'renderDevice': '/dev/dri/renderD128' if Path('/dev/dri/renderD128').exists() else '',
+    }
+
+
+def pid_alive(pid: int) -> bool:
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+        cmdline = Path(f'/proc/{pid}/cmdline').read_bytes().decode('utf-8', errors='ignore')
+        return any(name in cmdline for name in ('gpu-screen-recorder', 'wf-recorder'))
+    except OSError:
+        return False
+
+
+def active_session() -> dict | None:
+    if SESSION_FILE.exists():
+        try:
+            sess = json.loads(SESSION_FILE.read_text(encoding='utf-8'))
+            if pid_alive(sess.get('pid')):
+                return sess
+            SESSION_FILE.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            SESSION_FILE.unlink(missing_ok=True)
+
+    # Also detect unmanaged gpu-screen-recorder / wf-recorder instances started externally.
+    for proc_name, backend in (('gpu-screen-recorder', 'gsr'), ('wf-recorder', 'wf-cpu')):
+        res = run_quiet(['pgrep', '-u', str(os.getuid()), '-x', proc_name])
+        if res.returncode == 0 and res.stdout.strip():
+            pid = int(res.stdout.strip().splitlines()[0])
+            return {
+                'pid': pid,
+                'backend': backend,
+                'output': '',
+                'startedAt': 0,
+                'mode': 'fullscreen',
+            }
+    return None
+
+
+def focused_monitor() -> tuple[str, int]:
+    try:
+        res = run_quiet(['hyprctl', 'monitors', '-j'])
+        if res.returncode == 0:
+            monitors = json.loads(res.stdout)
+            focused = next((m for m in monitors if m.get('focused')), monitors[0] if monitors else None)
+            if focused:
+                return focused['name'], max(30, round(float(focused.get('refreshRate', 60))))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return 'screen', 60
+
+
+def default_monitor_audio_source() -> str:
+    try:
+        res = run_quiet(['pactl', 'get-default-sink'])
+        sink = res.stdout.strip()
+        if res.returncode == 0 and sink:
+            return f'{sink}.monitor'
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ''
+
+
+def slurp_to_gsr_region(region: str) -> str:
+    """Convert slurp 'X,Y WxH' geometry to gpu-screen-recorder 'WxH+X+Y'."""
+    m = re.match(r'^\s*(-?\d+)\s*,\s*(-?\d+)\s+(\d+)\s*x\s*(\d+)\s*$', region)
+    if m:
+        x, y, w, h = m.groups()
+        return f'{w}x{h}+{x}+{y}'
+    if re.match(r'^\s*\d+x\d+[+-]\d+[+-]\d+\s*$', region):
+        return region.strip()
+    raise ValueError(f'Invalid region geometry: {region}')
+
+
+def notify(title: str, body: str) -> None:
+    if os.environ.get('RECORDCTL_NO_NOTIFY') == '1':
+        return
+    if shutil.which('notify-send'):
+        subprocess.Popen(
+            ['notify-send', title, body, '-a', 'Recorder', '--hint=int:transient:1'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+
+
+def build_command(settings: dict, output: Path, monitor: str, native_hz: int,
+                  region: str | None, audio_mode: str, hw: dict) -> tuple[list[str], str]:
+    backend = settings['backend']
+    if backend == 'gsr' and not hw['hasGsr']:
+        backend = 'wf-vaapi' if hw['hasWfRecorder'] and hw['renderDevice'] else 'wf-cpu'
+
+    fps = native_hz if settings['fps'] == 0 else settings['fps']
+
+    if backend == 'gsr':
+        codec = settings['codec']
+        if hw['vaapiCodecs'] and codec not in hw['vaapiCodecs']:
+            codec = 'hevc' if 'hevc' in hw['vaapiCodecs'] else 'h264'
+        cmd = [
+            'gpu-screen-recorder',
+            '-w', 'region' if region else monitor,
+        ]
+        if region:
+            cmd.extend(['-region', slurp_to_gsr_region(region)])
+        cmd.extend([
+            '-c', settings['container'],
+            '-f', str(fps),
+            '-k', codec,
+            '-q', settings['quality'],
+            '-bm', settings['bitrateMode'],
+            '-fm', settings['frameRateMode'],
+            '-tune', settings['tune'],
+            '-pixfmt', settings['pixfmt'],
+            '-cr', settings['colorRange'],
+            '-cursor', 'yes' if settings['showCursor'] else 'no',
+            '-low-power', 'yes' if settings['lowPower'] else 'no',
+            '-encoder', 'gpu',
+        ])
+        if audio_mode == 'system':
+            cmd.extend(['-a', 'default_output', '-ac', settings['audioCodec']])
+        elif audio_mode == 'mic':
+            cmd.extend(['-a', 'default_input', '-ac', settings['audioCodec']])
+        elif audio_mode == 'system_mic':
+            cmd.extend(['-a', 'default_output|default_input', '-ac', settings['audioCodec']])
+        cmd.extend(['-o', str(output)])
+        return cmd, 'gsr'
+
+    # wf-recorder (VAAPI hardware or CPU fallback)
+    cmd = ['wf-recorder', '-f', str(output), '-r', str(fps)]
+    if region:
+        cmd.extend(['-g', region])
+    else:
+        cmd.extend(['-o', monitor])
+
+    if backend == 'wf-vaapi' and hw['renderDevice']:
+        wf_codec = 'hevc_vaapi' if settings['codec'].startswith('hevc') else 'h264_vaapi'
+        qp_map = {'medium': '26', 'high': '22', 'very_high': '18', 'ultra': '15'}
+        cmd.extend([
+            '-d', hw['renderDevice'],
+            '-c', wf_codec,
+            '-p', f'qp={qp_map.get(settings["quality"], "22")}',
+            '-F', 'scale_vaapi=format=nv12:out_color_matrix=bt709',
+        ])
+    else:
+        cmd.extend(['--pixel-format', 'yuv420p', '-c', 'libx264', '-p', 'preset=veryfast'])
+
+    if audio_mode in ('system', 'system_mic'):
+        src = default_monitor_audio_source()
+        if src:
+            cmd.append(f'--audio={src}')
+        else:
+            cmd.append('--audio')
+    elif audio_mode == 'mic':
+        cmd.append('--audio')
+
+    return cmd, backend
+
+
+def build_status(include_hw: bool = True) -> dict:
+    settings = load_settings()
+    sess = active_session()
+    elapsed = 0
+    if sess and sess.get('startedAt'):
+        elapsed = max(0, int(time.time() - sess['startedAt']))
+    result = {
+        **settings,
+        'saveDir': str(save_dir()),
+        'recording': sess is not None,
+        'pid': sess['pid'] if sess else 0,
+        'activeBackend': sess.get('backend', '') if sess else '',
+        'activeOutput': sess.get('output', '') if sess else '',
+        'elapsedSeconds': elapsed,
+    }
+    if include_hw:
+        result['hardware'] = detect_hardware()
+    return result
+
+
+def stop_recording() -> dict:
+    sess = active_session()
+    if not sess:
+        return build_status()
+
+    pid = sess['pid']
+    output = sess.get('output', '')
+    with contextlib.suppress(OSError):
+        os.kill(pid, signal.SIGINT)
+
+    deadline = time.time() + 4.0
+    while time.time() < deadline and pid_alive(pid):
+        time.sleep(0.1)
+
+    if pid_alive(pid):
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+        time.sleep(0.3)
+
+    SESSION_FILE.unlink(missing_ok=True)
+    if output and Path(output).exists():
+        size_mb = Path(output).stat().st_size / (1024 * 1024)
+        notify('Recording saved', f'{Path(output).name} ({size_mb:.1f} MB)')
+    else:
+        notify('Recording stopped', 'Saved recording')
+    return build_status()
+
+
+def start_recording(region: str | None, sound_override: str | None) -> dict:
+    if active_session():
+        return build_status()
+
+    settings = load_settings()
+    hw = detect_hardware()
+    monitor, native_hz = focused_monitor()
+
+    audio_mode = settings['audioMode']
+    if sound_override == 'on' and audio_mode == 'none':
+        audio_mode = 'system'
+    elif sound_override == 'off':
+        audio_mode = 'none'
+
+    out_dir = save_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
+    ext = settings['container']
+    output = out_dir / f'recording_{ts}.{ext}'
+
+    cmd, effective_backend = build_command(settings, output, monitor, native_hz, region, audio_mode, hw)
+
+    log_path = RUNTIME_DIR / 'dots-recorder.log'
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open('wb')
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    log_file.close()
+
+    time.sleep(0.25)
+    if proc.poll() is not None:
+        err_text = ''
+        with contextlib.suppress(OSError):
+            err_text = log_path.read_text(encoding='utf-8', errors='ignore').strip().splitlines()[-1]
+        notify('Recording failed', err_text or f'{cmd[0]} exited with code {proc.returncode}')
+        raise RuntimeError(err_text or f'Recorder exited immediately (code {proc.returncode})')
+
+    sess = {
+        'pid': proc.pid,
+        'backend': effective_backend,
+        'output': str(output),
+        'startedAt': time.time(),
+        'mode': 'region' if region else 'fullscreen',
+        'audio': audio_mode,
+        'codec': settings['codec'],
+        'fps': native_hz if settings['fps'] == 0 else settings['fps'],
+        'quality': settings['quality'],
+    }
+    atomic_write(SESSION_FILE, json.dumps(sess, indent=2) + '\n')
+
+    fps_label = f'{sess["fps"]} fps'
+    backend_label = 'GPU Screen Recorder (KMS)' if effective_backend == 'gsr' else effective_backend
+    notify(
+        'Recording started',
+        f'{output.name}\n{backend_label} · {settings["codec"].upper()} · {fps_label} · {settings["tune"]}',
+    )
+    return build_status()
+
+
+def parse_bool(value: str) -> bool:
+    low = value.strip().lower()
+    if low in ('1', 'true', 'on', 'yes'):
+        return True
+    if low in ('0', 'false', 'off', 'no'):
+        return False
+    raise ValueError(f'Invalid boolean: {value}')
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='cmd', required=True)
+    sub.add_parser('status')
+    sub.add_parser('is-recording')
+    sub.add_parser('stop')
+
+    for name in ('start', 'toggle'):
+        p = sub.add_parser(name)
+        p.add_argument('--fullscreen', action='store_true')
+        p.add_argument('--region', default=None)
+        p.add_argument('--sound', action='store_true')
+        p.add_argument('--no-sound', action='store_true')
+
+    preset_p = sub.add_parser('preset')
+    preset_p.add_argument('name', choices=tuple(PRESETS.keys()))
+
+    set_p = sub.add_parser('set')
+    set_p.add_argument('--backend', choices=BACKENDS)
+    set_p.add_argument('--codec', choices=CODECS)
+    set_p.add_argument('--quality', choices=QUALITIES)
+    set_p.add_argument('--fps', type=int, choices=FPS_CHOICES)
+    set_p.add_argument('--tune', choices=TUNES)
+    set_p.add_argument('--frame-mode', dest='frame_mode', choices=FRAME_MODES)
+    set_p.add_argument('--bitrate-mode', dest='bitrate_mode', choices=BITRATE_MODES)
+    set_p.add_argument('--low-power', dest='low_power')
+    set_p.add_argument('--pixfmt', choices=PIXFMTS)
+    set_p.add_argument('--color-range', dest='color_range', choices=COLOR_RANGES)
+    set_p.add_argument('--audio', dest='audio_mode', choices=AUDIO_MODES)
+    set_p.add_argument('--audio-codec', dest='audio_codec', choices=AUDIO_CODECS)
+    set_p.add_argument('--container', choices=CONTAINERS)
+    set_p.add_argument('--cursor', dest='show_cursor')
+
+    args = parser.parse_args()
+
+    if args.cmd == 'status':
+        print(json.dumps(build_status(), ensure_ascii=False))
+        return 0
+    if args.cmd == 'is-recording':
+        return 0 if active_session() else 1
+
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    with contextlib.ExitStack() as stack:
+        lock = stack.enter_context((RUNTIME_DIR / 'recordctl.lock').open('a'))
+        fcntl.flock(lock, fcntl.LOCK_EX)
+
+        if args.cmd == 'stop':
+            print(json.dumps(stop_recording(), ensure_ascii=False))
+            return 0
+        if args.cmd == 'start':
+            sound = 'on' if args.sound else ('off' if args.no_sound else None)
+            print(json.dumps(start_recording(args.region, sound), ensure_ascii=False))
+            return 0
+        if args.cmd == 'toggle':
+            if active_session():
+                print(json.dumps(stop_recording(), ensure_ascii=False))
+            else:
+                sound = 'on' if args.sound else ('off' if args.no_sound else None)
+                print(json.dumps(start_recording(args.region, sound), ensure_ascii=False))
+            return 0
+        if args.cmd == 'preset':
+            data = load_settings()
+            data.update(PRESETS[args.name])
+            data['preset'] = args.name
+            save_settings(data)
+            print(json.dumps(build_status(), ensure_ascii=False))
+            return 0
+        if args.cmd == 'set':
+            data = load_settings()
+            mapping = {
+                'backend': args.backend,
+                'codec': args.codec,
+                'quality': args.quality,
+                'fps': args.fps,
+                'tune': args.tune,
+                'frameRateMode': args.frame_mode,
+                'bitrateMode': args.bitrate_mode,
+                'pixfmt': args.pixfmt,
+                'colorRange': args.color_range,
+                'audioMode': args.audio_mode,
+                'audioCodec': args.audio_codec,
+                'container': args.container,
+            }
+            for key, val in mapping.items():
+                if val is not None:
+                    data[key] = val
+            if args.low_power is not None:
+                data['lowPower'] = parse_bool(args.low_power)
+            if args.show_cursor is not None:
+                data['showCursor'] = parse_bool(args.show_cursor)
+            data['preset'] = match_preset(data)
+            save_settings(data)
+            print(json.dumps(build_status(), ensure_ascii=False))
+            return 0
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as err:
+        print(json.dumps({'error': str(err)}, ensure_ascii=False))
+        sys.exit(1)

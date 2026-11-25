@@ -42,6 +42,11 @@ p.write_text(json.dumps(data))
 print('Applied fixture font')
 '''.replace('REAL', repr(str(REPO / 'dots/.local/bin/fontctl'))))
 helper.chmod(0o755)
+kitty_monitor_helper = OUT / '.local/bin/kitty-font-monitor'
+shutil.copy2(REPO / 'dots/.local/bin/kitty-font-monitor', kitty_monitor_helper)
+kitty_monitor_helper.chmod(0o755)
+(OUT / 'config/kitty').mkdir(parents=True, exist_ok=True)
+(OUT / 'config/kitty/kitty.conf').write_text('font_family JetBrainsMono Nerd Font Mono\nfont_size 11\n')
 for name, output in [('desktop-effects', '[]'), ('easyeffects-qs', '{}')]:
     p = OUT / '.local/bin' / name
     p.write_text('#!/bin/sh\nprintf \'%s\\n\' \'' + output + '\'\n')
@@ -435,6 +440,19 @@ try:
     assert after_apply['settingsTestSentinel'] == {'preserve': ['unrelated', 42]}, 'Unrecognized user settings were lost'
     before_apply['appearance']['fonts']['main'] = 'Fixture Font'
     assert after_apply == before_apply, 'Font apply overwrote unrelated settings'
+    until(lambda: (n := json.loads(call('test', 'locate', 'kittyMonitorFontsMaster'))) and n['enabled'])
+    assert json.loads(call('test', 'locate', 'kittyMonitorFontsMaster'))['checked'] is False
+    assert json.loads(call('test', 'locate', 'kittyDefaultPlus')) is None
+    click('kittyMonitorFontsMaster')
+    until(lambda: (n := json.loads(call('test', 'locate', 'kittyDefaultPlus'))) and n['enabled'])
+    click('kittyDefaultPlus')
+    km_path = OUT / 'config/fontctl/kitty-monitors.json'
+    until(lambda: km_path.exists() and json.loads(km_path.read_text())['default_size'] == 11.5)
+    until(lambda: (n := json.loads(call('test', 'locate', 'kittyMonitorFontsMaster'))) and n['enabled'])
+    click('kittyMonitorFontsMaster')
+    until(lambda: (n := json.loads(call('test', 'locate', 'kittyMonitorFontsMaster'))) and n['checked'] is False and n['enabled'])
+    until(lambda: json.loads(call('test', 'locate', 'kittyDefaultPlus')) is None)
+    assert json.loads(km_path.read_text())['enabled'] is False
     call('settings', 'open', 'control')
     call('test', 'resize', '700', '600')
     time.sleep(.3)

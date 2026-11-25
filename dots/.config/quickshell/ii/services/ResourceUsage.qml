@@ -1,6 +1,8 @@
 pragma Singleton
 pragma ComponentBehavior: Bound
 
+import qs
+import qs.services
 import qs.modules.common
 import QtQuick
 import Quickshell
@@ -84,9 +86,13 @@ Singleton {
 
     // Parse each completed read, rather than the previous sample immediately
     // after reload(). FileView loads asynchronously by default.
+    // Pause background proc/sysfs polling when fullscreen apps own every display
+    // and no panel inspecting resource stats is open.
+    readonly property bool pollingPaused: HyprlandData.allMonitorsHaveFullscreen()
+        && !GlobalStates.sidebarRightOpen && !GlobalStates.overviewOpen && !GlobalStates.overlayOpen
     Timer {
         interval: Math.max(250, Config.options?.resources?.updateInterval ?? 3000)
-        running: true
+        running: !root.pollingPaused
         repeat: true
         triggeredOnStart: true
         onTriggered: {

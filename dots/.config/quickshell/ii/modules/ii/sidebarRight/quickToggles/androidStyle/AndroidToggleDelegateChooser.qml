@@ -262,25 +262,6 @@ DelegateChooser {
         }
     } }
 
-    DelegateChoice { roleValue: "cloudflareWarp"; AndroidCloudflareWarpToggle {
-        required property int index
-        required property var modelData
-        buttonIndex: modelData.sourceIndex ?? (root.startingIndex + index)
-        buttonData: modelData
-        editMode: root.editMode
-        expandedSize: modelData.size > 1
-        baseCellWidth: root.baseCellWidth
-        baseCellHeight: root.baseCellHeight
-        cellSpacing: root.spacing
-        cellSize: modelData.size
-        cellRows: modelData.height ?? 1
-        gridColumns: root.columns
-        x: (modelData.gridColumn ?? 0) * (root.baseCellWidth + root.spacing)
-        y: (modelData.gridRow ?? 0) * (root.baseCellHeight + root.spacing)
-        onTileResized: (index, width, height) => root.tileResized(index, width, height)
-        onTileMoved: (index, x, y) => root.tileMoved(index, x, y)
-    } }
-
     DelegateChoice { roleValue: "colorPicker"; AndroidColorPickerToggle {
         required property int index
         required property var modelData

@@ -98,6 +98,7 @@ No microphone is auto-connected and no cloud API is used.
 music-loudness status
 music-loudness enable
 music-loudness select-app exe:firefox  # use an id listed by status
+music-loudness eden-default true  # start Eden streams at +10 dB
 music-loudness adjust 1
 music-loudness match
 music-loudness auto-match true
@@ -131,3 +132,5 @@ a private PipeWire server and a disposable browser profile: +6 dB produced
 +6 LU, the other app changed by 0 dB, and Reset restored the original level.
 Live mpv verification also preserved 261 readable EasyEffects controls. These
 checks verify routing/gain behavior, not subjective listening preference.
+
+In Super+I → Audio → Music loudness, enable **Start Eden and Eglantine unmuted at +10 dB** to apply gain to Eden and Eglantine streams through the current effects. On startup, a restored mute or completely zero volume is cleared on that stream. Later mute and volume edits stay in effect. Super+N shows the applied value. Reset clears it for the current streams. Turning off the default removes its automatic gain and stops applying it to new streams.

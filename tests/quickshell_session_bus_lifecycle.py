@@ -50,13 +50,17 @@ def until(fn, timeout=12):
     raise AssertionError("Timeout; inspect " + str(OUT))
 
 
-def ipc(target, method):
-    return subprocess.check_output(["/usr/bin/qs", "-c", "ii", "ipc", "call", target, method],
-                                   env=env, text=True, stderr=subprocess.DEVNULL, timeout=2).strip()
+def ipc(target, method, *args):
+    return subprocess.check_output(["/usr/bin/qs", "-c", "ii", "ipc", "call", target, method, *args],
+                                   env=env, text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
 
 
 def status():
     return json.loads(ipc("sessionBus", "status"))
+
+
+def control_status():
+    return json.loads(ipc("shellControl", "status"))
 
 
 def healthy():
@@ -95,14 +99,39 @@ def monitors():
 try:
     source = REPO / "dots/.config/quickshell/ii"
     (CONFIG / "scripts").mkdir()
+    (CONFIG / "services").mkdir()
+    (CONFIG / "modules/common").mkdir(parents=True)
     shutil.copy2(source / "scripts/session_bus.py", CONFIG / "scripts")
     shutil.copy2(source / "services/SessionBusRecovery.qml", CONFIG)
+    shutil.copy2(source / "services/ShellControl.qml", CONFIG / "services")
+    (CONFIG / "modules/common/Config.qml").write_text('''pragma Singleton
+import Quickshell
+Singleton {
+ function flushPendingWrites(): void {}
+}
+''')
     (CONFIG / "shell.qml").write_text('''import QtQuick
 import Quickshell
 import Quickshell.Io
+import qs.services
 ShellRoot {
- SessionBusRecovery {}
- IpcHandler { target: "test"; function reload(): void { Quickshell.reload(false); } }
+ id: root
+ property bool screenLocked: false
+ readonly property string generationToken: String(Date.now()) + "-" + Math.random()
+ SessionBusRecovery { deferRestart: root.screenLocked }
+ Binding { target: ShellControl; property: "locked"; value: root.screenLocked }
+ IpcHandler {
+  target: "shellControl"
+  function reload(): void { ShellControl.requestReload() }
+  function restartForUpdate(): void { ShellControl.requestRestartForUpdate() }
+  function status(): string { return ShellControl.statusJson() }
+ }
+ IpcHandler {
+  target: "test"
+  function reload(): void { Qt.callLater(() => Quickshell.reload(false)); }
+  function setLocked(locked: bool): void { root.screenLocked = locked; }
+  function token(): string { return root.generationToken; }
+ }
 }
 ''')
     bins = OUT / "bin"
@@ -196,7 +225,55 @@ timer=QTimer();timer.timeout.connect(sample);timer.start(100);sample();app.exec(
     assert status()["pid"] == after_bus["pid"]
     print("PASS: fresh Qt client registers and closes to tray on the recovered shell", flush=True)
 
-    subprocess.run(["/usr/bin/qs", "kill", "--pid", str(after_bus["pid"])], env=env, check=True, capture_output=True)
+    # Lock-screen deferral: reload, restartForUpdate, and bus replacement must
+    # never tear down an active WlSessionLock while screenLocked is true.
+    ipc("test", "setLocked", "true")
+    until(lambda: control_status()["locked"] is True)
+    before_token = ipc("test", "token")
+    locked_pid = status()["pid"]
+    ipc("shellControl", "reload")
+    time.sleep(.5)
+    cstatus = control_status()
+    assert cstatus["pendingReload"] is True and cstatus["locked"] is True, cstatus
+    assert ipc("test", "token") == before_token
+    assert status()["pid"] == locked_pid
+    ipc("test", "setLocked", "false")
+    until(lambda: ipc("test", "token") != before_token and control_status()["pendingReload"] is False)
+    assert status()["pid"] == locked_pid
+    print("PASS: shellControl.reload defers while locked and executes after unlock", flush=True)
+
+    ipc("test", "setLocked", "true")
+    until(lambda: control_status()["locked"] is True)
+    before_update_pid = status()["pid"]
+    ipc("shellControl", "restartForUpdate")
+    time.sleep(.5)
+    cstatus = control_status()
+    assert cstatus["pendingRestartForUpdate"] is True and cstatus["locked"] is True, cstatus
+    assert status()["pid"] == before_update_pid
+    ipc("test", "setLocked", "false")
+    after_update = until(lambda: (s if s["pid"] != before_update_pid else None) if (s := healthy()) else None)
+    assert len(monitors()) == 1
+    print("PASS: shellControl.restartForUpdate defers while locked and restarts after unlock", flush=True)
+
+    ipc("test", "setLocked", "true")
+    until(lambda: control_status()["locked"] is True)
+    before_locked_bus = status()
+    bus.kill(); bus.wait(timeout=3)
+    (OUT / "bus").unlink(missing_ok=True)
+    bus = start_bus("bus-locked")
+    deferred = until(lambda: (s if s["state"] == "deferred" and s["deferred"] is True else None) if (s := status()) else None)
+    assert deferred["pid"] == before_locked_bus["pid"]
+    time.sleep(.5)
+    still_deferred = status()
+    assert still_deferred["pid"] == before_locked_bus["pid"] and still_deferred["state"] == "deferred"
+    ipc("test", "setLocked", "false")
+    after_locked_bus = until(lambda: (s if s["pid"] != before_locked_bus["pid"] else None) if (s := healthy()) else None)
+    assert after_locked_bus["generation"] != before_locked_bus["generation"]
+    assert after_locked_bus["deferred"] is False
+    assert len(monitors()) == 1
+    print("PASS: bus replacement defers shell restart while locked and recovers after unlock", flush=True)
+
+    subprocess.run(["/usr/bin/qs", "kill", "--pid", str(after_locked_bus["pid"])], env=env, check=True, capture_output=True)
     supervisor.wait(timeout=5)
     until(lambda: not monitors())
     assert supervisor.returncode == 0

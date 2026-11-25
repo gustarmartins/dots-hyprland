@@ -10,7 +10,7 @@ ColumnLayout {
     signal edited(var value)
     property bool expanded: false
     // Matches AndroidQuickPanel.availableToggleTypes; checked by the catalog audit.
-    readonly property var available: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "cloudflareWarp", "gameMode", "tearing", "vrr", "lsfg", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile", "musicRecognition", "antiFlashbang", "memoryMode", "focusMode", "buildCache", "zramAlgo", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
+    readonly property var available: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "gameMode", "tearing", "vrr", "lsfg", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile", "musicRecognition", "antiFlashbang", "memoryMode", "focusMode", "buildCache", "zramAlgo", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
     function label(type) {
         if (type === "focusMode") return "Performance";
         if (type === "gameMode") return "Reduced effects";
@@ -38,9 +38,9 @@ ColumnLayout {
             StyledSpinBox { from: 1; to: Math.min(7, Config.options.sidebar.quickToggles.android.columns); value: modelData.size; onValueModified: root.change(index, {size:value}); Accessible.name: "Width of " + root.label(modelData.type) }
             StyledText { text: "×" }
             StyledSpinBox { from: 1; to: 7; value: modelData.height ?? 1; onValueModified: root.change(index, {height:value}); Accessible.name: "Height of " + root.label(modelData.type) }
-            ToolButton { text: "↑"; enabled: index > 0; onClicked: root.change(index, -1); Accessible.name: "Move tile up" }
-            ToolButton { text: "↓"; enabled: index < root.tiles.length - 1; onClicked: root.change(index, 1); Accessible.name: "Move tile down" }
-            ToolButton { text: "×"; onClicked: root.change(index, "remove"); Accessible.name: "Remove " + root.label(modelData.type) }
+            SettingsButton { text: "↑"; implicitWidth: 36; implicitHeight: 35; padding: 4; enabled: index > 0; onClicked: root.change(index, -1); Accessible.name: "Move tile up" }
+            SettingsButton { text: "↓"; implicitWidth: 36; implicitHeight: 35; padding: 4; enabled: index < root.tiles.length - 1; onClicked: root.change(index, 1); Accessible.name: "Move tile down" }
+            SettingsButton { text: "×"; implicitWidth: 36; implicitHeight: 35; padding: 4; onClicked: root.change(index, "remove"); Accessible.name: "Remove " + root.label(modelData.type) }
         }
     }
     RowLayout {

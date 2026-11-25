@@ -56,7 +56,7 @@ Scope {
 
         Loader {
             id: sidebarContentLoader
-            active: GlobalStates.sidebarRightOpen || Config?.options.sidebar.keepRightSidebarLoaded
+            active: GlobalStates.sidebarRightOpen || (Config?.options.sidebar.keepRightSidebarLoaded && !HyprlandData.anyMonitorHasFullscreen())
             anchors {
                 fill: parent
                 margins: Appearance.sizes.hyprlandGapsOut

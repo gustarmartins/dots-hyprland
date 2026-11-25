@@ -27,7 +27,7 @@ AbstractBackgroundWidget {
     property var textHorizontalAlignment: {
         if (!Config.options.background.widgets.clock.digital.adaptiveAlignment || root.forceCenter || Config.options.background.widgets.clock.digital.vertical) 
             return Text.AlignHCenter;
-        const screenX = root.x - root.positionOffsetX;
+        const screenX = root.x + root.canvasOffsetX;
         if (screenX < root.scaledScreenWidth / 3)
             return Text.AlignLeft;
         if (screenX > root.scaledScreenWidth * 2 / 3)

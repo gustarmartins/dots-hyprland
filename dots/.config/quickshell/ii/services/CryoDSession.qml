@@ -11,6 +11,7 @@ Singleton {
     id: root
     property bool owner: false
     property bool offAttempted: false
+    property bool compositorFocusCleared: false
     property string lastPayload: ""
     property var receipt: ({})
     property string error: ""
@@ -48,7 +49,7 @@ Singleton {
         }
     }
     function snapshot() {
-        const active = Hyprland.activeToplevel?.address ?? "";
+        const active = compositorFocusCleared ? "" : (Hyprland.activeToplevel?.address ?? "");
         const normalize = address => address.startsWith("0x") ? address : "0x" + address;
         const windows = HyprlandData.windowList.map(win => {
             const monitor = HyprlandData.monitors.find(mon => mon.id === win.monitor);
@@ -96,7 +97,13 @@ Singleton {
         target: Hyprland
         function onActiveToplevelChanged() { root.publish(); }
         function onRawEvent(event) {
-            if (["activewindow", "activewindowv2", "windowtitle", "windowtitlev2",
+            if (event.name === "activewindowv2") {
+                // QuickShell retains the previous activeToplevel when Hyprland clears focus.
+                root.compositorFocusCleared = event.data === "";
+                root.publish();
+                return;
+            }
+            if (["activewindow", "windowtitle", "windowtitlev2",
                  "openlayer", "closelayer", "screencast"].includes(event.name)) return;
             root.historyGap();
         }

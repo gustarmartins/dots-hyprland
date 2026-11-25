@@ -1,9 +1,9 @@
 import qs
 import qs.modules.common
+import qs.modules.common.functions
 import qs.services
 import qs.modules.common.models.quickToggles
 import qs.modules.common.widgets
-import qs.services
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
@@ -18,27 +18,32 @@ AndroidQuickToggleButton {
 
     contentItem: GridLayout {
         columns: root.expandedSize ? 2 : 1
-        columnSpacing: 10
+        columnSpacing: 8
         rowSpacing: 4
         Item {
-            Layout.preferredWidth: root.expandedSize ? 40 : 28
-            Layout.preferredHeight: root.expandedSize ? 40 : 28
+            Layout.preferredWidth: root.expandedSize ? 36 : 28
+            Layout.preferredHeight: root.expandedSize ? 38 : 28
             Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
             Rectangle {
                 anchors.fill: parent
-                radius: 14
+                radius: 12
                 color: iconMouse.containsMouse
-                    ? (EasyEffects.processing ? Appearance.m3colors.m3primary : Appearance.colors.colLayer2Hover)
-                    : (EasyEffects.processing ? Appearance.m3colors.m3primaryContainer : Appearance.m3colors.m3surfaceContainerHighest)
+                    ? (EasyEffects.processing ? root.categoryAccent : Appearance.colors.colLayer2Hover)
+                    : (EasyEffects.processing
+                        ? ColorUtils.transparentize(root.colText, 0.86)
+                        : ColorUtils.transparentize(root.categoryAccent, 0.84))
                 border.width: 1
-                border.color: EasyEffects.processing ? Appearance.m3colors.m3primary : Appearance.m3colors.m3outlineVariant
+                border.color: EasyEffects.processing
+                    ? ColorUtils.transparentize(root.colText, 0.70)
+                    : ColorUtils.transparentize(root.categoryAccent, 0.70)
                 MaterialSymbol {
                     anchors.centerIn: parent
                     text: "graphic_eq"
-                    iconSize: root.expandedSize ? 24 : 20
+                    iconSize: root.expandedSize ? 22 : 20
                     fill: EasyEffects.processing ? 1 : 0
                     color: iconMouse.containsMouse && EasyEffects.processing
-                        ? Appearance.m3colors.m3onPrimary : root.colText
+                        ? Appearance.m3colors.m3onPrimary
+                        : (EasyEffects.processing ? root.colText : root.categoryAccent)
                 }
             }
             MouseArea {

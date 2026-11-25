@@ -9,38 +9,21 @@ import qs.modules.common.widgets
 
 QuickToggleModel {
     id: root
-    name: root.enableArmed ? Translation.tr("Click again") : Translation.tr("Triple buffer")
+    name: Translation.tr("Triple buffer")
     toggled: false
-    icon: root.enableArmed ? "warning" : "filter_3"
+    icon: "filter_3"
+    statusText: root.toggled ? Translation.tr("Enabled") : Translation.tr("Off")
 
-    property bool enableArmed: false
+    // Enabling experimental render scheduling requires press-and-hold;
+    // disabling stays an immediate single-click escape hatch.
+    mainActionRequiresHold: !root.toggled
+    mainHoldDurationMs: 1100
+    mainHoldLabel: Translation.tr("Enable 3× buffer")
 
-    statusText: root.enableArmed ? Translation.tr("Confirm enable")
-        : (root.toggled ? Translation.tr("Enabled") : Translation.tr("Off"))
-
-    // Enabling new render scheduling previously caused a DP-1 KMS modeset
-    // storm on this RX 6600 setup, so require a deliberate second click.
-    // Disabling stays immediate so the risky path always has a quick escape.
     mainAction: () => {
-        if (root.toggled) {
-            root.enableArmed = false
-            confirmEnableTimer.stop()
-            root.toggled = false
-            HyprlandConfig.set("render:new_render_scheduling", 0)
-            refreshDelay.restart()
-            return
-        }
-
-        if (!root.enableArmed) {
-            root.enableArmed = true
-            confirmEnableTimer.restart()
-            return
-        }
-
-        root.enableArmed = false
-        confirmEnableTimer.stop()
-        root.toggled = true
-        HyprlandConfig.set("render:new_render_scheduling", 1)
+        const next = !root.toggled
+        root.toggled = next
+        HyprlandConfig.set("render:new_render_scheduling", next ? 1 : 0)
         refreshDelay.restart()
     }
 
@@ -51,13 +34,6 @@ QuickToggleModel {
         onExited: (exitCode, exitStatus) => {
             root.toggled = exitCode === 0
         }
-    }
-
-    Timer {
-        id: confirmEnableTimer
-        interval: 5000
-        repeat: false
-        onTriggered: root.enableArmed = false
     }
 
     Timer {
@@ -79,7 +55,7 @@ QuickToggleModel {
         }
     }
 
-    tooltipText: root.enableArmed
-        ? Translation.tr("Warning: click again within 5 seconds to enable")
-        : Translation.tr("Experimental on this GPU; enabling previously stalled both displays")
+    tooltipText: root.toggled
+        ? Translation.tr("Click to disable render scheduling immediately")
+        : Translation.tr("Hold left-click to enable experimental render scheduling")
 }

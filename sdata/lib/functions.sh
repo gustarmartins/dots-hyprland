@@ -40,7 +40,11 @@ function x(){
     echo "  r = Repeat this command (DEFAULT)"
     echo "  e = Exit now"
     echo "  i = Ignore this error and continue (your setup might not work correctly)"
-    local p; read -p " [R/e/i]: " p
+    local p
+    if ! read -r -p " [R/e/i]: " p; then
+      echo "No input available; stopping at the failed command." >&2
+      exit 1
+    fi
     case $p in
       [iI]) echo -e "${STY_BLUE}Alright, ignore and continue...${STY_RST}";cmdstatus=2;;
       [eE]) echo -e "${STY_BLUE}Alright, will exit.${STY_RST}";break;;

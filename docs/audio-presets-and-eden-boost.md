@@ -13,37 +13,25 @@ Original presets remain available. Select presets with the existing sidebar
 picker or Super+I → Audio. The saved rollback choice for this deployment was
 `codex-immersive`; live loaded-state readback is authoritative over stale rc files.
 
-## Eden-only +12 dB
+## Boost current app (+12 dB)
 
-The control-center widget requires a double-click to enable; one click resets.
+The control-center widget requires **press and hold** (with a sweeping fill and bottom progress bar) to enable, preventing accidental +12 dB clicks; a single click resets immediately.
 Super+I → Audio has a master switch that hides the widget and stops/cleans its
-worker, plus a reset button. A separate systemd user service exists only while
-boosting. It automatically ends when all armed Eden streams exit. No timer or
+worker, plus a reset button. A separate systemd user service (`eden-audio-boost.service`) exists only while
+boosting. It automatically ends when all streams of the boosted app exit. No timer or
 always-on audio-processing daemon is installed for the boost.
 
-`eden-audio-boost` identifies the actual Eden executable and PID/start time,
-using native PipeWire client metadata where stream metadata lacks a PID. App
-names alone cannot impersonate Eden. It inserts a `linear` gain graph in the
-Eden stream's own `audioconvert.filter-graph.777` slot. Other filter slots,
-application volumes, routes, the system default sink and the current EasyEffects
-preset remain unchanged. The gain therefore works with whichever effects are
-currently selected; no saved-preset clone is required. This works with the host's
-PipeWire 1.6.9 in-node filter API. Runtime readback must confirm the gain before
-reporting active. It is not a separate surround/Atmos renderer.
+`eden-audio-boost` resolves the focused Hyprland window (`hyprctl activewindow -j`) against verified PipeWire playback streams (by process lineage, executable family, or window class), falling back to the most recent actively playing app if the focused window has no audio. It locks onto the resolved app when the hold begins and inserts a `linear` gain graph (`app_boost_gain`) in that app's `audioconvert.filter-graph.777` slot (separate from `music-loudness`'s `.778` slot). Other filter slots, application volumes, routes, the system default sink and the current EasyEffects preset remain unchanged. The gain therefore works with whichever effects are currently selected; no saved-preset clone is required. Runtime readback must confirm the gain before reporting active.
 
 +12 dB is approximately 3.98 times sample amplitude. The existing EasyEffects
 limiter can reduce the resulting peaks; amplification does not recover clipped
 source audio. Negative 12 dB would attenuate, so this is deliberately **+12 dB**.
 The helper does not change volume persistently. Reset, ordinary stop, and
 ExecStopPost recovery remove only this helper's graph from the same verified
-stream identity. It preserves a gain changed externally rather than overwriting
-it. An audio-server restart invalidates old stream identities. Kernel/API errors
-are reported rather than showing a false active state.
+stream identity (cleaning both `app_boost_gain` and legacy `eden_boost_gain`). It preserves a gain changed externally rather than overwriting
+it. An audio-server restart invalidates old stream identities.
 
-Dependencies: Python 3, PipeWire 1.6 with audioconvert filter graphs, `pw-cli`,
-`pw-dump`, `pactl`, systemd user services, EasyEffects and Quickshell. The widget
-shows an error if Eden has no identifiable audio stream yet. To explicitly invoke
-from CLI: `eden-audio-boost boost --confirmed`; reset with
+To explicitly invoke from CLI: `eden-audio-boost boost --confirmed`; reset with
 `eden-audio-boost reset`. `disable` stops the worker and hides the widget.
 
 Validation includes Qt mouse gesture tests (single-click cannot enable,

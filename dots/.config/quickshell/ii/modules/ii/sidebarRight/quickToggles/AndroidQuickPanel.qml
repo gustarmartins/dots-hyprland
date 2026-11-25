@@ -22,7 +22,7 @@ AbstractQuickPanel {
     readonly property int columns: Math.max(1, Math.min(12, Config.options.sidebar.quickToggles.android.columns))
     readonly property real baseCellWidth: Math.max(1, (togglesFlickable.width - spacing * (columns - 1)) / columns)
     readonly property real baseCellHeight: 72
-    readonly property list<string> availableToggleTypes: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "cloudflareWarp", "gameMode", "tearing", "vrr", "lsfg", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile", "musicRecognition", "antiFlashbang", "memoryMode", "focusMode", "buildCache", "zramAlgo", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
+    readonly property list<string> availableToggleTypes: ["network", "bluetooth", "idleInhibitor", "easyEffects", "nightLight", "darkMode", "gameMode", "tearing", "vrr", "lsfg", "directScanout", "tripleBuffer", "screenSnip", "colorPicker", "onScreenKeyboard", "mic", "audio", "notifications", "powerProfile", "musicRecognition", "antiFlashbang", "memoryMode", "focusMode", "buildCache", "zramAlgo", "zramRecompress", "zramWriteback", "dropCaches", "memoryCompact", "gpuMemory"]
     readonly property list<var> toggles: Config.ready ? Config.options.sidebar.quickToggles.android.toggles : []
     readonly property var placement: TileGrid.layout(toggles, columns, 7)
     readonly property var unusedToggles: availableToggleTypes.filter(type => !toggles.some(tile => tile?.type === type))
@@ -86,6 +86,24 @@ AbstractQuickPanel {
                 value: root.columns
                 onValueModified: Config.options.sidebar.quickToggles.android.columns = value
                 Accessible.name: "Grid columns"
+            }
+            RippleButton {
+                objectName: "tileGridResetDefaults"
+                implicitWidth: resetLabel.implicitWidth + 18
+                implicitHeight: 32
+                buttonRadius: 10
+                colBackground: Appearance.m3colors.m3surfaceContainerHighest
+                onClicked: {
+                    Config.options.sidebar.quickToggles.android.columns = TileGrid.defaultColumns();
+                    Config.options.sidebar.quickToggles.android.toggles = TileGrid.defaultToggles();
+                }
+                contentItem: StyledText {
+                    id: resetLabel
+                    text: Translation.tr("Reset layout")
+                    font.pixelSize: 11
+                    font.weight: Font.Medium
+                }
+                StyledToolTip { text: Translation.tr("Restore curated category layout (8 columns)") }
             }
         }
         StyledFlickable {

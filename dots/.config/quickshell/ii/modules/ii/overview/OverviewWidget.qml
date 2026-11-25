@@ -131,7 +131,7 @@ Item {
                             property int workspaceValue: root.workspaceGroup * root.workspacesShown + getWsInCell(row.index, colIndex)
                             readonly property int windowCount: HyprlandData.windowStatsByWorkspace[workspaceValue]?.count ?? 0
                             property color defaultWorkspaceColor: Qt.alpha(Appearance.m3colors.m3surfaceContainerHigh, windowCount > 0 ? 0.78 : 0.32)
-                            property color hoveredWorkspaceColor: ColorUtils.mix(defaultWorkspaceColor, Appearance.colors.colLayer1Hover, 0.1)
+                            property color hoveredWorkspaceColor: Qt.alpha(ColorUtils.mix(Appearance.m3colors.m3surfaceContainerHighest, Appearance.m3colors.m3primary, 0.88), windowCount > 0 ? 0.92 : 0.62)
                             property color hoveredBorderColor: Appearance.colors.colLayer2Hover
                             property bool hoveredWhileDragging: false
 

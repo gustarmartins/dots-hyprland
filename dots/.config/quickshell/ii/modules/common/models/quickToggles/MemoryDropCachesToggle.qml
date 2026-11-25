@@ -9,8 +9,11 @@ QuickToggleModel {
     icon: "delete_sweep"
     hasStatusText: false
     toggled: false
+    mainActionRequiresHold: true
+    mainHoldDurationMs: 900
+    mainHoldLabel: Translation.tr("Drop caches")
     mainAction: () => {
         Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh drop-caches"])
     }
-    tooltipText: Translation.tr("Drop clean page cache, dentries, and inodes (vm.drop_caches=3).")
+    tooltipText: Translation.tr("Hold left-click: drop clean page cache, dentries, and inodes (vm.drop_caches=3).")
 }

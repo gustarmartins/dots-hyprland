@@ -8,3 +8,6 @@ ExecStopPost=%h/.local/bin/music-loudness cleanup-failed
 KillMode=mixed
 TimeoutStopSec=10
 Restart=no
+
+[Install]
+WantedBy=default.target

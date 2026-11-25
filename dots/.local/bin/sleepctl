@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""OS-like sleep, auto-sleep (AC / Battery), lid and Keep awake policy manager."""
+import argparse
+import contextlib
+import fcntl
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+CONFIG_DIR = Path(os.environ.get('SLEEPCTL_CONFIG_DIR', str(Path.home() / '.config/hypr')))
+STATE_FILE = CONFIG_DIR / 'sleep-policy.json'
+HYPRIDLE_CONF = CONFIG_DIR / 'hypridle.conf'
+POWER_SUPPLY_DIR = Path(os.environ.get('SLEEPCTL_POWER_SUPPLY_DIR', '/sys/class/power_supply'))
+RUNTIME_DIR = Path(os.environ.get('SLEEPCTL_RUNTIME_DIR',
+                                  os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')))
+INHIBIT_UNIT = 'dots-sleep-inhibit.service'
+INHIBIT_META = RUNTIME_DIR / 'dots-sleep-inhibit.json'
+DRY_RUN_SYSTEM = os.environ.get('SLEEPCTL_NO_SYSTEM') == '1'
+
+ALLOWED_TIMEOUTS = (0, 5, 10, 15, 30, 60, 120)
+ALLOWED_LID_ACTIONS = ('ignore', 'suspend')
+
+DEFAULT_POLICY = {
+    'keepAwake': False,
+    'acSleepMinutes': 0,
+    'batterySleepMinutes': 15,
+    'lidOnAc': 'ignore',
+    'lidOnBattery': 'suspend',
+}
+
+
+def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False, mode='w', encoding='utf-8') as stream:
+        tmp = Path(stream.name)
+        stream.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def normalize_policy(raw: dict | None) -> dict:
+    data = dict(DEFAULT_POLICY)
+    if isinstance(raw, dict):
+        if isinstance(raw.get('keepAwake'), bool):
+            data['keepAwake'] = raw['keepAwake']
+        for key in ('acSleepMinutes', 'batterySleepMinutes'):
+            val = raw.get(key)
+            if isinstance(val, int) and not isinstance(val, bool) and val in ALLOWED_TIMEOUTS:
+                data[key] = val
+        for key in ('lidOnAc', 'lidOnBattery'):
+            val = raw.get(key)
+            if val in ALLOWED_LID_ACTIONS:
+                data[key] = val
+    return data
+
+
+def load_policy() -> dict:
+    if not STATE_FILE.exists():
+        return dict(DEFAULT_POLICY)
+    try:
+        return normalize_policy(json.loads(STATE_FILE.read_text(encoding='utf-8')))
+    except (OSError, ValueError):
+        return dict(DEFAULT_POLICY)
+
+
+def save_policy(policy: dict) -> None:
+    atomic_write(STATE_FILE, json.dumps(policy, indent=2, ensure_ascii=False) + '\n')
+
+
+def read_text_quiet(path: Path) -> str:
+    try:
+        return path.read_text(encoding='utf-8').strip()
+    except OSError:
+        return ''
+
+
+def detect_power() -> dict:
+    has_battery = False
+    mains_online = None
+    battery_discharging = False
+
+    if POWER_SUPPLY_DIR.is_dir():
+        for entry in sorted(POWER_SUPPLY_DIR.iterdir()):
+            if not entry.is_dir():
+                continue
+            scope = read_text_quiet(entry / 'scope')
+            if scope == 'Device':
+                continue
+            ptype = read_text_quiet(entry / 'type')
+            if ptype == 'Battery':
+                has_battery = True
+                if read_text_quiet(entry / 'status') == 'Discharging':
+                    battery_discharging = True
+            elif ptype == 'Mains':
+                online = read_text_quiet(entry / 'online')
+                if online == '1':
+                    mains_online = True
+                elif online == '0' and mains_online is None:
+                    mains_online = False
+
+    if mains_online is not None:
+        on_ac = mains_online
+    elif has_battery:
+        on_ac = not battery_discharging
+    else:
+        on_ac = True
+
+    return {
+        'hasBattery': has_battery,
+        'onAc': on_ac,
+        'powerSource': 'ac' if on_ac else 'battery',
+    }
+
+
+def compute_effective(policy: dict, power: dict) -> dict:
+    keep_awake = bool(policy['keepAwake'])
+    on_ac = bool(power['onAc'])
+    has_battery = bool(power['hasBattery'])
+
+    if keep_awake:
+        eff_sleep = 0
+        eff_lid = 'ignore'
+        inhibit_parts = ['idle', 'sleep']
+        if has_battery:
+            inhibit_parts.append('handle-lid-switch')
+        inhibit_why = 'Keep awake is enabled'
+    else:
+        eff_sleep = policy['acSleepMinutes'] if on_ac else policy['batterySleepMinutes']
+        eff_lid = policy['lidOnAc'] if on_ac else policy['lidOnBattery']
+        inhibit_parts = []
+        if eff_sleep == 0:
+            inhibit_parts.append('idle')
+        if has_battery and eff_lid == 'ignore':
+            inhibit_parts.append('handle-lid-switch')
+        source_label = 'plugged in' if on_ac else 'on battery'
+        inhibit_why = f'Auto-sleep policy ({source_label})'
+
+    return {
+        'effectiveSleepMinutes': eff_sleep,
+        'effectiveLidAction': eff_lid,
+        'desiredInhibitWhat': ':'.join(inhibit_parts),
+        'desiredInhibitWhy': inhibit_why,
+    }
+
+
+def render_hypridle_conf(policy: dict, effective: dict) -> str:
+    sleep_min = effective['effectiveSleepMinutes']
+    lines = [
+        '# Managed by sleepctl. Configure via Quick Settings (Keep awake) or Super+I -> Lock & power.',
+        'general {',
+        '    lock_cmd = $HOME/.local/bin/sleepctl lock',
+        '    before_sleep_cmd = loginctl lock-session',
+        "    after_sleep_cmd = hyprctl dispatch 'hl.dsp.dpms({ action = \"enable\" })'",
+        '    inhibit_sleep = 3',
+        '}',
+        '',
+    ]
+    if sleep_min <= 0:
+        lines.append('# Auto-sleep is disabled for the active power state (Never / Keep awake).')
+        return '\n'.join(lines) + '\n'
+
+    sleep_sec = sleep_min * 60
+    dpms_sec = max(60, sleep_sec - 120) if sleep_min >= 5 else sleep_sec
+    lock_sec = max(60, dpms_sec - 60) if sleep_min >= 5 else 0
+
+    if lock_sec > 0 and lock_sec < dpms_sec:
+        lines.extend([
+            'listener {',
+            f'    timeout = {lock_sec}',
+            '    on-timeout = $HOME/.local/bin/sleepctl action lock',
+            '}',
+            '',
+        ])
+    if dpms_sec < sleep_sec:
+        lines.extend([
+            'listener {',
+            f'    timeout = {dpms_sec}',
+            '    on-timeout = $HOME/.local/bin/sleepctl action dpms-off',
+            "    on-resume = hyprctl dispatch 'hl.dsp.dpms({ action = \"enable\" })'",
+            '}',
+            '',
+        ])
+    lines.extend([
+        'listener {',
+        f'    timeout = {sleep_sec}',
+        '    on-timeout = $HOME/.local/bin/sleepctl action sleep',
+        '}',
+        '',
+    ])
+    return '\n'.join(lines)
+
+
+def run_quiet(args: list[str], timeout: int = 8) -> subprocess.CompletedProcess:
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+
+
+def unit_is_active(unit: str) -> bool:
+    if DRY_RUN_SYSTEM:
+        return False
+    res = run_quiet(['systemctl', '--user', 'is-active', '--quiet', unit])
+    return res.returncode == 0
+
+
+def read_inhibit_meta() -> dict:
+    if not INHIBIT_META.exists():
+        return {}
+    try:
+        return json.loads(INHIBIT_META.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+
+
+def reconcile_inhibitor(what: str, why: str) -> None:
+    if DRY_RUN_SYSTEM:
+        if what:
+            atomic_write(INHIBIT_META, json.dumps({'what': what, 'why': why}) + '\n')
+        else:
+            INHIBIT_META.unlink(missing_ok=True)
+        return
+
+    active = unit_is_active(INHIBIT_UNIT)
+    meta = read_inhibit_meta()
+
+    if not what:
+        if active:
+            run_quiet(['systemctl', '--user', 'stop', INHIBIT_UNIT])
+        INHIBIT_META.unlink(missing_ok=True)
+        return
+
+    if active and meta.get('what') == what and meta.get('why') == why:
+        return
+
+    if active:
+        run_quiet(['systemctl', '--user', 'stop', INHIBIT_UNIT])
+    run_quiet(['systemctl', '--user', 'reset-failed', INHIBIT_UNIT])
+
+    inhibit_bin = shutil.which('systemd-inhibit') or '/usr/bin/systemd-inhibit'
+    sleep_bin = shutil.which('sleep') or '/usr/bin/sleep'
+    res = run_quiet([
+        'systemd-run', '--user',
+        f'--unit={INHIBIT_UNIT}',
+        '--collect',
+        f'--property=Description=dots-hyprland sleep inhibitor ({what})',
+        inhibit_bin,
+        f'--what={what}',
+        '--mode=block',
+        '--who=Keep awake',
+        f'--why={why}',
+        sleep_bin, 'infinity',
+    ])
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.strip() or res.stdout.strip() or 'Failed to start sleep inhibitor')
+    atomic_write(INHIBIT_META, json.dumps({'what': what, 'why': why}) + '\n')
+
+
+def reconcile_hypridle(sleep_min: int) -> None:
+    if DRY_RUN_SYSTEM:
+        return
+    if sleep_min <= 0:
+        if unit_is_active('hypridle.service'):
+            run_quiet(['systemctl', '--user', 'stop', 'hypridle.service'])
+        return
+    # Restart so hypridle always reloads the freshly generated config.
+    run_quiet(['systemctl', '--user', 'restart', 'hypridle.service'])
+
+
+def build_status(policy: dict | None = None) -> dict:
+    if policy is None:
+        policy = load_policy()
+    power = detect_power()
+    effective = compute_effective(policy, power)
+    meta = read_inhibit_meta()
+    inhibit_active = bool(meta.get('what')) if DRY_RUN_SYSTEM else unit_is_active(INHIBIT_UNIT)
+    hypridle_active = (effective['effectiveSleepMinutes'] > 0) if DRY_RUN_SYSTEM else unit_is_active('hypridle.service')
+    return {
+        **policy,
+        **power,
+        'effectiveSleepMinutes': effective['effectiveSleepMinutes'],
+        'effectiveLidAction': effective['effectiveLidAction'],
+        'inhibitorActive': inhibit_active,
+        'inhibitorWhat': meta.get('what', '') if inhibit_active else '',
+        'hypridleActive': hypridle_active,
+    }
+
+
+def apply_policy(policy: dict | None = None) -> dict:
+    if policy is None:
+        policy = load_policy()
+    power = detect_power()
+    effective = compute_effective(policy, power)
+    atomic_write(HYPRIDLE_CONF, render_hypridle_conf(policy, effective))
+    reconcile_hypridle(effective['effectiveSleepMinutes'])
+    reconcile_inhibitor(effective['desiredInhibitWhat'], effective['desiredInhibitWhy'])
+    return build_status(policy)
+
+
+def supported_login1(method: str) -> bool:
+    res = run_quiet([
+        'busctl', 'call', 'org.freedesktop.login1', '/org/freedesktop/login1',
+        'org.freedesktop.login1.Manager', method,
+    ])
+    return res.returncode == 0 and res.stdout.strip() in ('s "yes"', 's "challenge"')
+
+
+def run_action(kind: str) -> int:
+    policy = load_policy()
+    power = detect_power()
+    effective = compute_effective(policy, power)
+    if policy['keepAwake'] or effective['effectiveSleepMinutes'] <= 0:
+        return 0
+
+    if kind == 'lock':
+        return run_quiet(['loginctl', 'lock-session']).returncode
+    if kind == 'dpms-off':
+        return run_quiet(['hyprctl', 'dispatch', 'hl.dsp.dpms({ action = "disable" })']).returncode
+    if kind == 'sleep':
+        if run_quiet(['systemctl', 'is-active', '--quiet', 'powerbank-mode.service']).returncode == 0:
+            return 0
+        action = 'suspend-then-hibernate' if supported_login1('CanSuspendThenHibernate') else 'suspend'
+        return run_quiet(['systemctl', action], timeout=30).returncode
+    raise ValueError(f'Unknown action: {kind}')
+
+
+def run_lock_screen() -> int:
+    res = run_quiet(['timeout', '3', 'qs', '-c', 'ii', 'ipc', 'call', 'lock', 'activate'], timeout=5)
+    if res.returncode == 0:
+        return 0
+    if run_quiet(['pgrep', '-u', str(os.getuid()), '-x', 'hyprlock']).returncode == 0:
+        return 0
+    if shutil.which('hyprlock'):
+        return subprocess.run(['hyprlock']).returncode
+    return 0
+
+
+def parse_bool_flag(value: str) -> bool:
+    low = value.strip().lower()
+    if low in ('1', 'true', 'on', 'yes'):
+        return True
+    if low in ('0', 'false', 'off', 'no'):
+        return False
+    raise ValueError(f'Invalid boolean value: {value}')
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='cmd', required=True)
+    sub.add_parser('status')
+    sub.add_parser('apply')
+    sub.add_parser('sync')
+    sub.add_parser('toggle')
+    sub.add_parser('lock')
+
+    set_p = sub.add_parser('set')
+    set_p.add_argument('--keep-awake', dest='keep_awake')
+    set_p.add_argument('--ac', type=int, choices=ALLOWED_TIMEOUTS)
+    set_p.add_argument('--battery', type=int, choices=ALLOWED_TIMEOUTS)
+    set_p.add_argument('--lid-ac', dest='lid_ac', choices=ALLOWED_LID_ACTIONS)
+    set_p.add_argument('--lid-battery', dest='lid_battery', choices=ALLOWED_LID_ACTIONS)
+
+    act_p = sub.add_parser('action')
+    act_p.add_argument('kind', choices=('lock', 'dpms-off', 'sleep'))
+
+    args = parser.parse_args()
+
+    if args.cmd == 'status':
+        print(json.dumps(build_status(), ensure_ascii=False))
+        return 0
+    if args.cmd == 'lock':
+        return run_lock_screen()
+    if args.cmd == 'action':
+        return run_action(args.kind)
+
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    with contextlib.ExitStack() as stack:
+        lock_file = stack.enter_context((RUNTIME_DIR / 'sleepctl.lock').open('a'))
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+
+        policy = load_policy()
+        if args.cmd == 'toggle':
+            policy['keepAwake'] = not policy['keepAwake']
+            save_policy(policy)
+        elif args.cmd == 'set':
+            if args.keep_awake is not None:
+                policy['keepAwake'] = parse_bool_flag(args.keep_awake)
+            if args.ac is not None:
+                policy['acSleepMinutes'] = args.ac
+            if args.battery is not None:
+                policy['batterySleepMinutes'] = args.battery
+            if args.lid_ac is not None:
+                policy['lidOnAc'] = args.lid_ac
+            if args.lid_battery is not None:
+                policy['lidOnBattery'] = args.lid_battery
+            save_policy(policy)
+        elif args.cmd in ('apply', 'sync'):
+            if not STATE_FILE.exists():
+                save_policy(policy)
+
+        result = apply_policy(policy)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as err:
+        print(json.dumps({'error': str(err)}, ensure_ascii=False))
+        sys.exit(1)

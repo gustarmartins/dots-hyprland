@@ -24,7 +24,14 @@ ShellRoot {
 
     // Stuff for every panel family
     ReloadPopup {}
-    SessionBusRecovery {}
+    SessionBusRecovery {
+        deferRestart: GlobalStates.screenLocked
+    }
+    Binding {
+        target: ShellControl
+        property: "locked"
+        value: GlobalStates.screenLocked
+    }
 
     Component.onCompleted: {
         MaterialThemeLoader.reapplyTheme()
@@ -43,6 +50,10 @@ ShellRoot {
     // Panel families
     property list<string> families: ["ii", "waffle"]
     function cyclePanelFamily() {
+        if (GlobalStates.screenLocked) {
+            console.warn("[ShellRoot] ignoring panelFamily cycle while screen is locked");
+            return;
+        }
         const currentIndex = families.indexOf(Config.options.panelFamily)
         const nextIndex = (currentIndex + 1) % families.length
         Config.options.panelFamily = families[nextIndex]
@@ -68,12 +79,9 @@ ShellRoot {
     // Keep the process and its StatusNotifierWatcher alive across UI reloads.
     IpcHandler {
         target: "shellControl"
-        function reload(): void { Quickshell.reload(false) }
-        function restartForUpdate(): void {
-            Config.flushPendingWrites();
-            // Run normal teardown. The session's existing supervisor handles exit 75.
-            Qt.callLater(() => Qt.exit(75));
-        }
+        function reload(): void { ShellControl.requestReload() }
+        function restartForUpdate(): void { ShellControl.requestRestartForUpdate() }
+        function status(): string { return ShellControl.statusJson() }
     }
 
     // Shortcuts

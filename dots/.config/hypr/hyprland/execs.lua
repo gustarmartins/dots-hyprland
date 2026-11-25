@@ -8,7 +8,7 @@ hl.on("hyprland.start", function ()
 
     -- Core components (authentication, lock screen, notification daemon)
     hl.exec_cmd("gnome-keyring-daemon --start --components=secrets")
-    -- Automatic idle lock/DPMS is intentionally disabled; keep manual Super+L.
+    hl.exec_cmd("systemctl --user import-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP && $HOME/.local/bin/sleepctl sync")
     hl.exec_cmd("dbus-update-activation-environment --all")
     hl.exec_cmd("sleep 1 && dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP") -- Some fix idk
     -- Audio

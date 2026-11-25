@@ -17,6 +17,7 @@ Singleton {
     property bool active: false
     property bool measuring: false
     property bool followPresets: true
+    property bool edenDefault: false
     property bool autoMatch: false
     property real autoInterval: 30
     property string autoMessage: ""
@@ -49,6 +50,7 @@ Singleton {
     function setTarget(value) { run(["target", String(value)]); }
     function setFollowPresets(value) { run(["follow-presets", String(value)]); }
     function setStep(value) { run(["step", String(value)]); }
+    function setEdenDefault(value) { run(["eden-default", String(value)]); }
     function setAutoMatch(value) { if (value) run(["auto-match", "true"]); else cancel(["auto-match", "false"]); }
     function setAutoInterval(value) { run(["auto-interval", String(value)]); }
     FileView { path: root.configPath; watchChanges: true; onFileChanged: root.refresh() }
@@ -67,6 +69,7 @@ Singleton {
                 root.measuring = s.measuring; root.db = s.db; root.title = s.title;
                 root.preset = s.preset; root.message = s.message; root.stepDb = s.step_db;
                 root.targetLufs = s.target_lufs; root.followPresets = s.follow_presets;
+                root.edenDefault = s.eden_default === true;
                 root.autoMatch = s.auto_match === true; root.autoInterval = s.auto_interval || 30;
                 root.autoMessage = s.auto_message || "";
             } catch (e) { root.ready = false; root.message = "Could not read loudness status"; }

@@ -19,6 +19,8 @@ Rectangle {
     color: selected ? Appearance.m3colors.m3secondaryContainer : Appearance.m3colors.m3surfaceContainer
     border.color: selected ? Appearance.m3colors.m3primary : Appearance.m3colors.m3outlineVariant
     border.width: selected ? 2 : 1
+    readonly property color primaryTextColor: selected ? Appearance.m3colors.m3onSecondaryContainer : Appearance.m3colors.m3onSurface
+    readonly property color secondaryTextColor: selected ? Qt.alpha(Appearance.m3colors.m3onSecondaryContainer, 0.8) : Appearance.m3colors.m3onSurfaceVariant
     function bytes(n) {
         if (n === null || n === undefined) return "Unknown";
         return n >= 1073741824 ? (n / 1073741824).toFixed(2) + " GiB" : (n / 1048576).toFixed(0) + " MiB";
@@ -40,6 +42,7 @@ Rectangle {
                     textFormat: Text.PlainText
                     font.pixelSize: 15
                     font.weight: Font.DemiBold
+                    color: root.primaryTextColor
                     elide: Text.ElideRight
                 }
                 StyledText {
@@ -49,7 +52,7 @@ Rectangle {
                           + (root.processData.protected ? "  ·  Protected" : "")
                     textFormat: Text.PlainText
                     font.pixelSize: 12
-                    color: Appearance.m3colors.m3onSurfaceVariant
+                    color: root.secondaryTextColor
                     elide: Text.ElideRight
                     ToolTip.visible: detailsHover.hovered
                     ToolTip.text: (root.processData.unit || root.processData.group || "")
@@ -67,14 +70,14 @@ Rectangle {
                     text: root.bytes(root.processData.rss) + " RAM"
                     font.pixelSize: 13
                     font.weight: Font.DemiBold
-                    color: root.processData.large_rss ? root.warningColor : Appearance.m3colors.m3onSurface
+                    color: root.processData.large_rss ? root.warningColor : root.primaryTextColor
                     elide: Text.ElideRight
                 }
                 StyledText {
                     Layout.fillWidth: true
                     text: root.bytes(root.processData.swap) + " swap"
                     font.pixelSize: 12
-                    color: root.processData.swap > 0 ? root.warningColor : Appearance.m3colors.m3onSurfaceVariant
+                    color: root.processData.swap > 0 ? root.warningColor : root.secondaryTextColor
                     elide: Text.ElideRight
                 }
             }

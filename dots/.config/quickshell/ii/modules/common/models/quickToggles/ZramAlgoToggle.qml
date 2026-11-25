@@ -22,6 +22,10 @@ QuickToggleModel {
     }
     statusText: algoState === "busy" ? Translation.tr("Busy") : algoState === "unknown" ? Translation.tr("Unavailable") : algoState
     toggled: ["zstd", "lz4", "lz4hc"].includes(liveAlgo) && (algoState.indexOf("->") >= 0 || liveAlgo !== "zstd")
+    altActionOnRightClick: true
+    altActionRequiresHold: true
+    altHoldDurationMs: 1200
+    altHoldLabel: Translation.tr("Rebuild ZRAM")
 
     mainAction: () => {
         Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec zram-algo-mode.sh next"])
@@ -60,5 +64,5 @@ QuickToggleModel {
         onTriggered: fetchActiveState.running = true
     }
 
-    tooltipText: Translation.tr("Left: stage next primary. Right: rebuild ZRAM now after headroom checks. Status includes verified secondary levels.")
+    tooltipText: Translation.tr("Left: stage next primary. Hold right-click: rebuild ZRAM now after headroom checks. Status includes verified secondary levels.")
 }

@@ -13,19 +13,26 @@ Rectangle {
     readonly property bool hasBrightness: Config.options.sidebar.quickSliders.showBrightness && brightnessMonitor !== null
     readonly property bool hasVolume: Config.options.sidebar.quickSliders.showVolume
     readonly property bool hasMic: Config.options.sidebar.quickSliders.showMic
-    implicitHeight: controls.implicitHeight + 16
-    radius: 18
+    readonly property int sliderCount: (hasBrightness ? 1 : 0) + (hasVolume ? 1 : 0) + (hasMic ? 1 : 0)
+    readonly property bool singleRow: width >= 480
+    implicitHeight: controls.implicitHeight + 12
+    radius: 14
     color: Appearance.colors.colLayer1
     GridLayout {
         id: controls
-        anchors.fill: parent
-        anchors.margins: 8
-        columns: 2
-        columnSpacing: 16
+        anchors {
+            fill: parent
+            leftMargin: 10
+            rightMargin: 10
+            topMargin: 6
+            bottomMargin: 6
+        }
+        columns: root.singleRow ? Math.max(1, root.sliderCount) : 2
+        columnSpacing: 12
         rowSpacing: 2
         LevelControl {
             visible: root.hasBrightness
-            Layout.columnSpan: 2
+            Layout.columnSpan: root.singleRow ? 1 : 2
             icon: "light_mode"
             sliderValue: Hyprsunset.gamma === 100 ? 0.3 + (root.brightnessMonitor?.brightness ?? 1) * 0.7 : (Hyprsunset.gamma - Hyprsunset.gammaLowerLimit) / (100 - Hyprsunset.gammaLowerLimit) * 0.3
             readout: Hyprsunset.gamma === 100 ? Math.round((root.brightnessMonitor?.brightness ?? 1) * 100) + "%" : "γ " + Hyprsunset.gamma
@@ -43,7 +50,7 @@ Rectangle {
         }
         LevelControl {
             visible: root.hasVolume
-            Layout.columnSpan: root.hasMic ? 1 : 2
+            Layout.columnSpan: root.singleRow ? 1 : (root.hasMic ? 1 : 2)
             icon: "volume_up"
             sliderValue: Audio.sink?.audio?.volume ?? 0
             enabled: !!Audio.sink?.audio
@@ -53,7 +60,7 @@ Rectangle {
         }
         LevelControl {
             visible: root.hasMic
-            Layout.columnSpan: root.hasVolume ? 1 : 2
+            Layout.columnSpan: root.singleRow ? 1 : (root.hasVolume ? 1 : 2)
             icon: "mic"
             sliderValue: Audio.source?.audio?.volume ?? 0
             enabled: !!Audio.source?.audio
@@ -71,20 +78,20 @@ Rectangle {
         signal adjusted(real value)
         Layout.fillWidth: true
         Layout.preferredWidth: 1
-        spacing: 8
-        MaterialSymbol { text: level.icon; iconSize: 18; color: Appearance.m3colors.m3onSurfaceVariant }
+        spacing: 6
+        MaterialSymbol { text: level.icon; iconSize: 16; color: Appearance.m3colors.m3onSurfaceVariant }
         StyledSlider {
             Layout.fillWidth: true
             configuration: StyledSlider.Configuration.XS
-            implicitHeight: 30
-            handleHeight: 24
+            implicitHeight: 24
+            handleHeight: 20
             stopIndicatorValues: []
             value: level.sliderValue
             onMoved: level.adjusted(value)
             Accessible.name: level.accessibleLabel
         }
         StyledText {
-            Layout.preferredWidth: 38
+            Layout.preferredWidth: 34
             text: level.readout
             font.pixelSize: 11
             horizontalAlignment: Text.AlignRight

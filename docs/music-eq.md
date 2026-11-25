@@ -38,7 +38,13 @@ Active osu!lazer audio applies `osu_preset` (`astra-osu` by default) whenever no
 music is playing. Music listening sessions (Spotify, Jukebox, mpv) take precedence
 over simultaneous osu! audio. When music pauses or finishes while osu! continues
 producing audio, the preset automatically returns to the osu! profile; when osu!
-audio stops or closes and no music is playing, the prior baseline preset is restored.
+audio stops or closes and no music is playing (even if a music player remains open
+and paused in the background), the prior baseline preset is restored before
+adopting the paused player. `music-eq.service` uses `Restart=always` so accidental
+external process kills recover automatically while `music-eq disable` or
+`systemctl --user stop` still stops it cleanly. When `effect_input.spatial-surround`
+is detected idle with no running mpv stream, `music-eq` invokes `mpv-spatial release`
+to clean up any orphaned spatial sink.
 A silent or open osu! window with no active running audio stream does not trigger
 preset switching. Matching preserves title/version suffixes. Artist and genre choices
 are style approximations, not measurements of every song. Spotify often supplies no

@@ -5,10 +5,11 @@ import os,shutil,subprocess,tempfile
 repo=Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='music-loudness-ui-') as tmp:
  root=Path(tmp);imports=root/'imports'
- for name,qmldir in {'qs/services':'module qs.services\nsingleton MusicLoudness 1.0 MusicLoudness.qml\n',
+ for name,qmldir in {'Quickshell':'module Quickshell\nsingleton Quickshell 1.0 Quickshell.qml\n','qs/services':'module qs.services\nsingleton MusicLoudness 1.0 MusicLoudness.qml\n',
   'qs/modules/common':'module qs.modules.common\nsingleton Appearance 1.0 Appearance.qml\n',
   'qs/modules/common/widgets':'module qs.modules.common.widgets\nStyledText 1.0 StyledText.qml\nMaterialSymbol 1.0 MaterialSymbol.qml\n'}.items():
   d=imports/name;d.mkdir(parents=True);(d/'qmldir').write_text(qmldir)
+ (imports/'Quickshell/Quickshell.qml').write_text('pragma Singleton\nimport QtQuick\nQtObject { property var screens: [] }\n')
  (imports/'qs/services/MusicLoudness.qml').write_text('''pragma Singleton
 import QtQuick
 QtObject {
@@ -22,6 +23,8 @@ QtObject {
  property bool busy: false
  property bool measuring: false
  property bool followPresets: true
+ property bool edenDefault: false
+ function setEdenDefault(v) { edenDefault=v; }
  property bool autoMatch: false
  property real autoInterval: 30
  property string autoMessage: ""
@@ -47,13 +50,18 @@ QtObject {
 ''')
  (imports/'qs/modules/common/Appearance.qml').write_text('''pragma Singleton
 import QtQuick
-QtObject { property var m3colors: ({m3error:"#ff9999",m3onSurface:"white",m3onSurfaceVariant:"#cccccc",m3primary:"#8ab4f8",m3secondaryContainer:"#24413a",m3surfaceContainerHigh:"#25292e",m3surfaceContainerHighest:"#34383d",m3outline:"white",m3outlineVariant:"gray",m3onPrimary:"white"}) }
+QtObject { property var m3colors: ({m3error:"#ff9999",m3onSurface:"white",m3onSurfaceVariant:"#cccccc",m3primary:"#8ab4f8",m3secondaryContainer:"#24413a",m3surfaceContainerLow:"#25292e",m3surfaceContainerHigh:"#25292e",m3surfaceContainerHighest:"#34383d",m3outline:"white",m3outlineVariant:"gray",m3onPrimary:"white"}) }
 ''')
  (imports/'qs/modules/common/widgets/MaterialSymbol.qml').write_text('import QtQuick\nItem { property int iconSize: 18; property string text; property color color; implicitWidth: iconSize; implicitHeight: iconSize; Text { anchors.centerIn: parent; text: "⌄"; color: parent.color; font.pixelSize: parent.iconSize } }\n')
  (imports/'qs/modules/common/widgets/StyledText.qml').write_text('import QtQuick\nText { color: "white" }\n')
  src=repo/'dots/.config/quickshell/ii/modules'
  shutil.copy2(src/'ii/sidebarRight/MusicLoudnessWidget.qml',root/'MusicLoudnessWidget.qml')
- for name in ['MusicLoudnessControls.qml','SettingsSwitch.qml','SettingsButton.qml','SettingsComboBox.qml']:shutil.copy2(src/'settings'/name,root/name)
+ for name in ['MusicLoudnessControls.qml','SettingsSwitch.qml','SettingsButton.qml','SettingsComboBox.qml','SettingsCheckBox.qml','TimingSettingRow.qml','SettingRow.qml','SettingsField.qml','SettingsCatalog.js']:shutil.copy2(src/'settings'/name,root/name)
+ for name,body in [('Config','property bool ready: true'),('Translation','function tr(value) { return value; }')]:
+  directory=imports/('qs/modules/common' if name=='Config' else 'qs/services')
+  with (directory/'qmldir').open('a') as manifest:manifest.write(f'singleton {name} 1.0 {name}.qml\n')
+  (directory/(name+'.qml')).write_text('pragma Singleton\nimport QtQuick\nQtObject { '+body+' }\n')
+ (root/'QuickTileEditor.qml').write_text('import QtQuick\nItem { property var tiles; signal edited(var value) }\n')
  (root/'tst_loudness.qml').write_text('''import QtQuick
 import QtTest
 import qs.services
@@ -65,11 +73,16 @@ Rectangle {
   name:"MusicLoudnessCard";when:windowShown
   function init() { MusicLoudness.enabled=true;MusicLoudness.ready=true;MusicLoudness.matchReady=true;MusicLoudness.busy=false;MusicLoudness.measuring=false;MusicLoudness.db=0;MusicLoudness.active=false;MusicLoudness.error="";MusicLoudness.autoMatch=false;MusicLoudness.autoInterval=30; }
   function test_auto_checkbox_and_interval_are_shared() {
-   let box=findChild(card,"musicLoudnessAutoMatch"),setting=findChild(settings,"musicLoudnessSettingsAutoMatch"),interval=findChild(settings,"musicLoudnessAutoInterval");
+   let box=findChild(card,"musicLoudnessAutoMatch"),setting=findChild(settings,"musicLoudnessSettingsAutoMatch"),interval=findChild(settings,"choice:musicLoudness.autoInterval");
    verify(box!==null&&setting!==null&&interval!==null);verify(!box.checked);verify(!interval.visible);
    mouseClick(box);compare(MusicLoudness.lastAction,"auto-on");verify(setting.checked);verify(interval.visible);compare(interval.currentText,"30 seconds");
    interval.activated(2);compare(MusicLoudness.autoInterval,60);
    mouseClick(setting);compare(MusicLoudness.lastAction,"auto-off");verify(!box.checked);
+  }
+  function test_eden_default_toggle() {
+   let box=findChild(settings,"musicLoudnessEdenDefault");verify(box!==null);
+   mouseClick(box);verify(MusicLoudness.edenDefault);
+   mouseClick(box);verify(!MusicLoudness.edenDefault);
   }
   function test_picker_selects_firefox() {
    let picker=findChild(card,"musicLoudnessApp");verify(picker!==null);

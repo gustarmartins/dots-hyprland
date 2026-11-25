@@ -30,6 +30,7 @@ KITTY_CONF="$HOME/.config/kitty/kitty.conf"
 BACKUP_DIR="$HOME/.config/fontctl/backups"
 QS_CONFIG_NAME="${FONTCTL_QS_CONFIG:-ii}"
 BROWSER_HELPER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/fontctl-browser"
+KITTY_MONITOR_HELPER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/kitty-font-monitor"
 
 # ── Colors ─────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -630,6 +631,14 @@ cmd_status() {
         kitty_size=$(grep "^font_size" "$KITTY_CONF" 2>/dev/null | awk '{print $2}')
         printf "%-24s %-26s %-14s %-10s\n" "Kitty" "${kitty_font} ${kitty_size}pt" "—" "—"
     fi
+    if [[ -f "$KITTY_MONITOR_HELPER" ]]; then
+        local km_json
+        km_json=$(python3 "$KITTY_MONITOR_HELPER" status --json 2>/dev/null || true)
+        if [[ -n "$km_json" ]] && jq -e '.enabled == true' >/dev/null 2>&1 <<< "$km_json"; then
+            jq -r '"  Kitty per-monitor: default=" + (if .default_size > 0 then (.default_size|tostring) + "pt" else "preset" end)
+                + ", " + ([.monitors[] | "\(.name)=\(.effective_size)pt"] | join(", "))' <<< "$km_json"
+        fi
+    fi
     
     # Saved preferences are not proof of the renderer in an open browser.
     echo ""
@@ -655,7 +664,8 @@ cmd_status() {
 
 # ── Set Command ────────────────────────────────────────────────────────────────
 cmd_set() {
-    local ui_font="" ui_size="11" mono_font="" mono_size="13" kitty_size=""
+    local ui_font="" ui_size="11" mono_font="" mono_size="13" kitty_size="" preset_kitty_size=""
+    local kitty_size_explicit=false kitty_size_note=""
     local title_font="" title_size="12"
     local numbers_font="" reading_font="" expressive_font=""
     local hintstyle="hintfull" subpixel="rgb" lcdfilter="lcddefault"
@@ -666,8 +676,9 @@ cmd_set() {
             --ui)          ui_font="$2"; shift 2 ;;
             --ui-size)     ui_size="$2"; shift 2 ;;
             --mono)        mono_font="$2"; shift 2 ;;
-            --mono-size)   mono_size="$2"; kitty_size=""; shift 2 ;;
-            --kitty-size)  kitty_size="$2"; shift 2 ;;
+            --mono-size)   mono_size="$2"; kitty_size=""; preset_kitty_size=""; kitty_size_explicit=false; shift 2 ;;
+            --kitty-size)  kitty_size="$2"; kitty_size_explicit=true; shift 2 ;;
+            --preset-kitty-size) preset_kitty_size="$2"; shift 2 ;;
             --title)       title_font="$2"; shift 2 ;;
             --title-size)  title_size="$2"; shift 2 ;;
             --numbers)     numbers_font="$2"; shift 2 ;;
@@ -719,7 +730,15 @@ cmd_set() {
     done
 
     # Reject invalid sizes before any configuration files are changed.
-    kitty_size="${kitty_size:-$mono_size}"
+    if [[ "$rendering_only" == false && "$kitty_size_explicit" == false && -f "$KITTY_MONITOR_HELPER" ]]; then
+        local monitor_default_kitty=""
+        monitor_default_kitty=$(python3 "$KITTY_MONITOR_HELPER" kitty-size 2>/dev/null || true)
+        if [[ -n "$monitor_default_kitty" ]]; then
+            kitty_size="$monitor_default_kitty"
+            kitty_size_note=" (per-monitor default)"
+        fi
+    fi
+    kitty_size="${kitty_size:-${preset_kitty_size:-$mono_size}}"
     jq -en --arg ui "$ui_size" --arg mono "$mono_size" --arg title "$title_size" --arg kitty "$kitty_size" \
         '[$ui, $mono, $title, $kitty] | all(.[]; (tonumber | . > 0))' >/dev/null 2>&1 \
         || die "Font sizes must be positive numbers"
@@ -737,7 +756,7 @@ cmd_set() {
     echo -e "\n${BOLD}fontctl set${NC}"
     echo -e "  UI:    ${CYAN}${ui_font}${NC} ${ui_size}pt"
     echo -e "  Mono:  ${CYAN}${mono_font}${NC} ${mono_size}pt"
-    echo -e "  Kitty: ${CYAN}${mono_font}${NC} ${kitty_size}pt"
+    echo -e "  Kitty: ${CYAN}${mono_font}${NC} ${kitty_size}pt${kitty_size_note}"
     echo -e "  Title: ${CYAN}${title_font}${NC} ${title_size}pt"
     echo -e "  Hint:  ${hintstyle}  Subpixel: ${subpixel}  LCD: ${lcdfilter}"
     echo ""
@@ -784,6 +803,16 @@ cmd_set() {
     
     if [[ "$rendering_only" == false ]]; then
         update_kitty "$mono_font" "$kitty_size"
+        if [[ -f "$KITTY_MONITOR_HELPER" ]]; then
+            local km_res
+            if km_res=$(python3 "$KITTY_MONITOR_HELPER" apply --reload --json 2>/dev/null); then
+                local km_applied
+                km_applied=$(jq -r '.applied // 0' <<< "$km_res" 2>/dev/null || echo 0)
+                if [[ "$km_applied" =~ ^[1-9][0-9]*$ ]]; then
+                    log_ok "Kitty (live): reloaded ${km_applied} window(s) with per-monitor sizes"
+                fi
+            fi
+        fi
     fi
     
     local browser_failed=false
@@ -844,7 +873,7 @@ apply_curated_preset() {
         [[ "$name" == "$requested" ]] || continue
         printf '\nPreset: %s — %s\n' "$name" "$mood"
         cmd_set --ui "$ui" --ui-size "$ui_pt" \
-                --mono "$mono" --mono-size "$mono_pt" --kitty-size "$kitty_pt" \
+                --mono "$mono" --mono-size "$mono_pt" --preset-kitty-size "$kitty_pt" \
                 --title "$title" --title-size "$title_pt" \
                 --numbers "$numbers" --reading "$reading" --expressive "$expressive" \
                 --hintstyle hintfull --subpixel rgb "$@"
@@ -875,7 +904,7 @@ cmd_preset() {
         profile)
             echo -e "${BOLD}Preset: Profile${NC} — Readex Pro + JetBrains Mono Nerd Font"
             cmd_set --ui "Readex Pro" --ui-size 13 \
-                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 12 --kitty-size 11 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 12 --preset-kitty-size 11 \
                     --title "Readex Pro" --title-size 12 \
                     --numbers "Readex Pro" \
                     --reading "Readex Pro" \
@@ -885,7 +914,7 @@ cmd_preset() {
         apple)
             echo -e "${BOLD}Preset: Apple${NC} — SF Pro Text + SF Mono"
             cmd_set --ui "SF Pro Text" --ui-size 10 \
-                    --mono "SF Mono" --mono-size 12 --kitty-size 12 \
+                    --mono "SF Mono" --mono-size 12 --preset-kitty-size 12 \
                     --title "SF Pro Text" --title-size 11 \
                     --numbers "SF Pro Text" \
                     --hintstyle hintfull --subpixel rgb "$@"
@@ -893,7 +922,7 @@ cmd_preset() {
         roboto-flex)
             echo -e "${BOLD}Preset: Roboto Flex${NC} — Roboto Flex + JetBrains Mono NF"
             cmd_set --ui "Roboto Flex" --ui-size 11 \
-                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 --kitty-size 12 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 --preset-kitty-size 12 \
                     --title "Roboto Flex" --title-size 12 \
                     --numbers "Roboto Flex" --reading "Roboto Flex" \
                     --hintstyle hintfull --subpixel rgb "$@"
@@ -901,7 +930,7 @@ cmd_preset() {
         google)
             echo -e "${BOLD}Preset: Google${NC} — Google Sans Flex + JetBrains Mono NF"
             cmd_set --ui "Google Sans Flex" --ui-size 11 \
-                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 --kitty-size 12 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 --preset-kitty-size 12 \
                     --title "Google Sans Flex" --title-size 12 \
                     --numbers "Fira Sans Heavy" \
                     --hintstyle hintfull --subpixel rgb "$@"
@@ -909,7 +938,7 @@ cmd_preset() {
         inter)
             echo -e "${BOLD}Preset: Inter${NC} — Inter + JetBrains Mono NF"
             cmd_set --ui "Inter Variable" --ui-size 11 \
-                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 --kitty-size 12 \
+                    --mono "JetBrainsMono Nerd Font Mono" --mono-size 13 --preset-kitty-size 12 \
                     --title "Inter Variable" --title-size 12 \
                     --numbers "Inter Variable" \
                     --hintstyle hintfull --subpixel rgb "$@"
@@ -917,7 +946,7 @@ cmd_preset() {
         noto)
             echo -e "${BOLD}Preset: Noto${NC} — Noto Sans + Noto Sans Mono"
             cmd_set --ui "Noto Sans" --ui-size 11 \
-                    --mono "Noto Sans Mono" --mono-size 13 --kitty-size 12 \
+                    --mono "Noto Sans Mono" --mono-size 13 --preset-kitty-size 12 \
                     --title "Noto Sans" --title-size 12 \
                     --numbers "Noto Sans" \
                     --hintstyle hintfull --subpixel rgb "$@"
@@ -926,14 +955,55 @@ cmd_preset() {
             # Stable, data-only interface for the settings app. Preset execution
             # remains the authority for families/sizes, including legacy names.
             curated_presets | jq -Rn '
-                [{id:"profile", description:"Readex Pro and JetBrains Mono"},
-                 {id:"apple", description:"SF Pro Text and SF Mono"},
-                 {id:"google", description:"Google Sans Flex and JetBrains Mono"},
-                 {id:"inter", description:"Inter and JetBrains Mono"},
-                 {id:"roboto-flex", description:"Roboto Flex and JetBrains Mono"},
-                 {id:"noto", description:"Noto Sans and Noto Sans Mono"}]
-                + [inputs | split("|") | {id:.[0], description:.[1],
-                    ui:.[2], mono:.[3], title:.[4], numbers:.[5], reading:.[6], expressive:.[7]}]'
+                def preset_group($id):
+                    if ($id | IN("atelier","orchard","oneplus","humanist","rubik","apple","profile")) then "charming"
+                    elif ($id | IN("editorial","paperback","journal","slab")) then "editorial"
+                    elif ($id | IN("compact","terminal","blueprint","metropolis")) then "dense"
+                    elif ($id | IN("noto","accessible","redhat")) then "classic"
+                    else "modern" end;
+                def preset_label($id):
+                    if $id == "oneplus" then "OnePlus"
+                    elif $id == "redhat" then "Red Hat"
+                    elif $id == "roboto-flex" then "Roboto Flex"
+                    elif $id == "profile" then "Fork Default"
+                    else ($id[0:1] | ascii_upcase) + $id[1:] end;
+                [{id:"profile", label:"Fork Default", group:"charming",
+                  description:"Readex Pro and JetBrains Mono",
+                  ui:"Readex Pro", mono:"JetBrainsMono Nerd Font Mono", title:"Readex Pro",
+                  numbers:"Readex Pro", reading:"Readex Pro", expressive:"Space Grotesk",
+                  uiSize:13, monoSize:12, titleSize:12, kittySize:11},
+                 {id:"apple", label:"Apple", group:"charming",
+                  description:"SF Pro Text and SF Mono",
+                  ui:"SF Pro Text", mono:"SF Mono", title:"SF Pro Text",
+                  numbers:"SF Pro Text", reading:"Readex Pro", expressive:"Space Grotesk",
+                  uiSize:10, monoSize:12, titleSize:11, kittySize:12},
+                 {id:"google", label:"Google", group:"modern",
+                  description:"Google Sans Flex and JetBrains Mono",
+                  ui:"Google Sans Flex", mono:"JetBrainsMono Nerd Font Mono", title:"Google Sans Flex",
+                  numbers:"Fira Sans Heavy", reading:"Readex Pro", expressive:"Space Grotesk",
+                  uiSize:11, monoSize:13, titleSize:12, kittySize:12},
+                 {id:"inter", label:"Inter", group:"modern",
+                  description:"Inter and JetBrains Mono",
+                  ui:"Inter Variable", mono:"JetBrainsMono Nerd Font Mono", title:"Inter Variable",
+                  numbers:"Inter Variable", reading:"Readex Pro", expressive:"Space Grotesk",
+                  uiSize:11, monoSize:13, titleSize:12, kittySize:12},
+                 {id:"roboto-flex", label:"Roboto Flex", group:"modern",
+                  description:"Roboto Flex and JetBrains Mono",
+                  ui:"Roboto Flex", mono:"JetBrainsMono Nerd Font Mono", title:"Roboto Flex",
+                  numbers:"Roboto Flex", reading:"Roboto Flex", expressive:"Space Grotesk",
+                  uiSize:11, monoSize:13, titleSize:12, kittySize:12},
+                 {id:"noto", label:"Noto", group:"classic",
+                  description:"Noto Sans and Noto Sans Mono",
+                  ui:"Noto Sans", mono:"Noto Sans Mono", title:"Noto Sans",
+                  numbers:"Noto Sans", reading:"Readex Pro", expressive:"Space Grotesk",
+                  uiSize:11, monoSize:13, titleSize:12, kittySize:12}]
+                + [inputs | split("|") | {
+                    id:.[0], label:preset_label(.[0]), group:preset_group(.[0]),
+                    description:.[1], ui:.[2], mono:.[3], title:.[4],
+                    numbers:.[5], reading:.[6], expressive:.[7],
+                    uiSize:(.[8] | tonumber), monoSize:(.[9] | tonumber),
+                    titleSize:(.[10] | tonumber), kittySize:(.[11] | tonumber)
+                  }]'
             ;;
         list)
             echo -e "${BOLD}Rendering presets (preserve families and sizes; apply desktop-wide):${NC}"

@@ -19,14 +19,26 @@ It reports the bus's `GetId` generation and whether this shell's tray host is
 registered. The generation survives QML reloads. If the monitor itself is
 killed, it reconnects with backoff; the same bus generation leaves the shell
 alone. A replaced bus or a shell absent from the current bus triggers a normal
-shell exit with status 75, after the replacement bus is reachable. Existing
-destruction handlers save state and stop owned children; the existing supervisor
-relaunches the shell. It also waits for a real bus before future shell launches,
-avoiding a cached disconnected Qt connection during startup. Explicit clean
-quit still stops the supervisor. The monitor disappears with its owning shell.
+shell exit with status 75, after the replacement bus is reachable. Existing destruction handlers save state and stop owned children; the existing
+supervisor relaunches the shell. It also waits for a real bus before future
+shell launches, avoiding a cached disconnected Qt connection during startup.
+Explicit clean quit still stops the supervisor. The monitor disappears with its
+owning shell.
+
+While `GlobalStates.screenLocked` is active (`WlSessionLock` holds
+`ext_session_lock_v1`), destructive recovery and reload paths must not tear down
+the lock client or Hyprland enters its crashed-lockscreen fallback.
+`SessionBusRecovery` defers its exit-75 restart (`state: "deferred"`,
+`deferred: true`), `ShellControl` (`shellControl.reload` and
+`shellControl.restartForUpdate`) defers in-place QML reloads and update
+restarts, and `panelFamily` cycling is ignored while locked. Once the screen
+unlocks, pending reload or restart actions run after a short post-unlock settle
+delay (300 ms) so `unlock_and_destroy` and lock-screen workspace restoration
+flush cleanly first; re-locking during that window re-defers the action.
 
 ```sh
 qs -c ii ipc call sessionBus status
+qs -c ii ipc call shellControl status
 ```
 
 This repairs the shell's connection, not another application's private Qt

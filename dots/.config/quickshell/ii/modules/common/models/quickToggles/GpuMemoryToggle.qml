@@ -14,6 +14,9 @@ QuickToggleModel {
     statusText: gpuState
     toggled: false
     altActionOnRightClick: true
+    altActionRequiresHold: true
+    altHoldDurationMs: 1200
+    altHoldLabel: Translation.tr("Evict VRAM")
 
     mainAction: () => {
         Quickshell.execDetached(["bash", "-c", "PATH=\"$HOME/.local/bin:$PATH\" exec memory-tools.sh gpu-report"])
@@ -43,5 +46,5 @@ QuickToggleModel {
         onTriggered: fetchGpu.running = true
     }
 
-    tooltipText: Translation.tr("Left: AMDGPU VRAM status. Right: evict VRAM only while GPU busy is ≤5%.")
+    tooltipText: Translation.tr("Left: AMDGPU VRAM status. Hold right-click: evict VRAM (only while GPU busy is ≤5%).")
 }

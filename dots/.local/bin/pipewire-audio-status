@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""Read-only PipeWire, ALSA hardware DAC, and Linux kernel RT telemetry + runtime clock control."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+CONFIG_HOME = Path(os.environ.get('XDG_CONFIG_HOME', str(Path.home() / '.config')))
+SPATIAL_CONFIG = CONFIG_HOME / 'mpv/spatial.json'
+ASOUND_ROOT = Path('/proc/asound')
+PROC_ROOT = Path('/proc')
+ALLOWED_QUANTUMS = (0, 32, 64, 128, 256, 512, 1024, 2048)
+ALLOWED_RATES = (0, 44100, 48000, 88200, 96000, 192000)
+DOLBY_CODEC_TOKENS = ('AC-3', 'E-AC-3', 'MLP', 'TRUEHD', 'DTS', 'DTS-HD')
+SCHED_NAMES = {
+    getattr(os, 'SCHED_OTHER', 0): 'TS',
+    getattr(os, 'SCHED_FIFO', 1): 'FF',
+    getattr(os, 'SCHED_RR', 2): 'RR',
+    getattr(os, 'SCHED_BATCH', 3): 'B',
+    getattr(os, 'SCHED_IDLE', 5): 'IDL',
+}
+
+
+def run_cmd(args, timeout=3.0):
+    try:
+        res = subprocess.run(args, text=True, capture_output=True, timeout=timeout, check=False)
+        return res.returncode, res.stdout, res.stderr
+    except (OSError, subprocess.SubprocessError) as err:
+        return 1, '', str(err)
+
+
+def parse_pw_metadata(text):
+    meta = {}
+    for line in text.splitlines():
+        m = re.search(r"key:'([^']+)'\s+value:'([^']*)'", line)
+        if m:
+            meta[m.group(1)] = m.group(2)
+    return meta
+
+
+def parse_int(val, default=0):
+    try:
+        return int(str(val).strip())
+    except (ValueError, TypeError):
+        return default
+
+
+def parse_allowed_rates(val):
+    nums = [int(x) for x in re.findall(r'\d+', str(val or ''))]
+    return nums or [44100, 48000, 88200, 96000, 192000]
+
+
+def format_rate_khz(rate):
+    if not rate:
+        return 'Auto'
+    khz = rate / 1000.0
+    return f'{khz:g} kHz'
+
+
+def format_rate_short(rate):
+    if not rate:
+        return 'Auto'
+    khz = rate / 1000.0
+    return f'{khz:g}k'
+
+
+def inspect_process_rt(comm_name, proc_root=None):
+    """Find highest RT scheduling class/priority among threads of owner's process."""
+    root = proc_root or PROC_ROOT
+    uid = os.getuid()
+    best = None
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            comm = (entry / 'comm').read_text(errors='replace').strip()
+        except OSError:
+            continue
+        if comm != comm_name:
+            continue
+        pid = int(entry.name)
+        limits = {}
+        try:
+            for line in (entry / 'limits').read_text(errors='replace').splitlines():
+                if line.startswith('Max realtime priority'):
+                    parts = line.split()
+                    limits['rtprio'] = parts[3] if len(parts) > 3 else ''
+                elif line.startswith('Max locked memory'):
+                    parts = line.split()
+                    limits['memlock'] = parts[3] if len(parts) > 3 else ''
+        except OSError:
+            pass
+        best_thread = {'pid': pid, 'cls': 'TS', 'prio': 0, 'thread': comm, 'limits': limits}
+        rank = {'FF': 3, 'RR': 2, 'TS': 1, 'B': 0, 'IDL': 0}
+        try:
+            tasks = list((entry / 'task').iterdir())
+        except OSError:
+            tasks = []
+        for task in tasks:
+            if not task.name.isdigit():
+                continue
+            tid = int(task.name)
+            try:
+                pol = os.sched_getscheduler(tid) & ~0x40000000
+                prio = os.sched_getparam(tid).sched_priority
+                tcomm = (task / 'comm').read_text(errors='replace').strip()
+            except OSError:
+                continue
+            cls = SCHED_NAMES.get(pol, 'TS')
+            cur_key = (rank.get(cls, 0), prio)
+            best_key = (rank.get(best_thread['cls'], 0), best_thread['prio'])
+            if cur_key > best_key:
+                best_thread = {'pid': pid, 'cls': cls, 'prio': prio, 'thread': tcomm, 'limits': limits}
+        if best is None or (rank.get(best_thread['cls'], 0), best_thread['prio']) > (rank.get(best['cls'], 0), best['prio']):
+            best = best_thread
+    return best
+
+
+def kernel_info(proc_root=None):
+    root = proc_root or PROC_ROOT
+    u = os.uname()
+    release = u.release
+    short_rel = release.split('-')[0] + ('-zen' if 'zen' in release.lower() else '')
+    version = u.version
+    cmdline = ''
+    try:
+        cmdline = (root / 'cmdline').read_text(errors='replace').strip()
+    except OSError:
+        pass
+    preempt = 'PREEMPT_FULL' if 'preempt=full' in cmdline else ('PREEMPT_DYNAMIC' if 'PREEMPT_DYNAMIC' in version else 'PREEMPT')
+    cstate1 = 'processor.max_cstate=1' in cmdline
+    pw_rt = inspect_process_rt('pipewire', proc_root=root) or {'cls': 'TS', 'prio': 0, 'thread': '', 'limits': {}}
+    ee_rt = inspect_process_rt('easyeffects', proc_root=root) or {'cls': 'TS', 'prio': 0, 'thread': '', 'limits': {}}
+    pwp_rt = inspect_process_rt('pipewire-pulse', proc_root=root) or {'cls': 'TS', 'prio': 0, 'thread': '', 'limits': {}}
+
+    def rt_label(info):
+        if not info or not info.get('pid'):
+            return 'Offline'
+        if info['cls'] == 'FF':
+            return f"FIFO {info['prio']}"
+        if info['cls'] == 'RR':
+            return f"RR {info['prio']}"
+        return 'Normal'
+
+    pw_tone = 'good' if pw_rt.get('cls') == 'FF' and pw_rt.get('prio', 0) >= 80 else ('warn' if pw_rt.get('cls') == 'RR' else 'neutral')
+    return {
+        'release': release,
+        'shortRelease': short_rel,
+        'preempt': preempt,
+        'cstatePinned': cstate1,
+        'pipewire': {
+            'cls': pw_rt.get('cls', 'TS'),
+            'prio': pw_rt.get('prio', 0),
+            'thread': pw_rt.get('thread', ''),
+            'label': rt_label(pw_rt),
+            'tone': pw_tone,
+            'rlimitRtprio': pw_rt.get('limits', {}).get('rtprio', ''),
+        },
+        'easyeffects': {
+            'cls': ee_rt.get('cls', 'TS'),
+            'prio': ee_rt.get('prio', 0),
+            'label': rt_label(ee_rt),
+        },
+        'pipewirePulse': {
+            'cls': pwp_rt.get('cls', 'TS'),
+            'prio': pwp_rt.get('prio', 0),
+            'label': rt_label(pwp_rt),
+        },
+    }
+
+
+def alsa_hardware_info(asound_root=None):
+    root = asound_root or ASOUND_ROOT
+    active_pcm = None
+    codec_name = ''
+    supported_rates = []
+    supported_bits = []
+    hdmi_outputs = []
+    hdmi_codecs = []
+
+    if root.is_dir():
+        for hw in sorted(root.glob('card*/pcm*p/sub*/hw_params')):
+            try:
+                text = hw.read_text(errors='replace').strip()
+            except OSError:
+                continue
+            if not text or text == 'closed':
+                continue
+            parsed = {}
+            for line in text.splitlines():
+                if ':' in line:
+                    k, v = line.split(':', 1)
+                    parsed[k.strip()] = v.strip()
+            rate_val = parse_int(parsed.get('rate', '0').split()[0], 0)
+            active_pcm = {
+                'card': hw.parts[-4],
+                'format': parsed.get('format', ''),
+                'channels': parse_int(parsed.get('channels', '2'), 2),
+                'rate': rate_val,
+                'periodSize': parse_int(parsed.get('period_size', '0'), 0),
+                'bufferSize': parse_int(parsed.get('buffer_size', '0'), 0),
+            }
+            break
+
+        for codec in sorted(root.glob('card*/codec#*')):
+            try:
+                head = codec.read_text(errors='replace')[:2500]
+            except OSError:
+                continue
+            m_name = re.search(r'^Codec:\s*(.+)$', head, re.M)
+            if not m_name:
+                continue
+            cname = m_name.group(1).strip()
+            if 'HDMI' in cname.upper() and codec_name:
+                continue
+            if not codec_name or 'HDMI' not in cname.upper():
+                codec_name = cname
+                m_rates = re.search(r'rates \[0x[0-9a-fA-F]+\]:\s*([0-9 ]+)', head)
+                if m_rates:
+                    supported_rates = [int(x) for x in m_rates.group(1).split() if x.isdigit()]
+                m_bits = re.search(r'bits \[0x[0-9a-fA-F]+\]:\s*([0-9 ]+)', head)
+                if m_bits:
+                    supported_bits = [int(x) for x in m_bits.group(1).split() if x.isdigit()]
+
+        for eld in sorted(root.glob('card*/eld#*')):
+            try:
+                text = eld.read_text(errors='replace')
+            except OSError:
+                continue
+            fields = {}
+            for line in text.splitlines():
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    fields[parts[0].strip()] = parts[1].strip()
+            if fields.get('monitor_present') != '1' or fields.get('eld_valid') != '1':
+                continue
+            name = fields.get('monitor_name') or eld.name
+            conn = fields.get('connection_type') or 'HDMI'
+            codecs = []
+            max_ch = 2
+            for k, v in sorted(fields.items()):
+                if re.match(r'^sad\d+_coding_type$', k):
+                    c = re.sub(r'^\[[^\]]+\]\s*', '', v).strip()
+                    if c and c not in codecs:
+                        codecs.append(c)
+                elif re.match(r'^sad\d+_channels$', k):
+                    max_ch = max(max_ch, parse_int(v.split()[0], 2))
+            sink_dolby = [c for c in codecs if any(t in c.upper() for t in DOLBY_CODEC_TOKENS)]
+            for c in sink_dolby:
+                if c not in hdmi_codecs:
+                    hdmi_codecs.append(c)
+            hdmi_outputs.append({
+                'name': name,
+                'connection': conn,
+                'maxChannels': max_ch,
+                'codecs': codecs,
+                'dolby': bool(sink_dolby),
+            })
+
+    has_dolby = bool(hdmi_codecs)
+    if has_dolby:
+        dnames = ', '.join(o['name'] for o in hdmi_outputs if o['dolby'])
+        hdmi_summary = f"Dolby AVR ready ({dnames}: {', '.join(hdmi_codecs)})"
+    elif hdmi_outputs:
+        names = ', '.join(f"{o['name']} {o['maxChannels']}ch LPCM" for o in hdmi_outputs)
+        hdmi_summary = f"HDMI LPCM only ({names})"
+    else:
+        hdmi_summary = 'Analog / headphone DAC'
+
+    max_bit = max(supported_bits) if supported_bits else 24
+    rate_range = ''
+    if supported_rates:
+        low = min(r for r in supported_rates if r >= 44100) if any(r >= 44100 for r in supported_rates) else min(supported_rates)
+        high = max(supported_rates)
+        rate_range = f'{format_rate_short(low)}–{format_rate_short(high)}'
+
+    return {
+        'codec': codec_name or 'ALSA Audio DAC',
+        'activePcm': active_pcm,
+        'hwActive': active_pcm is not None,
+        'hwFormat': active_pcm['format'] if active_pcm else 'Standby',
+        'hwRate': active_pcm['rate'] if active_pcm else 0,
+        'hwChannels': active_pcm['channels'] if active_pcm else 2,
+        'hwPeriod': active_pcm['periodSize'] if active_pcm else 0,
+        'maxBits': max_bit,
+        'supportedRates': supported_rates,
+        'supportedBits': supported_bits,
+        'rateRange': rate_range,
+        'hdmiDolby': has_dolby,
+        'hdmiCodecs': hdmi_codecs,
+        'hdmiOutputs': hdmi_outputs,
+        'hdmiSummary': hdmi_summary,
+    }
+
+
+def read_spatial_settings():
+    try:
+        data = json.loads(SPATIAL_CONFIG.read_text())
+        if isinstance(data, dict):
+            return {
+                'enabled': bool(data.get('enabled', False)),
+                'automatic': bool(data.get('automatic', True)),
+                'profile': str(data.get('profile') or 'atmos-7.1'),
+                'passthrough': bool(data.get('passthrough', False)),
+            }
+    except (OSError, ValueError):
+        pass
+    return {'enabled': False, 'automatic': True, 'profile': 'atmos-7.1', 'passthrough': False}
+
+
+def parse_pw_dump(raw_json):
+    try:
+        objs = json.loads(raw_json)
+    except ValueError:
+        return {'sinks': [], 'streams': [], 'easyeffects': {'present': False, 'running': False}, 'spatialActive': False}
+
+    sinks = []
+    streams = []
+    ee_state = {'present': False, 'running': False}
+    spatial_active = False
+
+    for obj in objs:
+        if obj.get('type') != 'PipeWire:Interface:Node':
+            continue
+        info = obj.get('info') or {}
+        props = info.get('props') or {}
+        state = info.get('state', 'suspended')
+        mclass = props.get('media.class', '')
+        name = props.get('node.name', '')
+        app = props.get('application.name') or props.get('node.description') or name
+
+        if name == 'easyeffects_sink':
+            ee_state['present'] = True
+            ee_state['running'] = state == 'running'
+            continue
+        if name == 'effect_input.spatial-surround':
+            spatial_active = state == 'running'
+            continue
+        if mclass == 'Audio/Sink' and not name.startswith('easyeffects_') and not name.startswith('effect_input.'):
+            sinks.append({
+                'id': obj.get('id'),
+                'name': name,
+                'description': props.get('node.description') or props.get('device.product.name') or name,
+                'state': state,
+                'rate': parse_int(props.get('audio.rate', 0), 0),
+                'channels': parse_int(props.get('audio.channels', 2), 2),
+                'isBluetooth': 'bluez' in name,
+                'isHdmi': 'hdmi' in name.lower(),
+            })
+        elif mclass == 'Stream/Output/Audio':
+            if name.startswith('ee_') or name.startswith('effect_output.') or app in ('Easy Effects', 'PulseAudio Volume Control'):
+                continue
+            gain_db = None
+            params = info.get('params') or {}
+            for prop in params.get('Props', []):
+                for key in ('audioconvert.filter-graph.777', 'audioconvert.filter-graph.778'):
+                    if key in prop:
+                        pass
+            rate_str = str(props.get('node.rate', ''))
+            m_rate = re.search(r'/(\d+)$', rate_str)
+            stream_rate = int(m_rate.group(1)) if m_rate else 0
+            lat_str = str(props.get('node.latency', ''))
+            m_lat = re.match(r'^(\d+)/(\d+)$', lat_str)
+            req_quantum = int(m_lat.group(1)) if m_lat else 0
+            streams.append({
+                'id': obj.get('id'),
+                'app': app,
+                'binary': props.get('application.process.binary', ''),
+                'state': state,
+                'rate': stream_rate,
+                'requestedQuantum': req_quantum,
+                'gainDb': gain_db,
+            })
+
+    return {
+        'sinks': sinks,
+        'streams': streams,
+        'easyeffects': ee_state,
+        'spatialActive': spatial_active,
+    }
+
+
+def collect_status():
+    rc_meta, meta_out, meta_err = run_cmd(['pw-metadata', '-n', 'settings'])
+    if rc_meta != 0:
+        return {'available': False, 'error': meta_err.strip() or 'PipeWire settings unavailable'}
+
+    meta = parse_pw_metadata(meta_out)
+    rc_dump, dump_out, _ = run_cmd(['pw-dump'])
+    graph = parse_pw_dump(dump_out) if rc_dump == 0 else {'sinks': [], 'streams': [], 'easyeffects': {'present': False, 'running': False}, 'spatialActive': False}
+    hw = alsa_hardware_info()
+    kern = kernel_info()
+    spatial_cfg = read_spatial_settings()
+
+    default_rate = parse_int(meta.get('clock.rate'), 44100)
+    default_quantum = parse_int(meta.get('clock.quantum'), 1024)
+    min_quantum = parse_int(meta.get('clock.min-quantum'), 32)
+    max_quantum = parse_int(meta.get('clock.max-quantum'), 8192)
+    force_quantum = parse_int(meta.get('clock.force-quantum'), 0)
+    force_rate = parse_int(meta.get('clock.force-rate'), 0)
+    allowed_rates = parse_allowed_rates(meta.get('clock.allowed-rates'))
+
+    effective_rate = force_rate or hw['hwRate'] or default_rate
+    effective_quantum = force_quantum or hw['hwPeriod'] or default_quantum
+    latency_ms = round((effective_quantum / effective_rate) * 1000.0, 2) if effective_rate > 0 else 0.0
+
+    running_streams = [s for s in graph['streams'] if s['state'] == 'running']
+    active_sink = next((s for s in graph['sinks'] if s['state'] == 'running'), None) or (graph['sinks'][0] if graph['sinks'] else None)
+
+    spatial_profile = spatial_cfg['profile']
+    spatial_label = 'SOFA 3D' if spatial_profile == 'sofa-kemar' else 'Atmos 7.1'
+    if graph['spatialActive']:
+        spatial_state = 'active'
+        spatial_badge = spatial_label
+        spatial_tone = 'good'
+    elif spatial_cfg['passthrough'] and hw['hdmiDolby']:
+        spatial_state = 'dolby-ready'
+        spatial_badge = 'Dolby HDMI'
+        spatial_tone = 'good'
+    elif spatial_cfg['enabled']:
+        spatial_state = 'ready'
+        spatial_badge = f'{spatial_label} ready'
+        spatial_tone = 'info'
+    else:
+        spatial_state = 'off'
+        spatial_badge = 'Stereo'
+        spatial_tone = 'neutral'
+
+    # Ordered live signal chain stages for UI breadcrumbs
+    chain = []
+    if running_streams:
+        app_names = []
+        for s in running_streams:
+            if s['app'] not in app_names:
+                app_names.append(s['app'])
+        chain.append({
+            'id': 'apps',
+            'label': ', '.join(app_names[:2]) + (f' +{len(app_names) - 2}' if len(app_names) > 2 else ''),
+            'active': True,
+            'tone': 'info',
+        })
+    else:
+        chain.append({'id': 'apps', 'label': 'Idle', 'active': False, 'tone': 'neutral'})
+
+    if graph['spatialActive']:
+        chain.append({'id': 'spatial', 'label': spatial_label, 'active': True, 'tone': 'good'})
+
+    if graph['easyeffects']['present']:
+        chain.append({
+            'id': 'easyeffects',
+            'label': 'EasyEffects',
+            'active': graph['easyeffects']['running'],
+            'tone': 'good' if graph['easyeffects']['running'] else 'neutral',
+        })
+
+    dac_short = hw['codec'].replace('Realtek ', '') if hw['codec'] else (active_sink['description'] if active_sink else 'DAC')
+    if active_sink and active_sink['isBluetooth']:
+        dac_short = active_sink['description']
+    chain.append({
+        'id': 'dac',
+        'label': dac_short,
+        'active': hw['hwActive'] or bool(active_sink and active_sink['state'] == 'running'),
+        'tone': 'good' if hw['hwActive'] else 'neutral',
+    })
+
+    clock_mode = 'Forced' if (force_quantum or force_rate) else 'Adaptive'
+    overall = 'good' if kern['pipewire']['tone'] == 'good' else ('warn' if kern['pipewire']['tone'] == 'warn' else 'neutral')
+
+    return {
+        'available': True,
+        'error': '',
+        'overall': overall,
+        'clock': {
+            'rate': effective_rate,
+            'rateLabel': format_rate_khz(effective_rate),
+            'rateShort': format_rate_short(effective_rate),
+            'defaultRate': default_rate,
+            'forceRate': force_rate,
+            'quantum': effective_quantum,
+            'defaultQuantum': default_quantum,
+            'forceQuantum': force_quantum,
+            'minQuantum': min_quantum,
+            'maxQuantum': max_quantum,
+            'latencyMs': latency_ms,
+            'mode': clock_mode,
+            'allowedRates': allowed_rates,
+        },
+        'kernel': kern,
+        'hardware': {
+            'codec': hw['codec'],
+            'shortName': dac_short,
+            'sinkName': active_sink['description'] if active_sink else hw['codec'],
+            'active': hw['hwActive'],
+            'format': hw['hwFormat'],
+            'rate': hw['hwRate'],
+            'channels': hw['hwChannels'],
+            'period': hw['hwPeriod'],
+            'maxBits': hw['maxBits'],
+            'rateRange': hw['rateRange'],
+            'hdmiDolby': hw['hdmiDolby'],
+            'hdmiCodecs': hw['hdmiCodecs'],
+            'hdmiSummary': hw['hdmiSummary'],
+        },
+        'spatial': {
+            'enabled': spatial_cfg['enabled'],
+            'active': graph['spatialActive'],
+            'profile': spatial_profile,
+            'profileLabel': spatial_label,
+            'passthrough': spatial_cfg['passthrough'],
+            'state': spatial_state,
+            'badge': spatial_badge,
+            'tone': spatial_tone,
+        },
+        'easyeffects': graph['easyeffects'],
+        'streams': running_streams,
+        'chain': chain,
+    }
+
+
+def set_metadata(key, value):
+    rc, _, err = run_cmd(['pw-metadata', '-n', 'settings', '0', key, str(value)])
+    if rc != 0:
+        raise RuntimeError(err.strip() or f'Failed to set {key}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', nargs='?', default='status', choices=['status', 'set-quantum', 'set-rate', 'reset'])
+    parser.add_argument('value', nargs='?', type=int)
+    args = parser.parse_args()
+
+    if args.command == 'set-quantum':
+        if args.value not in ALLOWED_QUANTUMS:
+            parser.error(f'quantum must be one of {ALLOWED_QUANTUMS}')
+        set_metadata('clock.force-quantum', args.value)
+    elif args.command == 'set-rate':
+        if args.value not in ALLOWED_RATES:
+            parser.error(f'rate must be one of {ALLOWED_RATES}')
+        set_metadata('clock.force-rate', args.value)
+    elif args.command == 'reset':
+        set_metadata('clock.force-quantum', 0)
+        set_metadata('clock.force-rate', 0)
+
+    print(json.dumps(collect_status()))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(json.dumps({'available': False, 'error': str(exc)}))
+        raise SystemExit(1)

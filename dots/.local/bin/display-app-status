@@ -1,0 +1,660 @@
+#!/usr/bin/env python3
+"""Read-only Hyprland display and active app presentation inspector.
+
+Queries Hyprland monitor, window, layer, and option state (plus optional
+read-only /proc/<pid> Vulkan/WSI hints) and prints compact JSON for the
+Control Center status card. Never mutates compositor or application state.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+DS_POLICIES = {
+    0: "Off",
+    1: "Fullscreen",
+    2: "Games only",
+}
+
+VRR_POLICIES = {
+    0: "Off",
+    1: "Always",
+    2: "Fullscreen",
+    3: "Games & video",
+}
+
+BLOCKER_LABELS = {
+    "USER": "Disabled in Hyprland",
+    "CANDIDATE": "No solitary candidate",
+    "WINDOWED": "Not fullscreen",
+    "CONTENT": "Not a game content type",
+    "MIRROR": "Monitor mirrored",
+    "RECORD": "Screen capture active",
+    "SW": "Software render/cursor",
+    "SURFACE": "Invalid surface",
+    "TRANSFORM": "Surface transform",
+    "DMA": "Buffer incompatible",
+    "FAILED": "DRM scanout rejected",
+    "CM": "Color management active",
+    "OVERLAYS": "Overlay layer above app",
+    "FLOAT": "Floating window above",
+    "ALPHA": "Surface has alpha",
+    "OPAQUE": "Surface not opaque",
+    "SURFACES": "Extra subsurfaces",
+    "OFFSET": "Workspace offset",
+    "WORKSPACES": "Other workspaces visible",
+    "FADEOUT": "Fadeout animation",
+    "LOCK": "Session locked",
+    "DND": "Drag & drop active",
+    "NOTIFICATION": "Notification overlay",
+    "SPECIAL": "Special workspace open",
+    "NOT_TORN": "Frame not flagged async",
+    "WINDOW": "Window lacks immediate rule",
+    "HW_CURSOR": "Hardware cursor active",
+    "SUPPORT": "Monitor lacks tearing support",
+    "ZOOM": "Display zoom active",
+    "CONFIGERROR": "Config error bar",
+    "UNKNOWN": "Unknown",
+}
+
+FS_NAMES = {
+    0: "Windowed",
+    1: "Maximized",
+    2: "Fullscreen",
+}
+
+
+def run_hyprctl(*args):
+    result = subprocess.run(
+        ["hyprctl", "-j", *args],
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    if result.returncode != 0:
+        msg = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(msg or f"hyprctl {' '.join(args)} failed")
+    return json.loads(result.stdout)
+
+
+def norm_addr(addr):
+    if not addr:
+        return ""
+    s = str(addr).strip().lower()
+    if s in ("0", "0x0", "none", "null"):
+        return ""
+    return s[2:] if s.startswith("0x") else s
+
+
+def pick_monitor(monitors, preferred):
+    active = [m for m in monitors if not m.get("disabled")]
+    if not active:
+        return None
+    if preferred:
+        pref = preferred.strip().lower()
+        for m in active:
+            if m.get("name", "").lower() == pref:
+                return m
+        for m in active:
+            desc = f"{m.get('make', '')} {m.get('model', '')} {m.get('description', '')}".lower()
+            if pref in desc:
+                return m
+    # Default: prefer AOC display, then DP-1, then focused display, then first active.
+    for m in active:
+        make = (m.get("make") or "").lower()
+        desc = (m.get("description") or "").lower()
+        if make == "aoc" or "aoc" in desc:
+            return m
+    for m in active:
+        if m.get("name") == "DP-1":
+            return m
+    for m in active:
+        if m.get("focused"):
+            return m
+    return active[0]
+
+
+def short_monitor_name(monitor):
+    make = (monitor.get("make") or "").strip()
+    model = (monitor.get("model") or "").strip()
+    name = (monitor.get("name") or "").strip()
+    if make.upper() == "AOC" and model:
+        return f"AOC {model}"
+    if make and model:
+        return f"{make} {model}"
+    return model or make or name or "Display"
+
+
+def pick_client(monitor, clients):
+    mon_id = monitor.get("id")
+    special = (monitor.get("specialWorkspace") or {}).get("name") or ""
+    active_ws = monitor.get("activeWorkspace") or {}
+    active_ws_id = active_ws.get("id")
+    active_ws_name = active_ws.get("name") or ""
+
+    visible = []
+    for c in clients:
+        if not c.get("mapped") or c.get("hidden"):
+            continue
+        if c.get("monitor") != mon_id:
+            continue
+        ws = c.get("workspace") or {}
+        if special:
+            if ws.get("name") != special:
+                continue
+        else:
+            if ws.get("id") != active_ws_id:
+                continue
+        visible.append(c)
+
+    if not visible:
+        return None, (special or active_ws_name)
+
+    scanout_addr = norm_addr(monitor.get("directScanoutTo"))
+    solitary_addr = norm_addr(monitor.get("solitary"))
+    for target in (scanout_addr, solitary_addr):
+        if target:
+            for c in visible:
+                if norm_addr(c.get("address")) == target:
+                    return c, (special or active_ws_name)
+
+    def sort_key(c):
+        fs = int(c.get("fullscreen") or 0)
+        fh = c.get("focusHistoryID")
+        fh = int(fh) if fh is not None else 999999
+        return (0 if fs == 2 else 1 if fs == 1 else 2, fh)
+
+    visible.sort(key=sort_key)
+    return visible[0], (special or active_ws_name)
+
+
+def inspect_layers(layers_data, mon_name):
+    entry = (layers_data or {}).get(mon_name) or {}
+    levels = entry.get("levels") or {}
+    top_namespaces = []
+    for lvl in ("2", "3"):
+        for item in levels.get(lvl) or []:
+            ns = item.get("namespace") or ""
+            if ns and ns not in top_namespaces:
+                top_namespaces.append(ns)
+    sidebar_on_monitor = "quickshell:sidebarRight" in top_namespaces
+    other_overlays = [
+        ns for ns in top_namespaces
+        if ns not in ("quickshell:sidebarRight", "quickshell:bar")
+    ]
+    return sidebar_on_monitor, other_overlays
+
+
+def human_blockers(tokens):
+    clean = []
+    for tok in tokens or []:
+        label = BLOCKER_LABELS.get(tok, tok.replace("_", " ").lower().capitalize())
+        if label not in clean:
+            clean.append(label)
+    return ", ".join(clean)
+
+
+def inspect_process(pid):
+    info = {
+        "readable": False,
+        "presentMode": "",
+        "unorderedSubmitsDisabled": None,
+        "lsfgDisabled": False,
+        "lsfgLoaded": False,
+        "vulkanLoaded": False,
+        "sdlDriver": "",
+    }
+    if not pid or pid <= 0:
+        return info
+    proc = Path(f"/proc/{pid}")
+    try:
+        raw_env = (proc / "environ").read_bytes()
+    except OSError:
+        return info
+    info["readable"] = True
+    env = {}
+    for entry in raw_env.split(b"\x00"):
+        if b"=" in entry:
+            k, v = entry.split(b"=", 1)
+            env[k.decode("utf-8", "ignore")] = v.decode("utf-8", "ignore")
+
+    info["presentMode"] = env.get("MESA_VK_WSI_PRESENT_MODE", "")
+    u_sub = env.get("vk_wsi_disable_unordered_submits", "").lower()
+    if u_sub in ("true", "1", "yes"):
+        info["unorderedSubmitsDisabled"] = True
+    elif u_sub in ("false", "0", "no"):
+        info["unorderedSubmitsDisabled"] = False
+    info["lsfgDisabled"] = env.get("DISABLE_LSFGVK", "").lower() in ("1", "true", "yes")
+    info["sdlDriver"] = env.get("SDL_VIDEO_DRIVER") or env.get("SDL_VIDEODRIVER") or ""
+
+    try:
+        maps = (proc / "maps").read_text(errors="ignore")
+        info["vulkanLoaded"] = ("libvulkan" in maps) or ("libvulkan_radeon" in maps) or ("libvulkan_intel" in maps)
+        info["lsfgLoaded"] = "liblsfg-vk" in maps
+    except OSError:
+        pass
+    return info
+
+
+def build_fullscreen_info(client):
+    if not client:
+        return {
+            "mode": "empty",
+            "label": "Desktop",
+            "tone": "neutral",
+            "hyprland": 0,
+            "client": 0,
+            "hyprlandName": "None",
+            "clientName": "None",
+            "nativeMatch": False,
+            "detail": "No window on active workspace",
+        }
+    fs = int(client.get("fullscreen") or 0)
+    fsc = int(client.get("fullscreenClient") or 0)
+    h_name = FS_NAMES.get(fs, str(fs))
+    c_name = FS_NAMES.get(fsc, str(fsc))
+    if fs == 2 and fsc == 2:
+        return {
+            "mode": "native_fs",
+            "label": "Native FS",
+            "tone": "good",
+            "hyprland": fs,
+            "client": fsc,
+            "hyprlandName": h_name,
+            "clientName": c_name,
+            "nativeMatch": True,
+            "detail": "Hyprland fullscreen · App native fullscreen",
+        }
+    if fs == 2:
+        return {
+            "mode": "forced_fs",
+            "label": "Forced FS",
+            "tone": "warn",
+            "hyprland": fs,
+            "client": fsc,
+            "hyprlandName": h_name,
+            "clientName": c_name,
+            "nativeMatch": False,
+            "detail": f"Hyprland fullscreen · App reports {c_name.lower()}",
+        }
+    if fs == 1 and fsc == 1:
+        return {
+            "mode": "maximized",
+            "label": "Maximized",
+            "tone": "neutral",
+            "hyprland": fs,
+            "client": fsc,
+            "hyprlandName": h_name,
+            "clientName": c_name,
+            "nativeMatch": True,
+            "detail": "Hyprland maximized · App maximized",
+        }
+    if fs == 1:
+        return {
+            "mode": "forced_max",
+            "label": "Maximized",
+            "tone": "neutral",
+            "hyprland": fs,
+            "client": fsc,
+            "hyprlandName": h_name,
+            "clientName": c_name,
+            "nativeMatch": False,
+            "detail": f"Hyprland maximized · App reports {c_name.lower()}",
+        }
+    if fsc == 2:
+        return {
+            "mode": "client_fs",
+            "label": "App FS only",
+            "tone": "warn",
+            "hyprland": fs,
+            "client": fsc,
+            "hyprlandName": h_name,
+            "clientName": c_name,
+            "nativeMatch": False,
+            "detail": "Hyprland windowed · App thinks fullscreen",
+        }
+    return {
+        "mode": "windowed",
+        "label": "Windowed",
+        "tone": "neutral",
+        "hyprland": fs,
+        "client": fsc,
+        "hyprlandName": h_name,
+        "clientName": c_name,
+        "nativeMatch": True,
+        "detail": "Windowed",
+    }
+
+
+def build_scanout_info(monitor, client, ds_option, sidebar_on_monitor, other_overlays):
+    scanout_to = norm_addr(monitor.get("directScanoutTo"))
+    solitary_to = norm_addr(monitor.get("solitary"))
+    ds_blocked = list(monitor.get("directScanoutBlockedBy") or [])
+    sol_blocked = list(monitor.get("solitaryBlockedBy") or [])
+    is_fs = bool(client and int(client.get("fullscreen") or 0) == 2)
+    policy_label = DS_POLICIES.get(ds_option, str(ds_option))
+
+    if scanout_to:
+        return {
+            "state": "active",
+            "label": "Scanout",
+            "tone": "good",
+            "solitary": bool(solitary_to),
+            "policy": ds_option,
+            "policyLabel": policy_label,
+            "blockedBy": [],
+            "solitaryBlockedBy": [],
+            "detail": f"Active direct scanout ({policy_label})",
+        }
+
+    if ds_option == 0 or "USER" in ds_blocked:
+        return {
+            "state": "off",
+            "label": "Scanout off",
+            "tone": "warn" if is_fs else "neutral",
+            "solitary": bool(solitary_to),
+            "policy": ds_option,
+            "policyLabel": policy_label,
+            "blockedBy": ds_blocked,
+            "solitaryBlockedBy": sol_blocked,
+            "detail": "Disabled (render:direct_scanout = 0)",
+        }
+
+    if (
+        is_fs
+        and sidebar_on_monitor
+        and set(ds_blocked) <= {"CANDIDATE"}
+        and set(sol_blocked) <= {"OVERLAYS", "CANDIDATE"}
+    ):
+        extra = ""
+        if other_overlays:
+            extra = f" (+ {', '.join(other_overlays)})"
+        return {
+            "state": "paused_panel",
+            "label": "Scanout · panel",
+            "tone": "info",
+            "solitary": False,
+            "policy": ds_option,
+            "policyLabel": policy_label,
+            "blockedBy": ds_blocked,
+            "solitaryBlockedBy": sol_blocked,
+            "detail": f"Paused by Control Center overlay{extra}",
+        }
+
+    if not is_fs or "WINDOWED" in ds_blocked or "WINDOWED" in sol_blocked:
+        return {
+            "state": "standby",
+            "label": "Scanout idle",
+            "tone": "neutral",
+            "solitary": bool(solitary_to),
+            "policy": ds_option,
+            "policyLabel": policy_label,
+            "blockedBy": ds_blocked,
+            "solitaryBlockedBy": sol_blocked,
+            "detail": f"Standby until fullscreen ({policy_label})",
+        }
+
+    reasons = []
+    ds_real = [r for r in ds_blocked if r != "CANDIDATE"]
+    sol_real = [r for r in sol_blocked if r != "CANDIDATE"]
+    if ds_real:
+        reasons.append(human_blockers(ds_real))
+    elif sol_real:
+        reasons.append(human_blockers(sol_real))
+    elif ds_blocked:
+        reasons.append(human_blockers(ds_blocked))
+    reason_text = "; ".join(reasons) if reasons else "Blocked"
+    return {
+        "state": "blocked",
+        "label": "No scanout",
+        "tone": "bad",
+        "solitary": bool(solitary_to),
+        "policy": ds_option,
+        "policyLabel": policy_label,
+        "blockedBy": ds_blocked,
+        "solitaryBlockedBy": sol_blocked,
+        "detail": f"Blocked: {reason_text}",
+    }
+
+
+def build_gamemode_info(client):
+    if not client:
+        return {
+            "state": "off",
+            "label": "Game off",
+            "tone": "neutral",
+            "hasTag": False,
+            "contentType": "none",
+            "inhibitingIdle": False,
+            "tags": [],
+            "detail": "No active app",
+        }
+    tags = [str(t).rstrip("*") for t in (client.get("tags") or [])]
+    has_tag = "gamemode" in tags
+    ctype = (client.get("contentType") or "none").lower()
+    idle = bool(client.get("inhibitingIdle"))
+
+    if has_tag and ctype == "game":
+        state, label, tone = "active", "Game mode", "good"
+    elif has_tag:
+        state, label, tone = "tag", "Game tag", "good"
+    elif ctype == "game":
+        state, label, tone = "content", "Game content", "info"
+    else:
+        state, label, tone = "off", "Game off", "neutral"
+
+    parts = [f"Content: {ctype}"]
+    parts.append("Tags: " + (", ".join(tags) if tags else "none"))
+    if idle:
+        parts.append("Idle inhibit")
+    return {
+        "state": state,
+        "label": label,
+        "tone": tone,
+        "hasTag": has_tag,
+        "contentType": ctype,
+        "inhibitingIdle": idle,
+        "tags": tags,
+        "detail": " · ".join(parts),
+    }
+
+
+def build_tearing_info(monitor, client, allow_tearing, sidebar_on_monitor):
+    active = bool(monitor.get("activelyTearing"))
+    blocked = list(monitor.get("tearingBlockedBy") or [])
+    tags = [str(t).rstrip("*") for t in ((client or {}).get("tags") or [])]
+    has_tag = "tearing" in tags
+    hint = bool((client or {}).get("tearingHint"))
+    is_fs = bool(client and int(client.get("fullscreen") or 0) == 2)
+
+    if active:
+        return {
+            "state": "active",
+            "label": "Tearing",
+            "tone": "good",
+            "gate": allow_tearing,
+            "hasTag": has_tag,
+            "hint": hint,
+            "blockedBy": [],
+            "detail": "Active immediate page-flips",
+        }
+
+    if has_tag or hint:
+        if is_fs and sidebar_on_monitor and set(blocked) <= {"CANDIDATE", "NOT_TORN"}:
+            return {
+                "state": "paused_panel",
+                "label": "Tear · panel",
+                "tone": "info",
+                "gate": allow_tearing,
+                "hasTag": has_tag,
+                "hint": hint,
+                "blockedBy": blocked,
+                "detail": "Paused by Control Center overlay",
+            }
+        real = [r for r in blocked if r != "NOT_TORN"]
+        reason = human_blockers(real or blocked) or "Waiting for async frame"
+        return {
+            "state": "blocked",
+            "label": "Tear blocked",
+            "tone": "warn",
+            "gate": allow_tearing,
+            "hasTag": has_tag,
+            "hint": hint,
+            "blockedBy": blocked,
+            "detail": f"Armed, blocked: {reason}",
+        }
+
+    if allow_tearing:
+        return {
+            "state": "ready",
+            "label": "Tear ready",
+            "tone": "neutral",
+            "gate": True,
+            "hasTag": False,
+            "hint": False,
+            "blockedBy": blocked,
+            "detail": "Gate on · App not tagged/async",
+        }
+
+    return {
+        "state": "off",
+        "label": "No tear",
+        "tone": "neutral",
+        "gate": False,
+        "hasTag": False,
+        "hint": False,
+        "blockedBy": blocked,
+        "detail": "Synced (tearing gate off)",
+    }
+
+
+def collect(preferred_monitor="", include_proc=True):
+    monitors = run_hyprctl("monitors")
+    clients = run_hyprctl("clients")
+    layers = run_hyprctl("layers")
+    ds_opt = int(run_hyprctl("getoption", "render:direct_scanout").get("int", 0))
+    tear_opt = bool(run_hyprctl("getoption", "general:allow_tearing").get("bool", False))
+    vrr_opt = int(run_hyprctl("getoption", "misc:vrr").get("int", 0))
+
+    mon = pick_monitor(monitors, preferred_monitor)
+    if not mon:
+        return {"available": False, "error": "No active monitor detected"}
+
+    mon_name = mon.get("name") or ""
+    client, ws_name = pick_client(mon, clients)
+    sidebar_on_mon, other_overlays = inspect_layers(layers, mon_name)
+
+    fs_info = build_fullscreen_info(client)
+    scanout_info = build_scanout_info(mon, client, ds_opt, sidebar_on_mon, other_overlays)
+    game_info = build_gamemode_info(client)
+    tear_info = build_tearing_info(mon, client, tear_opt, sidebar_on_mon)
+
+    vrr_active = bool(mon.get("vrr"))
+    vrr_capable = bool((mon.get("hardwareDetails") or {}).get("vrrCapable", True))
+    vrr_info = {
+        "active": vrr_active,
+        "capable": vrr_capable,
+        "policy": vrr_opt,
+        "policyLabel": VRR_POLICIES.get(vrr_opt, str(vrr_opt)),
+        "label": "VRR on" if vrr_active else ("VRR off" if vrr_capable else "No VRR"),
+        "tone": "good" if vrr_active else "neutral",
+    }
+
+    if client:
+        is_xway = bool(client.get("xwayland"))
+        proto_info = {
+            "xwayland": is_xway,
+            "label": "XWayland" if is_xway else "Wayland",
+            "tone": "warn" if is_xway else "info",
+        }
+    else:
+        proto_info = {"xwayland": False, "label": "Wayland", "tone": "neutral"}
+
+    proc_info = inspect_process(int(client.get("pid") or 0)) if (include_proc and client) else {
+        "readable": False,
+        "presentMode": "",
+        "unorderedSubmitsDisabled": None,
+        "lsfgDisabled": False,
+        "lsfgLoaded": False,
+        "vulkanLoaded": False,
+        "sdlDriver": "",
+    }
+
+    # Overall summary tone for the tiny header indicator dot.
+    if not client:
+        overall = "neutral"
+    elif scanout_info["state"] == "active" and fs_info["mode"] == "native_fs":
+        overall = "good"
+    elif scanout_info["state"] == "blocked" or fs_info["tone"] == "warn":
+        overall = "bad" if scanout_info["state"] == "blocked" else "warn"
+    elif scanout_info["state"] == "paused_panel":
+        overall = "info"
+    elif game_info["state"] in ("active", "tag"):
+        overall = "info"
+    else:
+        overall = "neutral"
+
+    other_monitors = [m.get("name") for m in monitors if not m.get("disabled") and m.get("name") != mon_name]
+    panel_tip = ""
+    if scanout_info["state"] == "paused_panel":
+        if other_monitors:
+            panel_tip = f"Panel is over {mon_name}; close Super+N or open it on {other_monitors[0]} for live scanout."
+        else:
+            panel_tip = f"Panel is over {mon_name}; direct scanout resumes as soon as Super+N closes."
+
+    app_name = ""
+    if client:
+        app_name = (client.get("class") or client.get("initialClass") or client.get("title") or "App").strip()
+
+    return {
+        "available": True,
+        "error": "",
+        "overall": overall,
+        "monitor": {
+            "name": mon_name,
+            "shortName": short_monitor_name(mon),
+            "make": mon.get("make") or "",
+            "model": mon.get("model") or "",
+            "width": int(mon.get("width") or 0),
+            "height": int(mon.get("height") or 0),
+            "hz": round(float(mon.get("refreshRate") or 0)),
+            "workspace": str(ws_name),
+            "format": mon.get("currentFormat") or "",
+            "hwCursor": bool(mon.get("hardwareCursorsInUse")),
+            "sidebarOnMonitor": sidebar_on_mon,
+        },
+        "app": {
+            "present": bool(client),
+            "name": app_name if client else "No active app",
+            "title": (client.get("title") or "").strip() if client else "",
+            "pid": int(client.get("pid") or 0) if client else 0,
+            "floating": bool(client.get("floating")) if client else False,
+        },
+        "fullscreen": fs_info,
+        "scanout": scanout_info,
+        "vrr": vrr_info,
+        "gamemode": game_info,
+        "protocol": proto_info,
+        "tearing": tear_info,
+        "process": proc_info,
+        "tip": panel_tip,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Read-only Hyprland display presentation status")
+    parser.add_argument("--monitor", default="", help="Output name or make/model filter (default: auto AOC)")
+    parser.add_argument("--no-proc", action="store_true", help="Skip /proc/<pid> Vulkan/WSI inspection")
+    args = parser.parse_args()
+    try:
+        payload = collect(preferred_monitor=args.monitor, include_proc=not args.no_proc)
+    except Exception as exc:
+        payload = {"available": False, "error": str(exc)}
+    json.dump(payload, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()
